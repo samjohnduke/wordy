@@ -40,6 +40,40 @@ export function magicLinkEmail({ to, url }: { to: string; url: string }): Mail {
   return { to, subject, text, html };
 }
 
+export function invitationEmail(input: {
+  to: string;
+  url: string;
+  projectName: string;
+  inviterEmail: string;
+  role: "editor" | "reader";
+}): Mail {
+  const project = input.projectName.trim() || "a project";
+  const verb = input.role === "editor" ? "edit" : "read";
+  const subject = `${input.inviterEmail} shared "${project}" with you on Wordy`;
+  const text = [
+    `${input.inviterEmail} invited you to ${verb} "${project}" in Wordy.`,
+    "",
+    "Open this link to accept:",
+    "",
+    input.url,
+    "",
+    "If you do not have a Wordy account yet, the link creates one for this address.",
+    `The invitation expires in ${INVITATION_DAYS_TEXT}. If you were not expecting it, ignore this email.`,
+  ].join("\n");
+  const html = layout(
+    subject,
+    `<p><strong>${escapeHtml(input.inviterEmail)}</strong> invited you to ${verb}
+     <strong>${escapeHtml(project)}</strong> in Wordy. You will need the app to open it;
+     accepting here adds it to your account.</p>
+     <p><a href="${escapeAttr(input.url)}" style="${button}">Accept the invitation</a></p>
+     <p style="color:#6e685c;font-size:14px">No Wordy account yet? The link creates one for this address.
+     The invitation expires in ${INVITATION_DAYS_TEXT}. If you were not expecting it, ignore this email.</p>`,
+  );
+  return { to: input.to, subject, text, html };
+}
+
+const INVITATION_DAYS_TEXT = "7 days";
+
 const button =
   "display:inline-block;padding:10px 20px;border-radius:999px;background:#9b2f2f;color:#fbf7ef;text-decoration:none;font-weight:600";
 

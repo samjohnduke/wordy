@@ -85,6 +85,7 @@ pnpm dev                                # http://localhost:4321
 pnpm preview                            # production build served by wrangler dev
 pnpm test:e2e                           # headless Chromium walk-through against :8787
 pnpm test:e2e:room                      # project rooms over websockets against :8787
+pnpm test:e2e:share                     # invitations, roles and removal against :8787
 pnpm deploy                             # astro build && wrangler deploy
 ```
 
@@ -104,6 +105,13 @@ and the project keeps working offline (changes go up on reconnect). `cloud.json`
 project folder holds the switch and the sync position. The Rust client is
 `wordy-sync::cloud`; its tests run against a local `wrangler dev --port 8787` and skip
 when there is none.
+
+Sharing happens on the website: under Account, each synced project lists its members, and
+the owner can invite an address as an editor or a reader. The emailed link signs the
+invitee in, or creates their account (with a passkey) if they are new, and adds the
+project to their account; a linked machine then opens it like any of its own. Readers
+see every change live but their own edits stay on their machine; the owner can change a
+role or remove someone at any time, and open connections follow suit immediately.
 
 ## Data on disk
 

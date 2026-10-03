@@ -837,9 +837,14 @@ impl HomePanel {
                             false,
                         ),
                         CloudSyncStatus::Connecting => ("Connecting to the server…".to_string(), false),
-                        CloudSyncStatus::Live { devices, pending } => (
+                        CloudSyncStatus::Live {
+                            devices,
+                            pending,
+                            read_only,
+                        } => (
                             format!(
-                                "Live: {} {} here{}.",
+                                "Live{}: {} {} here{}.",
+                                if *read_only { " (read-only: shared with you as a reader)" } else { "" },
                                 devices,
                                 if *devices == 1 { "machine" } else { "machines" },
                                 if *pending { ", changes on their way" } else { "" }

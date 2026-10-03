@@ -249,6 +249,22 @@ export class ProjectRoom extends Server<Env> {
     return null;
   }
 
+  /**
+   * RPC from the Worker: a member's role changed (or, with `null`, they were
+   * removed). Their open connections learn it at once.
+   */
+  async memberChanged(userId: string, role: Identity["role"] | null) {
+    for (const c of this.getConnections<State>()) {
+      if (c.state?.userId !== userId) continue;
+      if (role === null) {
+        this.fail(c, "you no longer have access to this project", 4403);
+      } else {
+        c.setState({ ...c.state, role });
+        this.send(c, { t: "role", role });
+      }
+    }
+  }
+
   /** RPC: numbers for the account page. */
   async summary() {
     const stats = this.logStats();

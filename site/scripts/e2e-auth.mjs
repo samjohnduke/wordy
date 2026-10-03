@@ -12,11 +12,16 @@ import { join } from "node:path";
 
 // `node scripts/e2e-auth.mjs --approve <user_code>` only creates a fresh
 // account with a passkey and approves that device code, for the Rust
-// client's test (crates/wordy-sync/tests/cloud.rs).
-const APPROVE = process.argv[2] === "--approve" ? process.argv[3] : null;
+// client's test (crates/wordy-sync/tests/cloud.rs). With `--invite <url>`
+// the account is created from an invitation link instead (and joins the
+// project), for scripts/e2e-share.mjs; `--approve` may follow it.
+const args = process.argv.slice(2);
+const flag = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : null);
+const APPROVE = flag("--approve");
+const INVITE = flag("--invite");
 const BASE = process.env.E2E_BASE ?? "http://localhost:8787";
 const CHROME = process.env.CHROME ?? "chromium";
-const EMAIL = `e2e-${Date.now()}@example.test`;
+let EMAIL = `e2e-${Date.now()}@example.test`;
 const MAIL_DIR = join(process.cwd(), ".wrangler", "tmp", "email");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -174,10 +179,21 @@ try {
     },
   });
 
-  step(`sign-up link for ${EMAIL}`);
   const t0 = Date.now();
-  let r = await api("/api/auth/sign-in/magic-link", { body: { email: EMAIL, callbackURL: "/account/passkey" } });
-  assert(r.status === 200, `magic link request: ${r.status} ${r.text}`);
+  let r;
+  if (INVITE) {
+    step("open the invitation as a stranger: it offers to create the account");
+    await page.goto(INVITE);
+    await page.waitFor(`document.querySelector('button[type=submit]')?.innerText.includes('Create my account')`);
+    EMAIL = (await page.eval(`document.querySelector('main').innerText`)).match(/invited (\S+@\S+) to/)?.[1];
+    assert(EMAIL, "invited address not shown");
+    await page.eval(`document.querySelector('form button[type=submit]').click()`);
+    await page.waitFor(`document.body.innerText.includes('Check your email')`);
+  } else {
+    step(`sign-up link for ${EMAIL}`);
+    r = await api("/api/auth/sign-in/magic-link", { body: { email: EMAIL, callbackURL: "/account/passkey" } });
+    assert(r.status === 200, `magic link request: ${r.status} ${r.text}`);
+  }
   let mail = null;
   for (let i = 0; i < 50 && !mail; i++) {
     mail = newestMail(t0 - 1000);
@@ -190,16 +206,32 @@ try {
   step("open the link: lands on the passkey set-up page");
   await page.goto(link);
   await page.waitFor("location.pathname === '/account/passkey'");
+  if (INVITE) {
+    assert((await page.eval("location.search")).includes("next=%2Finvite%2F"), "passkey page lost the way back");
+  }
 
-  step("gate: /account redirects back to passkey set-up until one exists");
-  await page.goto(BASE + "/account");
-  assert((await page.path()) === "/account/passkey", "gate did not redirect");
+  if (!INVITE) {
+    step("gate: /account redirects back to passkey set-up until one exists");
+    await page.goto(BASE + "/account");
+    assert((await page.path()) === "/account/passkey", "gate did not redirect");
+  }
 
   step("register the first passkey");
   await page.eval(`document.querySelector('#add-passkey input[name=name]').value = 'E2E key'`);
   await page.eval(`document.querySelector('#add-passkey button[type=submit]').click()`);
-  await page.waitFor("location.pathname === '/account'");
-  assert(await page.eval(`document.body.innerText.includes('E2E key')`), "passkey not listed");
+  if (INVITE) {
+    step("back on the invitation, signed in: join");
+    await page.waitFor("location.pathname.startsWith('/invite/')");
+    await page.eval(`document.querySelector('form button[type=submit]').click()`);
+    await page.waitFor(`document.body.innerText.includes('You are in')`);
+    await page.goto(BASE + "/account");
+    const text = await page.eval(`document.querySelector('main').innerText`);
+    assert(/you are (a reader|an editor)/.test(text), `project not listed on the account page:\n${text}`);
+    console.log(`joined as ${EMAIL}`);
+  } else {
+    await page.waitFor("location.pathname === '/account'");
+    assert(await page.eval(`document.body.innerText.includes('E2E key')`), "passkey not listed");
+  }
 
   if (APPROVE) {
     step(`approve device code ${APPROVE}`);

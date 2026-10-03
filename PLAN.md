@@ -572,8 +572,36 @@ attachment, a 700 KiB update over HTTP, compaction, replay from the base, a rese
 stranger's refusal. The in-app behaviour was checked by building; the two-machine
 walk-through goes into `docs/sync-test.md` with the next release.)*
 
-### Phase 17 — Sharing (planned)
+### Phase 17 — Sharing (2026-10-04)
 
-- Projects and memberships in D1 with roles owner, editor, reader. Invitations by email;
-  the link doubles as sign-up. Readers connect and pull but the room rejects their
-  pushes. Account page lists projects and members.
+- Roles: the device that first syncs a project owns it; the owner can invite anyone by
+  email as an *editor* or a *reader*. Ownership never moves, and the owner cannot leave
+  their own project.
+- Invitations (`site/migrations/0003_invitations.sql`): a random token, stored hashed,
+  good for seven days; a new invitation to the same address replaces the old one. The
+  email (`invitationEmail`) links to `/invite/<token>`, which does the right thing for
+  whoever opens it: signed in as the invited address → "Join"; signed in as someone else
+  → sign out first; a known address → passkey sign-in; a new address → one button sends
+  the one-time account link, whose passkey step (`/account/passkey?next=…`) returns to
+  the invitation. Used, withdrawn and expired links say so.
+- Server (`site/src/server/sharing.ts` over `projects.ts`): invite, accept, change role,
+  remove, leave and withdraw, each telling the project's room: an open connection of
+  that account gets a `role` message and its new permissions at once, or is closed with
+  4403 and refused on reconnect. The room already dropped a reader's pushes, words and
+  asset announcements; the app now skips them too and shows "cloud read-only".
+- API for the app: `GET /api/projects/:id/members` (members, plus pending invitations for
+  the owner), `POST /api/projects/:id/invitations`, `DELETE …/invitations/:id`,
+  `PATCH /api/projects/:id/members/:userId` (role) and `DELETE …/members/:userId`
+  (owner removing, or oneself leaving). The web account page uses the same helpers: a
+  card per project with the members, their roles, pending invitations, an invite form
+  for owners and "Leave" for everyone else.
+- Not done: the app has no sharing UI of its own (it shows role and read-only state; the
+  website does the inviting), shared projects are not offered in the app's Open dialog
+  until the device has a copy, and there is no notification email on removal.
+- *(manual)* Apply migration `0003` remotely before deploying.
+
+**Accept:** an invited address with no account ends up with a passkey and the project on
+its account; a reader sees edits live but its own stay local; an editor's go through;
+removal cuts the connection. *(Done: `site/scripts/e2e-share.mjs` drives the whole thing
+against the local server, with the invitee's sign-up in headless Chromium through
+`e2e-auth.mjs --invite`.)*

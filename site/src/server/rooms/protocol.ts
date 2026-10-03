@@ -68,6 +68,8 @@ export type ServerMsg =
   /** A snapshot became the new base; older updates are gone. */
   | { t: "base_moved"; base: number }
   | { t: "presence"; devices: { device: string; name: string }[] }
+  /** The owner changed what you may do here. */
+  | { t: "role"; role: Identity["role"] }
   | { t: "pong" }
   | { t: "error"; message: string };
 

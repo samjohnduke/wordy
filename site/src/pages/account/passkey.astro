@@ -6,6 +6,9 @@ export const prerender = false;
 if (!Astro.locals.session) return Astro.redirect("/login?callbackURL=%2Faccount%2Fpasskey");
 const first = !Astro.locals.hasPasskey;
 const email = Astro.locals.user?.email ?? "";
+// Where to go afterwards, e.g. back to an invitation.
+const rawNext = Astro.url.searchParams.get("next");
+const next = rawNext && rawNext.startsWith("/") && !rawNext.startsWith("//") ? rawNext : "/account";
 ---
 
 <Base title={first ? "Add your passkey" : "Add a passkey"} description="Register a passkey for your Wordy account.">
@@ -23,7 +26,7 @@ const email = Astro.locals.user?.email ?? "";
           <p>Add another passkey, for example on a second device or a hardware key.</p>
         )
       }
-      <form id="add-passkey" novalidate>
+      <form id="add-passkey" novalidate data-next={next}>
         <label>
           <span>Name (optional)</span>
           <input type="text" name="name" placeholder="MacBook, YubiKey, phone…" maxlength="60" />
@@ -43,5 +46,5 @@ const email = Astro.locals.user?.email ?? "";
   import { bindAddPasskey } from "~/scripts/auth-client";
   const form = document.getElementById("add-passkey") as HTMLFormElement | null;
   const status = document.getElementById("passkey-status");
-  if (form && status) bindAddPasskey(form, status, "/account");
+  if (form && status) bindAddPasskey(form, status, form.dataset.next || "/account");
 </script>

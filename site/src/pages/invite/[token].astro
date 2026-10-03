@@ -1,0 +1,138 @@
+---
+// The link from an invitation email. Signed in as the invited address: join.
+// Not signed in: sign in with a passkey, or for a new address, get a one-time
+// link that creates the account (then its passkey) and comes back here.
+import Base from "~/layouts/Base.astro";
+import { getAuth } from "~/server/auth";
+import { invitationByToken } from "~/server/projects";
+import { acceptByToken, invitationIsFor, ShareError } from "~/server/sharing";
+import { emailHasPasskey } from "~/server/users";
+
+export const prerender = false;
+
+const token = Astro.params.token ?? "";
+const here = `/invite/${token}`;
+const { user, session, hasPasskey } = Astro.locals;
+if (session && !hasPasskey) return Astro.redirect(`/account/passkey?next=${encodeURIComponent(here)}`);
+
+const view = await invitationByToken(token);
+let error: string | null = null;
+let joined: { name: string; role: string } | null = null;
+let sent = false;
+
+if (view && Astro.request.method === "POST") {
+  const data = await Astro.request.formData();
+  const action = data.get("action");
+  try {
+    if (action === "accept" && user) {
+      const m = await acceptByToken(token, user);
+      joined = { name: m.project.name, role: m.role };
+    } else if (action === "send-link" && !session) {
+      await getAuth().api.signInMagicLink({
+        body: { email: view.invitation.email, callbackURL: here, newUserCallbackURL: here },
+        headers: Astro.request.headers,
+      });
+      sent = true;
+    }
+  } catch (err) {
+    error = err instanceof ShareError ? err.message : err instanceof Error ? err.message : "Something went wrong.";
+  }
+}
+
+const projectName = view?.project.name.trim() || "Untitled project";
+const verb = view?.invitation.role === "editor" ? "edit" : "read";
+const mine = !!(view && user && invitationIsFor(view, user.email));
+const hasAccount = view && !session ? await emailHasPasskey(view.invitation.email) : false;
+---
+
+<Base title="Project invitation" description="Join a Wordy project someone shared with you.">
+  <section class="wrap section narrow">
+    <p class="eyebrow">Sharing</p>
+    <h1>{view ? projectName : "Invitation"}</h1>
+    <div class="card">
+      {
+        !view ? (
+          <p>This invitation link is not valid. Ask for a new one.</p>
+        ) : joined ? (
+          <>
+            <p>
+              You are in. <strong>{joined.name.trim() || "The project"}</strong> is now on your account as{" "}
+              {joined.role === "editor" ? "an editor" : "a reader"}. Open Wordy on a linked machine and it appears under
+              Open.
+            </p>
+            <p>
+              <a href="/account">Your projects</a>
+            </p>
+          </>
+        ) : view.problem === "expired" ? (
+          <p>This invitation has expired. Ask {view.inviterEmail} to send another.</p>
+        ) : view.problem === "accepted" ? (
+          <p>
+            This invitation was already used. If it was you, the project is on <a href="/account">your account</a>.
+          </p>
+        ) : (
+          <>
+            <p>
+              <strong>{view.inviterEmail}</strong> invited <strong>{view.invitation.email}</strong> to {verb}{" "}
+              <strong>{projectName}</strong>.
+            </p>
+            {error && <p class="error">{error}</p>}
+            {
+              user && mine ? (
+                <form method="POST">
+                  <input type="hidden" name="action" value="accept" />
+                  <button class="btn btn-primary" type="submit">
+                    Join as {view.invitation.role}
+                  </button>
+                </form>
+              ) : user ? (
+                <p>
+                  You are signed in as <strong>{user.email}</strong>, which is not the invited address.{" "}
+                  <form method="POST" action="/logout" style="display:inline">
+                    <button class="link" type="submit">
+                      Sign out
+                    </button>
+                  </form>{" "}
+                  and come back as {view.invitation.email}.
+                </p>
+              ) : sent ? (
+                <p>
+                  Check your email: we sent a link to {view.invitation.email} that creates your account and brings you
+                  back here. It works once and expires in 15 minutes.
+                </p>
+              ) : hasAccount ? (
+                <>
+                  <p>Sign in to accept.</p>
+                  <button id="passkey-signin" class="btn btn-primary" type="button">
+                    Sign in with a passkey
+                  </button>
+                  <p id="passkey-status" class="muted status" aria-live="polite" />
+                </>
+              ) : (
+                <>
+                  <p>
+                    There is no Wordy account for this address yet. We will email you a one-time link; it creates the
+                    account, adds a passkey, and brings you back here to join.
+                  </p>
+                  <form method="POST">
+                    <input type="hidden" name="action" value="send-link" />
+                    <button class="btn btn-primary" type="submit">
+                      Create my account
+                    </button>
+                  </form>
+                </>
+              )
+            }
+          </>
+        )
+      }
+    </div>
+  </section>
+</Base>
+
+<script>
+  import { bindPasskeySignIn } from "~/scripts/auth-client";
+  const button = document.getElementById("passkey-signin") as HTMLButtonElement | null;
+  const status = document.getElementById("passkey-status");
+  if (button && status) bindPasskeySignIn(button, status, location.pathname);
+</script>

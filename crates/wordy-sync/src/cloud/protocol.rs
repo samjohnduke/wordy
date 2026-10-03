@@ -92,6 +92,10 @@ pub enum ServerMsg {
     Presence {
         devices: Vec<PresenceEntry>,
     },
+    /// The owner changed what this account may do in the project.
+    Role {
+        role: String,
+    },
     Pong,
     Error {
         message: String,
@@ -139,6 +143,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<ServerMsg>(r#"{"t":"pong"}"#).unwrap(),
             ServerMsg::Pong
+        );
+        assert_eq!(
+            serde_json::from_str::<ServerMsg>(r#"{"t":"role","role":"editor"}"#).unwrap(),
+            ServerMsg::Role { role: "editor".into() }
         );
     }
 

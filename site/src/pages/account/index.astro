@@ -3,6 +3,8 @@ import Base from "~/layouts/Base.astro";
 import { getAuth } from "~/server/auth";
 import { listDevices, revokeDevice } from "~/server/devices";
 import { countPasskeys } from "~/server/users";
+import { cleanEmail, isGrantableRole, listInvitations, listMembers, listProjects, membership } from "~/server/projects";
+import { changeRole, deleteInvitationFor, inviteByEmail, removeMember, ShareError } from "~/server/sharing";
 import { formatDate } from "~/lib/releases";
 
 export const prerender = false;
@@ -27,18 +29,50 @@ if (Astro.request.method === "POST") {
       }
     } else if (action === "revoke-device") {
       notice = (await revokeDevice(user.id, id)) ? "Device unlinked." : "That device was already gone.";
+    } else if (typeof action === "string" && action.startsWith("project-")) {
+      const project = await membership(String(data.get("project") ?? ""), user.id);
+      if (!project) throw new ShareError("Not your project.", 403);
+      const role = data.get("role");
+      if (action === "project-invite") {
+        const email = cleanEmail(data.get("email"));
+        if (!email) throw new ShareError("Enter an email address.");
+        if (!isGrantableRole(role)) throw new ShareError("Pick a role.");
+        await inviteByEmail({ project, by: user, email, role });
+        notice = `Invitation sent to ${email}.`;
+      } else if (action === "project-role") {
+        if (!isGrantableRole(role)) throw new ShareError("Pick a role.");
+        await changeRole(project, id, role);
+        notice = "Role changed.";
+      } else if (action === "project-remove") {
+        await removeMember(project, id, user.id);
+        notice = "Removed from the project.";
+      } else if (action === "project-leave") {
+        await removeMember(project, user.id, user.id);
+        notice = "You left the project.";
+      } else if (action === "project-uninvite") {
+        notice = (await deleteInvitationFor(project, id)) ? "Invitation withdrawn." : "That invitation was already gone.";
+      }
     }
   } catch (err) {
     error = err instanceof Error ? err.message : "Something went wrong.";
   }
 }
 
+const projects = await Promise.all(
+  (await listProjects(user.id)).map(async (m) => ({
+    ...m,
+    members: await listMembers(m.project.id),
+    invitations: m.role === "owner" ? await listInvitations(m.project.id) : [],
+  })),
+);
+const projectTitle = (name: string) => name.trim() || "Untitled project";
+
 const passkeys = await getAuth().api.listPasskeys({ headers: Astro.request.headers });
 const devices = await listDevices(user.id, session.id);
 const when = (iso: string | Date | null | undefined) => (iso ? formatDate(new Date(iso)) : "");
 ---
 
-<Base title="Account" description="Your Wordy account: passkeys and linked devices.">
+<Base title="Account" description="Your Wordy account: passkeys, linked devices and shared projects.">
   <section class="wrap section narrow">
     <p class="eyebrow">Account</p>
     <h1>{user.email}</h1>
@@ -101,9 +135,161 @@ const when = (iso: string | Date | null | undefined) => (iso ? formatDate(new Da
       )
     }
 
+    <h2>Projects</h2>
+    <p class="muted">
+      Projects synced to the cloud from a linked device. Owners can share one by email; editors
+      change it from their own copy of Wordy, readers only follow along.
+    </p>
+    {
+      projects.length === 0 ? (
+        <p class="card">Nothing synced yet. In Wordy, open a project and choose "Sync this project" under Account.</p>
+      ) : (
+        projects.map((p) => (
+          <div class="card project">
+            <div class="project-head">
+              <div>
+                <strong>{projectTitle(p.project.name)}</strong>
+                <span class="muted small">
+                  {" "}
+                  · you are {p.role === "owner" ? "the owner" : p.role === "editor" ? "an editor" : "a reader"} · last
+                  activity {when(p.project.updatedAt)}
+                </span>
+              </div>
+              {p.role !== "owner" && (
+                <form method="POST">
+                  <input type="hidden" name="action" value="project-leave" />
+                  <input type="hidden" name="project" value={p.project.id} />
+                  <button class="link" type="submit">
+                    Leave
+                  </button>
+                </form>
+              )}
+            </div>
+            <ul class="rows">
+              {p.members.map((m) => (
+                <li>
+                  <div>
+                    <strong>{m.email}</strong>
+                    <span class="muted small">
+                      {m.role}
+                      {m.userId === user.id ? " · you" : ""}
+                    </span>
+                  </div>
+                  {p.role === "owner" && m.role !== "owner" && (
+                    <div class="member-actions">
+                      <form method="POST">
+                        <input type="hidden" name="action" value="project-role" />
+                        <input type="hidden" name="project" value={p.project.id} />
+                        <input type="hidden" name="id" value={m.userId} />
+                        <select name="role" aria-label="Role">
+                          <option value="editor" selected={m.role === "editor"}>
+                            editor
+                          </option>
+                          <option value="reader" selected={m.role === "reader"}>
+                            reader
+                          </option>
+                        </select>
+                        <button class="link" type="submit">
+                          Change
+                        </button>
+                      </form>
+                      <form method="POST">
+                        <input type="hidden" name="action" value="project-remove" />
+                        <input type="hidden" name="project" value={p.project.id} />
+                        <input type="hidden" name="id" value={m.userId} />
+                        <button class="link" type="submit">
+                          Remove
+                        </button>
+                      </form>
+                    </div>
+                  )}
+                </li>
+              ))}
+              {p.invitations.map((i) => (
+                <li>
+                  <div>
+                    <strong>{i.email}</strong>
+                    <span class="muted small">
+                      invited as {i.role} · expires {when(i.expiresAt)}
+                    </span>
+                  </div>
+                  <form method="POST">
+                    <input type="hidden" name="action" value="project-uninvite" />
+                    <input type="hidden" name="project" value={p.project.id} />
+                    <input type="hidden" name="id" value={i.id} />
+                    <button class="link" type="submit">
+                      Withdraw
+                    </button>
+                  </form>
+                </li>
+              ))}
+            </ul>
+            {p.role === "owner" && (
+              <form method="POST" class="invite" novalidate>
+                <input type="hidden" name="action" value="project-invite" />
+                <input type="hidden" name="project" value={p.project.id} />
+                <input type="email" name="email" placeholder="name@example.com" aria-label="Email" required />
+                <select name="role" aria-label="Role">
+                  <option value="editor">editor</option>
+                  <option value="reader">reader</option>
+                </select>
+                <button class="btn btn-secondary" type="submit">
+                  Invite
+                </button>
+              </form>
+            )}
+          </div>
+        ))
+      )
+    }
+
     <h2>Session</h2>
     <form method="POST" action="/logout">
       <button class="btn btn-secondary" type="submit">Sign out of this browser</button>
     </form>
   </section>
 </Base>
+
+<style>
+  .project {
+    margin-bottom: 1rem;
+  }
+  .project .rows {
+    margin: 0.8rem 0;
+  }
+  .project-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+  }
+  .member-actions {
+    display: flex;
+    gap: 0.8rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .member-actions form {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+  }
+  .invite {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .invite input[type="email"] {
+    flex: 1 1 14rem;
+    width: auto;
+  }
+  select {
+    font: inherit;
+    color: var(--ink);
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 0.5rem 0.6rem;
+  }
+</style>

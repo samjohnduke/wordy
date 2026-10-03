@@ -52,6 +52,8 @@ pub enum CloudSyncStatus {
         devices: usize,
         /// Something is still on its way up or down.
         pending: bool,
+        /// Shared with this account as a reader: edits stay local.
+        read_only: bool,
     },
     /// The socket is down; the room keeps retrying.
     Offline(String),
@@ -112,7 +114,13 @@ impl CloudSync {
         CloudSyncStatus::Live {
             devices: self.presence.len().max(1),
             pending: !self.in_flight.is_empty() || !self.pending.is_empty(),
+            read_only: !self.writer(),
         }
+    }
+
+    /// Readers pull but never push; the room would close on them.
+    fn writer(&self) -> bool {
+        self.role != "reader"
     }
 }
 
@@ -661,6 +669,7 @@ impl SyncManager {
             CloudSyncStatus::Off => return None,
             CloudSyncStatus::Connecting => "cloud connecting",
             CloudSyncStatus::Live { pending: true, .. } => "cloud syncing",
+            CloudSyncStatus::Live { read_only: true, .. } => "cloud read-only",
             CloudSyncStatus::Live { .. } => "cloud live",
             CloudSyncStatus::Offline(_) => "cloud offline",
             CloudSyncStatus::Failed(_) => "cloud stopped",
@@ -810,6 +819,10 @@ impl SyncManager {
                 }
             }
             RoomEvent::Presence(names) => c.presence = names,
+            RoomEvent::Role(role) => {
+                c.role = role;
+                self.push_cloud();
+            }
             RoomEvent::Warning(w) => tracing::warn!("cloud: {w}"),
             RoomEvent::Disconnected {
                 reason,
@@ -913,7 +926,7 @@ impl SyncManager {
     /// no-op while the replay is still coming in or remote edits wait.
     pub fn push_cloud(&mut self) {
         let Some(c) = self.cloud.as_mut() else { return };
-        if !c.synced || !c.pending.is_empty() {
+        if !c.synced || !c.pending.is_empty() || !c.writer() {
             return;
         }
         let doc = &self.project.project.doc;
@@ -945,7 +958,7 @@ impl SyncManager {
     /// past the thresholds and everything is settled on both sides.
     fn maybe_compact(&mut self) {
         let Some(c) = self.cloud.as_mut() else { return };
-        if !c.synced || !c.in_flight.is_empty() || !c.pending.is_empty() || c.log_count < 2 {
+        if !c.synced || !c.in_flight.is_empty() || !c.pending.is_empty() || c.log_count < 2 || !c.writer() {
             return;
         }
         let bytes_limit = COMPACT_BYTES.max(2 * c.base_bytes);

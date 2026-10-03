@@ -69,6 +69,8 @@ pub enum RoomEvent {
     },
     /// Our push was stored under this sequence number.
     Pushed(u64),
+    /// The owner changed our role while we were connected.
+    Role(String),
     /// Words other devices added (or the room's whole list on connect).
     Dictionary(Vec<String>),
     /// Files that changed under `assets/` because of the room.
@@ -527,6 +529,11 @@ impl Conn<'_> {
             }
             ServerMsg::Presence { devices } => {
                 self.emit(RoomEvent::Presence(devices.into_iter().map(|d| d.name).collect()));
+            }
+            ServerMsg::Role { role } => {
+                tracing::info!("room {}: now {role}", self.opts.project_id);
+                self.role = role.clone();
+                self.emit(RoomEvent::Role(role));
             }
             ServerMsg::Pong => self.ping_sent = None,
             ServerMsg::Error { message } => bail!("server: {message}"),
