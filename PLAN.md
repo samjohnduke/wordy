@@ -24,8 +24,10 @@ docx/pdf/epub export, LAN sync).
 **Non-goals**
 - Windows, mobile, web, collaboration with other people, plugins, themes beyond light/dark,
   inline images, tables, nested lists, footnotes, Scrivener import, public roadmap.
-  (A public website with downloads and a changelog was added in Phase 14; the app itself
-  stays single-user and offline.)
+  (A public website with downloads and a changelog was added in Phase 14. Phases 15–17
+  add accounts and cloud sync, so "collaboration with other people" stops being a
+  non-goal there; the web still gets no editor, only account pages, and the app keeps
+  working fully offline.)
 
 ---
 
@@ -484,3 +486,61 @@ roughly half the effort.
 2026-10-04 with headless Chromium at desktop, mobile and dark); release.yml parses and the
 tarball layout matches what `install.sh` expects.
 
+### Phase 15 — Accounts, passkeys and device linking (2026-10-04)
+
+Cloud sync needs identities first. The site Worker grows server-rendered account pages
+and an auth API; the app learns to link itself to an account.
+
+- better-auth on D1 (`DB` binding, migrations in `site/migrations`), plugins: magic link
+  (first sign-in only), `@better-auth/passkey`, bearer tokens, device authorization.
+  `BETTER_AUTH_SECRET` is a Worker secret; `SITE_URL` and `EMAIL_FROM` are vars.
+- Email goes through the Cloudflare `send_email` binding (`EMAIL`). Local `wrangler dev`
+  writes outgoing mail to `.wrangler/` instead of sending, which the tests read.
+- Sign-in policy: an email link is accepted only for an address with no passkey yet. Once
+  a passkey exists the account is passkeys-only; the login page offers nothing else. A
+  session without a passkey can only reach the passkey set-up page. Losing every passkey
+  means deleting the account's passkey rows by hand (`wrangler d1 execute`); there is no
+  email recovery on purpose.
+- Pages (`prerender = false`): `/login`, `/account` (passkeys, devices, sign out),
+  `/account/passkey` (first passkey), `/device` (approve a code), `/api/auth/*`,
+  `/api/devices` (register and list devices for a bearer session). A `device` table
+  records name, platform and last-seen per session so the account page can list and
+  revoke machines.
+- App: the Sync page gains an Account card. "Link this machine" runs the device-code flow
+  in `wordy-sync::cloud` (ureq over rustls, blocking, on its own thread), opens the browser
+  at `/device?user_code=…`, polls `/api/auth/device/token`, registers the device, and
+  stores the bearer token in `sync.json` (mode 0600). The card lists the account's
+  machines (remove the others), refreshes quietly at launch, drops the token when the
+  server answers 401, and Unlink signs the session out. The server field is editable until
+  linked (defaults to `https://wordy.samduke.dev`).
+- *(manual)* Create the D1 database and apply migrations remotely, set the secret, verify a
+  sender address for Email Sending, deploy.
+
+**Accept:** a CDP script against `wrangler dev` with a virtual authenticator walks sign-up
+by email, passkey registration, sign-out, passkey sign-in, device approval and device
+registration; `pnpm check` clean; `cargo test` passes for the cloud client against the
+local server. *(Done: `pnpm test:e2e` and `crates/wordy-sync/tests/cloud.rs`, the latter
+skipping without a local server; its `full_link_flow` test has the browser script approve
+the code with a virtual authenticator, so the app's client is covered end to end.)*
+
+### Phase 16 — Project rooms and live sync (planned)
+
+- One Durable Object per project (`ProjectRoom`, partyserver with hibernation). SQLite
+  storage holds the ordered update log, head and base sequence numbers, the merged version
+  vector as a JSON map, the asset manifest, the dictionary and per-device last-seen
+  sequence numbers. R2 (`PROJECTS`) holds full snapshots and content-addressed assets.
+  The server never runs Loro.
+- The Worker authenticates the websocket upgrade with the device's bearer token, checks
+  membership in D1 and forwards an identity header to the room.
+- Websocket protocol: JSON control frames (`hello`, `welcome`, `update`, `snapshot`,
+  `base_moved`, `dictionary`, `presence`) with binary Loro payloads; assets over HTTP.
+- App: a cloud thread per open project keeps the socket, pushes updates after each
+  autosave, and applies remote updates after a short idle gap using Loro cursors to keep
+  the caret stable. Compaction uploads a shallow snapshot as the new base; devices behind
+  it back up and replace their copy.
+
+### Phase 17 — Sharing (planned)
+
+- Projects and memberships in D1 with roles owner, editor, reader. Invitations by email;
+  the link doubles as sign-up. Readers connect and pull but the room rejects their
+  pushes. Account page lists projects and members.

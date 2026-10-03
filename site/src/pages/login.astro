@@ -1,0 +1,90 @@
+---
+import Base from "~/layouts/Base.astro";
+import { getAuth } from "~/server/auth";
+
+export const prerender = false;
+
+const callbackURL = safeNext(Astro.url.searchParams.get("callbackURL"));
+const sent = Astro.url.searchParams.get("sent") === "1";
+let error: string | null = null;
+let email = "";
+
+if (Astro.locals.session) return Astro.redirect(callbackURL);
+
+if (Astro.request.method === "POST") {
+  const data = await Astro.request.formData();
+  email = String(data.get("email") ?? "").trim().toLowerCase();
+  if (!email.includes("@")) {
+    error = "Enter your email address.";
+  } else {
+    try {
+      await getAuth().api.signInMagicLink({
+        body: { email, callbackURL: "/account/passkey", newUserCallbackURL: "/account/passkey" },
+        headers: Astro.request.headers,
+      });
+      const q = new URLSearchParams({ sent: "1" });
+      if (callbackURL !== "/account") q.set("callbackURL", callbackURL);
+      return Astro.redirect(`/login?${q}`);
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Something went wrong.";
+    }
+  }
+}
+
+function safeNext(raw: string | null): string {
+  if (!raw || !raw.startsWith("/") || raw.startsWith("//")) return "/account";
+  return raw;
+}
+---
+
+<Base title="Sign in" description="Sign in to your Wordy account with a passkey.">
+  <section class="wrap section narrow">
+    <p class="eyebrow">Account</p>
+    <h1>Sign in</h1>
+    {
+      sent ? (
+        <div class="card">
+          <h2>Check your email</h2>
+          <p>
+            We sent a link to finish creating your account. It works once and expires in 15
+            minutes. The next step adds a passkey, which is how you will sign in from then on.
+          </p>
+          <p class="muted">Nothing arrived? Check spam, then <a href="/login">try again</a>.</p>
+        </div>
+      ) : (
+        <div class="grid">
+          <div class="card">
+            <h2>Have an account?</h2>
+            <p>Wordy accounts sign in with a passkey. No password, no link.</p>
+            <button id="passkey-signin" class="btn btn-primary" type="button">
+              Sign in with a passkey
+            </button>
+            <p id="passkey-status" class="muted status" aria-live="polite"></p>
+          </div>
+          <div class="card">
+            <h2>New here?</h2>
+            <p>Enter your email and we will send a one-time link to create your account.</p>
+            {error && <p class="error">{error}</p>}
+            <form method="POST" novalidate>
+              <label>
+                <span>Email</span>
+                <input type="email" name="email" value={email} autocomplete="email" required />
+              </label>
+              <button class="btn btn-secondary" type="submit">Send me a link</button>
+            </form>
+          </div>
+        </div>
+      )
+    }
+  </section>
+</Base>
+
+<script>
+  import { bindPasskeySignIn } from "~/scripts/auth-client";
+  const button = document.getElementById("passkey-signin") as HTMLButtonElement | null;
+  const status = document.getElementById("passkey-status");
+  if (button && status) {
+    const next = new URLSearchParams(location.search).get("callbackURL") || "/account";
+    bindPasskeySignIn(button, status, next.startsWith("/") && !next.startsWith("//") ? next : "/account");
+  }
+</script>

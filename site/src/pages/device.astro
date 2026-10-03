@@ -1,0 +1,105 @@
+---
+import Base from "~/layouts/Base.astro";
+import { getAuth } from "~/server/auth";
+
+export const prerender = false;
+
+const initial = (Astro.url.searchParams.get("user_code") ?? "").trim().toUpperCase();
+const { user, session } = Astro.locals;
+const back = `/login?callbackURL=${encodeURIComponent(Astro.url.pathname + Astro.url.search)}`;
+if (!session) return Astro.redirect(back);
+
+let result: "approved" | "denied" | null = null;
+let error: string | null = null;
+let code = initial;
+
+// better-auth binds a code to the approving session first (`deviceVerify`), then lets that
+// session approve or deny it.
+const claim = (userCode: string) =>
+  getAuth().api.deviceVerify({ query: { user_code: userCode }, headers: Astro.request.headers });
+
+function describe(err: unknown): string {
+  const body = (err as { body?: { error_description?: string } }).body;
+  return body?.error_description || (err instanceof Error && err.message) || "Something went wrong.";
+}
+
+if (Astro.request.method === "POST") {
+  const data = await Astro.request.formData();
+  code = String(data.get("user_code") ?? "").trim().toUpperCase();
+  const action = data.get("action");
+  try {
+    if (!code) {
+      error = "Enter the code shown in Wordy.";
+    } else if (action === "approve") {
+      await claim(code);
+      await getAuth().api.deviceApprove({ body: { userCode: code }, headers: Astro.request.headers });
+      result = "approved";
+    } else if (action === "deny") {
+      await claim(code);
+      await getAuth().api.deviceDeny({ body: { userCode: code }, headers: Astro.request.headers });
+      result = "denied";
+    }
+  } catch (err) {
+    error = describe(err);
+  }
+} else if (code) {
+  try {
+    await claim(code);
+  } catch (err) {
+    error = describe(err);
+  }
+}
+---
+
+<Base title="Link a device" description="Approve a copy of Wordy that wants to sync with your account.">
+  <section class="wrap section narrow">
+    <p class="eyebrow">Account</p>
+    <h1>Link a device</h1>
+    <div class="card">
+      {
+        result === "approved" ? (
+          <>
+            <p>Approved. Wordy will pick this up within a few seconds; you can close this tab.</p>
+            <p>
+              <a href="/account">Manage linked devices</a>
+            </p>
+          </>
+        ) : result === "denied" ? (
+          <p>Denied. The request from the app was rejected.</p>
+        ) : (
+          <>
+            <p>
+              A copy of Wordy wants to sync as <strong>{user?.email}</strong>. Check that the code
+              below matches the one the app is showing.
+            </p>
+            {error && <p class="error">{error}</p>}
+            <form method="POST">
+              <label>
+                <span>Code</span>
+                <input
+                  class="code"
+                  type="text"
+                  name="user_code"
+                  value={code}
+                  placeholder="ABCD-EFGH"
+                  autocomplete="off"
+                  autocapitalize="characters"
+                  spellcheck="false"
+                  required
+                />
+              </label>
+              <div class="actions">
+                <button class="btn btn-primary" type="submit" name="action" value="approve">
+                  Approve
+                </button>
+                <button class="btn btn-secondary" type="submit" name="action" value="deny">
+                  Deny
+                </button>
+              </div>
+            </form>
+          </>
+        )
+      }
+    </div>
+  </section>
+</Base>

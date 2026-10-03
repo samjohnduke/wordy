@@ -1,0 +1,11 @@
+---
+import { getAuth } from "~/server/auth";
+
+export const prerender = false;
+
+if (Astro.request.method !== "POST") return Astro.redirect("/account");
+const res = await getAuth().api.signOut({ headers: Astro.request.headers, asResponse: true });
+const headers = new Headers({ location: "/" });
+for (const c of res.headers.getSetCookie()) headers.append("set-cookie", c);
+return new Response(null, { status: 303, headers });
+---

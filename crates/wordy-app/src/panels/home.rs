@@ -21,7 +21,7 @@ use wordy_doc::{storage, Goals, NodeKind, Space, Status, TreeID};
 use wordy_export::{CompileOptions, Format};
 
 use crate::app::SharedProject;
-use crate::sync::{SyncManager, SyncStatus};
+use crate::sync::{CloudStatus, SyncManager, SyncStatus};
 
 pub enum HomeEvent {
     /// Open a node in an editor tab.
@@ -118,6 +118,7 @@ pub struct HomePanel {
     sync_name: Entity<InputState>,
     sync_code: Entity<InputState>,
     sync_addr: Entity<InputState>,
+    sync_server: Entity<InputState>,
     sync_addr_error: Option<String>,
     pub focus: FocusHandle,
     _subs: Vec<Subscription>,
@@ -202,10 +203,27 @@ impl HomePanel {
             );
         }
 
-        let (peer_name, pairing_code) = {
+        let (peer_name, pairing_code, cloud_server) = {
             let m = sync.read(cx);
-            (m.config.peer_name.clone(), m.config.pairing_code.clone())
+            (
+                m.config.peer_name.clone(),
+                m.config.pairing_code.clone(),
+                m.config.cloud_server.clone(),
+            )
         };
+        let sync_server = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(cloud_server)
+                .placeholder(wordy_sync::cloud::DEFAULT_SERVER)
+        });
+        subs.push(
+            cx.subscribe_in(&sync_server, window, |this, input, ev: &InputEvent, _, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    let v = input.read(cx).value().to_string();
+                    this.sync.update(cx, |m, cx| m.set_cloud_server(&v, cx));
+                }
+            }),
+        );
         let sync_name = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(peer_name)
@@ -257,6 +275,7 @@ impl HomePanel {
             sync_name,
             sync_code,
             sync_addr,
+            sync_server,
             sync_addr_error: None,
             focus: cx.focus_handle(),
             _subs: subs,
@@ -647,10 +666,172 @@ impl HomePanel {
         v_flex()
             .gap_3()
             .w_full()
+            .child(self.render_account(cx))
             .child(this_machine)
             .child(peer_box)
             .child(status_box)
             .into_any_element()
+    }
+
+    /// The cloud account card: link this machine, or show who is signed in
+    /// and the other linked machines.
+    fn render_account(&self, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let m = self.sync.read(cx);
+        let account = m.config.cloud.clone();
+        let status = m.cloud_status.clone();
+        let devices = m.cloud_devices.clone();
+        let busy = m.cloud_busy();
+        let server = m.config.cloud_server();
+
+        let mut card = Self::section("Account", cx);
+        match account {
+            None => {
+                card = card.child(div().text_xs().text_color(muted).child(
+                    "Link this machine to your Wordy account to back projects up and sync them between machines. Sign-in happens in your browser with a passkey; nothing is typed here.",
+                ));
+                card = card.child(
+                    h_flex()
+                        .items_center()
+                        .gap_3()
+                        .child(div().w(px(90.)).text_xs().text_color(muted).child("Server"))
+                        .child(
+                            div()
+                                .w(px(360.))
+                                .child(Input::new(&self.sync_server).small().disabled(busy)),
+                        ),
+                );
+                match &status {
+                    CloudStatus::Waiting { user_code, .. } => {
+                        card = card.child(
+                            h_flex()
+                                .items_center()
+                                .gap_3()
+                                .child(div().text_sm().child("Your code is"))
+                                .child(div().text_lg().font_semibold().child(user_code.clone()))
+                                .child(div().text_sm().text_color(muted).child("— approve it in the browser.")),
+                        );
+                        let code = user_code.clone();
+                        card = card.child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new("cloud-open")
+                                        .small()
+                                        .label("Open the browser again")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.sync.update(cx, |m, cx| m.open_verify_url(cx));
+                                        })),
+                                )
+                                .child(
+                                    Button::new("cloud-copy")
+                                        .small()
+                                        .label("Copy code")
+                                        .on_click(cx.listener(move |_, _, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+                                        })),
+                                )
+                                .child(
+                                    Button::new("cloud-cancel")
+                                        .small()
+                                        .label("Cancel")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.sync.update(cx, |m, cx| m.cancel_link(cx));
+                                        })),
+                                ),
+                        );
+                    }
+                    _ => {
+                        card = card.child(
+                            h_flex().gap_2().child(
+                                Button::new("cloud-link")
+                                    .primary()
+                                    .small()
+                                    .label(if matches!(status, CloudStatus::Starting) {
+                                        "Asking for a code…"
+                                    } else {
+                                        "Link this machine"
+                                    })
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.sync.update(cx, |m, cx| m.link_cloud(cx));
+                                    })),
+                            ),
+                        );
+                    }
+                }
+            }
+            Some(acct) => {
+                card = card.child(div().text_sm().child(format!(
+                    "Signed in as {} on {server}. This machine is “{}”.",
+                    acct.email, acct.device_name
+                )));
+                let mut rows = v_flex().gap_1();
+                for (i, d) in devices.iter().enumerate() {
+                    let seen = d.last_seen_at.get(..10).unwrap_or(&d.last_seen_at).to_string();
+                    let mut row = h_flex()
+                        .items_center()
+                        .gap_3()
+                        .child(div().text_sm().font_semibold().w(px(200.)).child(d.name.clone()))
+                        .child(div().text_xs().text_color(muted).w(px(80.)).child(d.platform.clone()))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .w(px(140.))
+                                .child(format!("last seen {seen}")),
+                        );
+                    if d.current {
+                        row = row.child(div().text_xs().text_color(muted).child("this machine"));
+                    } else {
+                        let id = d.id.clone();
+                        row = row.child(
+                            Button::new(ElementId::Name(format!("cloud-remove-{i}").into()))
+                                .small()
+                                .label("Remove")
+                                .disabled(busy)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let id = id.clone();
+                                    this.sync.update(cx, |m, cx| m.remove_cloud_device(&id, cx));
+                                })),
+                        );
+                    }
+                    rows = rows.child(row);
+                }
+                if !devices.is_empty() {
+                    card = card.child(rows);
+                }
+                card = card.child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("cloud-refresh")
+                                .small()
+                                .label("Refresh")
+                                .disabled(busy)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.sync.update(cx, |m, cx| m.refresh_cloud(false, cx));
+                                })),
+                        )
+                        .child(
+                            Button::new("cloud-unlink")
+                                .small()
+                                .label("Unlink this machine")
+                                .disabled(busy)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.sync.update(cx, |m, cx| m.unlink_cloud(cx));
+                                })),
+                        ),
+                );
+            }
+        }
+        match status {
+            CloudStatus::Busy(s) => card = card.child(div().text_xs().text_color(muted).child(s)),
+            CloudStatus::Failed(e) => card = card.child(div().text_xs().text_color(theme.danger).child(e)),
+            _ => {}
+        }
+        card
     }
 
     fn changed(&mut self, cx: &mut Context<Self>) {

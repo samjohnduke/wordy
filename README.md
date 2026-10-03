@@ -67,19 +67,35 @@ packaging/macos/bundle.sh
 The icon is `packaging/wordy.svg`; the PNGs next to the scripts are rendered
 from it with `rsvg-convert` and checked in so neither script needs it.
 
-## Website
+## Website and accounts
 
-`site/` is the public site (landing page, downloads, changelog): Astro on Cloudflare
-Workers, deployed with Wrangler. The download page reads the latest GitHub Release at
-build time, so it needs no changes per release.
+`site/` is the public site (landing page, downloads, changelog) and the account server
+(sign-in, passkeys, linked machines): Astro on Cloudflare Workers, deployed with Wrangler.
+The download page reads the latest GitHub Release at build time, so it needs no changes
+per release. Accounts live in D1 (better-auth), sign-in is passkeys only after the first
+email link, and email goes out through Cloudflare's `send_email` binding.
 
 ```sh
 cd site
 pnpm install
-pnpm dev              # http://localhost:4321
-pnpm preview          # production build served by wrangler dev
-pnpm deploy           # astro build && wrangler deploy (needs `pnpm wrangler login` once)
+cp .dev.vars.example .dev.vars          # then set BETTER_AUTH_SECRET
+pnpm wrangler d1 migrations apply DB    # local database for dev and tests
+pnpm dev                                # http://localhost:4321
+pnpm preview                            # production build served by wrangler dev
+pnpm test:e2e                           # headless Chromium walk-through against :8787
+pnpm deploy                             # astro build && wrangler deploy
 ```
+
+First deployment, once: `pnpm wrangler login`, `pnpm wrangler d1 create wordy` (put the id
+in `wrangler.jsonc`), `pnpm wrangler d1 migrations apply DB --remote`,
+`pnpm wrangler secret put BETTER_AUTH_SECRET`, and verify the sending domain under Email
+Sending in the Cloudflare dashboard. Locally, `wrangler dev` writes outgoing mail under
+`.wrangler/tmp/email/` instead of sending it.
+
+In the app, Sync → Account → "Link this machine" opens the browser at `/device` with a
+code; approving it there with a passkey gives the app a bearer token, stored in
+`sync.json` (owner-readable only). The Rust client is `wordy-sync::cloud`; its tests run
+against a local `wrangler dev --port 8787` and skip when there is none.
 
 ## Data on disk
 

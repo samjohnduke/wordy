@@ -1,0 +1,4 @@
+# Copy to .dev.vars for `wrangler dev`. Never commit .dev.vars.
+BETTER_AUTH_SECRET=change-me-to-32-random-bytes
+SITE_URL=http://localhost:8787
+EMAIL_FROM=Wordy <wordy@localhost>

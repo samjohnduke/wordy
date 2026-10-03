@@ -13,6 +13,7 @@
 //! so Loro events keep firing where the editors live.
 
 pub mod client;
+pub mod cloud;
 pub mod config;
 pub mod discovery;
 pub mod protocol;
@@ -22,6 +23,7 @@ mod session;
 use std::path::PathBuf;
 
 pub use client::sync_with;
+pub use cloud::CloudAccount;
 pub use config::SyncConfig;
 pub use discovery::{Advertiser, Discovery, Peer};
 pub use server::{Server, ServerEvent};

@@ -1,0 +1,109 @@
+---
+import Base from "~/layouts/Base.astro";
+import { getAuth } from "~/server/auth";
+import { listDevices, revokeDevice } from "~/server/devices";
+import { countPasskeys } from "~/server/users";
+import { formatDate } from "~/lib/releases";
+
+export const prerender = false;
+
+const { user, session } = Astro.locals;
+if (!user || !session) return Astro.redirect("/login?callbackURL=%2Faccount");
+
+let notice: string | null = null;
+let error: string | null = null;
+
+if (Astro.request.method === "POST") {
+  const data = await Astro.request.formData();
+  const action = data.get("action");
+  const id = String(data.get("id") ?? "");
+  try {
+    if (action === "delete-passkey") {
+      if ((await countPasskeys(user.id)) <= 1) {
+        error = "You cannot remove your only passkey.";
+      } else {
+        await getAuth().api.deletePasskey({ body: { id }, headers: Astro.request.headers });
+        notice = "Passkey removed.";
+      }
+    } else if (action === "revoke-device") {
+      notice = (await revokeDevice(user.id, id)) ? "Device unlinked." : "That device was already gone.";
+    }
+  } catch (err) {
+    error = err instanceof Error ? err.message : "Something went wrong.";
+  }
+}
+
+const passkeys = await getAuth().api.listPasskeys({ headers: Astro.request.headers });
+const devices = await listDevices(user.id, session.id);
+const when = (iso: string | Date | null | undefined) => (iso ? formatDate(new Date(iso)) : "");
+---
+
+<Base title="Account" description="Your Wordy account: passkeys and linked devices.">
+  <section class="wrap section narrow">
+    <p class="eyebrow">Account</p>
+    <h1>{user.email}</h1>
+    {notice && <p class="notice">{notice}</p>}
+    {error && <p class="error">{error}</p>}
+
+    <h2>Passkeys</h2>
+    <p class="muted">How you sign in here. Keep at least one you can reach.</p>
+    <ul class="rows">
+      {
+        passkeys.map((p) => (
+          <li>
+            <div>
+              <strong>{p.name || "Unnamed passkey"}</strong>
+              <span class="muted small">
+                {p.deviceType === "multiDevice" ? "synced" : "on one device"}
+                {p.createdAt ? ` · added ${when(p.createdAt)}` : ""}
+              </span>
+            </div>
+            <form method="POST">
+              <input type="hidden" name="action" value="delete-passkey" />
+              <input type="hidden" name="id" value={p.id} />
+              <button class="link" type="submit" disabled={passkeys.length <= 1}>
+                Remove
+              </button>
+            </form>
+          </li>
+        ))
+      }
+    </ul>
+    <p><a class="btn btn-secondary" href="/account/passkey">Add a passkey</a></p>
+
+    <h2>Linked devices</h2>
+    <p class="muted">
+      Copies of Wordy that can sync with this account. Link one from the app under Settings →
+      Account.
+    </p>
+    {
+      devices.length === 0 ? (
+        <p class="card">No devices linked yet.</p>
+      ) : (
+        <ul class="rows">
+          {devices.map((d) => (
+            <li>
+              <div>
+                <strong>{d.name}</strong>
+                <span class="muted small">
+                  {d.platform}
+                  {d.appVersion ? ` · Wordy ${d.appVersion}` : ""} · last seen {when(d.lastSeenAt)}
+                </span>
+              </div>
+              <form method="POST">
+                <input type="hidden" name="action" value="revoke-device" />
+                <input type="hidden" name="id" value={d.id} />
+                <button class="link" type="submit">Unlink</button>
+              </form>
+            </li>
+          ))}
+        </ul>
+      )
+    }
+
+    <h2>Session</h2>
+    <form method="POST" action="/logout">
+      <button class="btn btn-secondary" type="submit">Sign out of this browser</button>
+    </form>
+  </section>
+</Base>

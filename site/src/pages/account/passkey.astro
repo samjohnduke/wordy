@@ -1,0 +1,47 @@
+---
+import Base from "~/layouts/Base.astro";
+
+export const prerender = false;
+
+if (!Astro.locals.session) return Astro.redirect("/login?callbackURL=%2Faccount%2Fpasskey");
+const first = !Astro.locals.hasPasskey;
+const email = Astro.locals.user?.email ?? "";
+---
+
+<Base title={first ? "Add your passkey" : "Add a passkey"} description="Register a passkey for your Wordy account.">
+  <section class="wrap section narrow">
+    <p class="eyebrow">Account</p>
+    <h1>{first ? "One more step" : "Add a passkey"}</h1>
+    <div class="card">
+      {
+        first ? (
+          <p>
+            Your account for <strong>{email}</strong> exists. Add a passkey now; it is the only way
+            to sign in, and you cannot do anything else until one is registered.
+          </p>
+        ) : (
+          <p>Add another passkey, for example on a second device or a hardware key.</p>
+        )
+      }
+      <form id="add-passkey" novalidate>
+        <label>
+          <span>Name (optional)</span>
+          <input type="text" name="name" placeholder="MacBook, YubiKey, phone…" maxlength="60" />
+        </label>
+        <button class="btn btn-primary" type="submit">Create passkey</button>
+      </form>
+      <p id="passkey-status" class="muted status" aria-live="polite"></p>
+      <p class="muted small">
+        On Linux, a passkey usually means a hardware key, a password manager extension, or your
+        phone through the QR code your browser shows.
+      </p>
+    </div>
+  </section>
+</Base>
+
+<script>
+  import { bindAddPasskey } from "~/scripts/auth-client";
+  const form = document.getElementById("add-passkey") as HTMLFormElement | null;
+  const status = document.getElementById("passkey-status");
+  if (form && status) bindAddPasskey(form, status, "/account");
+</script>

@@ -11,7 +11,24 @@
   "observability": {
     "enabled": true,
   },
+  // Deploy-time values. `.dev.vars` overrides these under `wrangler dev`
+  // (see `.dev.vars.example`). BETTER_AUTH_SECRET is a secret: `wrangler secret put`.
+  "vars": {
+    "SITE_URL": "https://wordy.samduke.dev",
+    "EMAIL_FROM": "Wordy <wordy@samduke.dev>",
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "wordy",
+      // Replace with the id from `wrangler d1 create wordy` before the first deploy.
+      "database_id": "local-dev-placeholder",
+      "migrations_dir": "migrations",
+    },
+  ],
+  // Cloudflare Email Sending. The sender domain must be verified in the dashboard.
+  "send_email": [{ "name": "EMAIL" }],
   // Uncomment to serve from a custom domain on the Cloudflare zone (DNS is created on deploy),
-  // then set `site` in astro.config.mjs to match.
+  // then set `site` in astro.config.mjs and SITE_URL to match.
   // "routes": [{ "pattern": "wordy.samduke.dev", "custom_domain": true }]
 }

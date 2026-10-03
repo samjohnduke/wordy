@@ -13,12 +13,15 @@
     "deploy": "astro build && wrangler deploy",
     "check": "astro check",
     "format": "prettier --write .",
-    "cf-typegen": "wrangler types"
+    "cf-typegen": "wrangler types",
+    "test:e2e": "node scripts/e2e-auth.mjs"
   },
   "dependencies": {
     "@astrojs/cloudflare": "^14.3.3",
     "@astrojs/rss": "^4.0.18",
-    "astro": "^7.3.5"
+    "@better-auth/passkey": "^1.7.7",
+    "astro": "^7.3.5",
+    "better-auth": "^1.7.7"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.10",

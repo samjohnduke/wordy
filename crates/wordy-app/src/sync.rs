@@ -5,9 +5,13 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
 use gpui_kit::*;
+use wordy_sync::cloud::{self, CloudAccount, DeviceLink};
 use wordy_sync::{Advertiser, Discovery, LocalState, Peer, Server, ServerEvent, SyncConfig, SyncOutcome};
 
 use crate::app::SharedProject;
@@ -31,9 +35,38 @@ pub enum SyncStatus {
     Failed(String),
 }
 
+/// Where the cloud account link stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloudStatus {
+    Idle,
+    /// Asking the server for a code.
+    Starting,
+    /// Code issued; waiting for the user to approve it in the browser.
+    Waiting {
+        user_code: String,
+        verify_url: String,
+    },
+    /// Talking to the server (refresh, unlink, remove).
+    Busy(String),
+    Failed(String),
+}
+
+/// What a background cloud job sends back.
+enum CloudMsg {
+    Code(DeviceLink),
+    Linked(Result<CloudAccount>),
+    Account(Result<cloud::Account>, bool),
+    Unlinked(Result<()>),
+    Removed(Result<()>),
+}
+
 pub struct SyncManager {
     project: SharedProject,
     pub config: SyncConfig,
+    pub cloud_status: CloudStatus,
+    /// Linked machines as of the last refresh.
+    pub cloud_devices: Vec<cloud::Device>,
+    cloud_cancel: Option<Arc<AtomicBool>>,
     server: Option<Server>,
     discovery: Option<Discovery>,
     advertiser: Option<Advertiser>,
@@ -89,6 +122,9 @@ impl SyncManager {
         let mut m = Self {
             project,
             config,
+            cloud_status: CloudStatus::Idle,
+            cloud_devices: Vec::new(),
+            cloud_cancel: None,
             server,
             discovery,
             advertiser: None,
@@ -99,6 +135,9 @@ impl SyncManager {
             _tasks: tasks,
         };
         m.advertise();
+        if m.config.cloud.is_some() {
+            m.refresh_cloud(true, cx);
+        }
         m
     }
 
@@ -268,6 +307,216 @@ impl SyncManager {
                 tracing::warn!("sync with {label} failed: {e:#}");
                 self.status = SyncStatus::Failed(format!("{e:#}"));
             }
+        }
+        cx.notify();
+    }
+}
+
+/// Cloud account: linking, refreshing and unlinking. The HTTP calls block,
+/// so each runs on its own thread and reports back through a channel.
+impl SyncManager {
+    pub fn cloud_busy(&self) -> bool {
+        matches!(
+            self.cloud_status,
+            CloudStatus::Starting | CloudStatus::Waiting { .. } | CloudStatus::Busy(_)
+        )
+    }
+
+    pub fn set_cloud_server(&mut self, url: &str, cx: &mut Context<Self>) {
+        let url = url.trim().trim_end_matches('/');
+        if url == self.config.cloud_server || self.config.cloud.is_some() {
+            return;
+        }
+        self.config.cloud_server = url.to_string();
+        self.save_config();
+        cx.notify();
+    }
+
+    fn cloud_client(&self) -> cloud::Client {
+        cloud::Client::new(&self.config.cloud_server())
+    }
+
+    /// Run `job` on a thread; its messages arrive in `handle_cloud_msg`.
+    fn spawn_cloud(&mut self, cx: &mut Context<Self>, job: impl FnOnce(&dyn Fn(CloudMsg)) + Send + 'static) {
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<CloudMsg>();
+        std::thread::Builder::new()
+            .name("wordy-cloud".into())
+            .spawn(move || {
+                let send = |m: CloudMsg| {
+                    let _ = tx.unbounded_send(m);
+                };
+                job(&send);
+            })
+            .expect("spawn cloud thread");
+        self._tasks.push(cx.spawn(async move |this, cx| {
+            while let Some(msg) = rx.next().await {
+                if this.update(cx, |m, cx| m.handle_cloud_msg(msg, cx)).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// Start the device-code flow: the browser opens at the approval page
+    /// once the server hands out a code.
+    pub fn link_cloud(&mut self, cx: &mut Context<Self>) {
+        if self.cloud_busy() || self.config.cloud.is_some() {
+            return;
+        }
+        let keep = Arc::new(AtomicBool::new(true));
+        self.cloud_cancel = Some(keep.clone());
+        self.cloud_status = CloudStatus::Starting;
+        cx.notify();
+        let client = self.cloud_client();
+        let name = self.config.peer_name.clone();
+        let version = env!("CARGO_PKG_VERSION").to_string();
+        self.spawn_cloud(cx, move |send| {
+            let result = client.link(
+                &name,
+                &version,
+                |link| send(CloudMsg::Code(link.clone())),
+                || keep.load(Ordering::Relaxed),
+            );
+            send(CloudMsg::Linked(result));
+        });
+    }
+
+    pub fn cancel_link(&mut self, cx: &mut Context<Self>) {
+        if let Some(flag) = self.cloud_cancel.take() {
+            flag.store(false, Ordering::Relaxed);
+        }
+        if matches!(self.cloud_status, CloudStatus::Starting | CloudStatus::Waiting { .. }) {
+            self.cloud_status = CloudStatus::Idle;
+            cx.notify();
+        }
+    }
+
+    /// Re-open the approval page (the user closed the tab).
+    pub fn open_verify_url(&self, cx: &mut Context<Self>) {
+        if let CloudStatus::Waiting { verify_url, .. } = &self.cloud_status {
+            cx.open_url(verify_url);
+        }
+    }
+
+    /// Fetch who we are and the linked machines. `quiet` swallows network
+    /// errors (used at launch, when being offline is normal).
+    pub fn refresh_cloud(&mut self, quiet: bool, cx: &mut Context<Self>) {
+        let Some(acct) = self.config.cloud.clone() else { return };
+        if self.cloud_busy() {
+            return;
+        }
+        if !quiet {
+            self.cloud_status = CloudStatus::Busy("Checking the account…".into());
+            cx.notify();
+        }
+        let client = self.cloud_client();
+        self.spawn_cloud(cx, move |send| {
+            send(CloudMsg::Account(client.account(&acct.token), quiet))
+        });
+    }
+
+    /// Forget the account here and end the session on the server. The local
+    /// side always succeeds; a server failure is only reported.
+    pub fn unlink_cloud(&mut self, cx: &mut Context<Self>) {
+        let Some(acct) = self.config.cloud.take() else { return };
+        self.cloud_devices.clear();
+        self.save_config();
+        self.cloud_status = CloudStatus::Busy("Unlinking…".into());
+        cx.notify();
+        let client = self.cloud_client();
+        self.spawn_cloud(cx, move |send| send(CloudMsg::Unlinked(client.unlink(&acct.token))));
+    }
+
+    /// Remove another linked machine.
+    pub fn remove_cloud_device(&mut self, device_id: &str, cx: &mut Context<Self>) {
+        let Some(acct) = self.config.cloud.clone() else { return };
+        if self.cloud_busy() {
+            return;
+        }
+        self.cloud_status = CloudStatus::Busy("Removing the device…".into());
+        cx.notify();
+        let client = self.cloud_client();
+        let id = device_id.to_string();
+        self.spawn_cloud(cx, move |send| {
+            send(CloudMsg::Removed(client.revoke_device(&acct.token, &id)))
+        });
+    }
+
+    /// The server said our token is dead: drop it locally.
+    fn cloud_revoked(&mut self) {
+        self.config.cloud = None;
+        self.cloud_devices.clear();
+        self.save_config();
+        self.cloud_status =
+            CloudStatus::Failed("This machine was unlinked on the website. Link it again to sign in.".into());
+    }
+
+    fn handle_cloud_msg(&mut self, msg: CloudMsg, cx: &mut Context<Self>) {
+        match msg {
+            CloudMsg::Code(link) => {
+                if !matches!(self.cloud_status, CloudStatus::Starting) {
+                    return;
+                }
+                cx.open_url(&link.verify_url);
+                self.cloud_status = CloudStatus::Waiting {
+                    user_code: link.user_code,
+                    verify_url: link.verify_url,
+                };
+            }
+            CloudMsg::Linked(result) => {
+                self.cloud_cancel = None;
+                match result {
+                    Ok(acct) => {
+                        tracing::info!("linked to cloud account {}", acct.email);
+                        self.config.cloud = Some(acct);
+                        self.save_config();
+                        self.cloud_status = CloudStatus::Idle;
+                        self.refresh_cloud(false, cx);
+                    }
+                    Err(e) if e.to_string() == "cancelled" => self.cloud_status = CloudStatus::Idle,
+                    Err(e) => {
+                        tracing::warn!("cloud link failed: {e:#}");
+                        self.cloud_status = CloudStatus::Failed(format!("Linking failed: {e:#}"));
+                    }
+                }
+            }
+            CloudMsg::Account(result, quiet) => match result {
+                Ok(a) => {
+                    if let Some(acct) = self.config.cloud.as_mut() {
+                        if acct.email != a.user.email {
+                            acct.email = a.user.email.clone();
+                            self.save_config();
+                        }
+                    }
+                    self.cloud_devices = a.devices;
+                    self.cloud_status = CloudStatus::Idle;
+                }
+                Err(e) if cloud::is_unauthorized(&e) => self.cloud_revoked(),
+                Err(e) => {
+                    tracing::warn!("cloud account refresh failed: {e:#}");
+                    self.cloud_status = if quiet {
+                        CloudStatus::Idle
+                    } else {
+                        CloudStatus::Failed(format!("Could not reach the server: {e:#}"))
+                    };
+                }
+            },
+            CloudMsg::Unlinked(result) => {
+                self.cloud_status = match result {
+                    Ok(()) => CloudStatus::Idle,
+                    Err(e) => CloudStatus::Failed(format!(
+                        "Unlinked here, but the server could not be told ({e:#}). Remove this machine on the website too."
+                    )),
+                };
+            }
+            CloudMsg::Removed(result) => match result {
+                Ok(()) => {
+                    self.cloud_status = CloudStatus::Idle;
+                    self.refresh_cloud(false, cx);
+                }
+                Err(e) if cloud::is_unauthorized(&e) => self.cloud_revoked(),
+                Err(e) => self.cloud_status = CloudStatus::Failed(format!("{e:#}")),
+            },
         }
         cx.notify();
     }

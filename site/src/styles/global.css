@@ -235,3 +235,103 @@ code:not(pre code) {
 .prose li {
   margin-bottom: 0.35em;
 }
+
+/* Account pages */
+.narrow {
+  max-width: 44rem;
+}
+.notice,
+.error {
+  padding: 0.6rem 0.9rem;
+  border-radius: 8px;
+  border: 1px solid var(--rule);
+  background: var(--paper-2);
+}
+.error {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.status:empty {
+  display: none;
+}
+.small {
+  font-size: 0.9rem;
+}
+label {
+  display: block;
+  margin-bottom: 1rem;
+}
+label > span {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 0.3rem;
+}
+input[type="text"],
+input[type="email"] {
+  width: 100%;
+  padding: 0.6rem 0.8rem;
+  font: inherit;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+}
+input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+input.code {
+  font-family: var(--mono);
+  font-size: 1.5rem;
+  letter-spacing: 0.15em;
+  text-align: center;
+  text-transform: uppercase;
+  max-width: 16rem;
+}
+button.btn {
+  font: inherit;
+  cursor: pointer;
+}
+button.link {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+}
+button.link:disabled {
+  color: var(--muted);
+  cursor: default;
+  text-decoration: none;
+}
+.actions {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.rows {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 1rem;
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  background: var(--paper-2);
+}
+.rows li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.8rem 1rem;
+}
+.rows li + li {
+  border-top: 1px solid var(--rule);
+}
+.rows li > div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
