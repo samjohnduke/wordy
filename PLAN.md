@@ -1,0 +1,360 @@
+# Wordy — Implementation Plan
+
+A private, native, offline writing desk for fiction. Rust + gpui + gpui-component, with Loro as the
+document model. Mac and Linux only. Single user. No website, no Windows, no Scrivener import.
+
+Reference feature set: EmberWrite (spaces, act/chapter/scene tree, wiki with templates, entity
+linking, scene versioning, tags, split panes, goals and stats, tasks, attachments, snippets,
+docx/pdf/epub export, LAN sync).
+
+---
+
+## 1. Goals and non-goals
+
+**Goals**
+- True rich-text prose editor with a stable document model (Loro rich text).
+- Wiki-style entity linking: explicit links stored as marks, auto-detected mentions as decorations,
+  backlinks indexed.
+- Manuscript hierarchy (Act / Chapter / Scene), World space (characters, locations, cultures,
+  systems, objects), Notes space.
+- Lossless storage with full history (Loro snapshot), JSON mirror for inspection.
+- Manual LAN sync between two machines, conflict-free via CRDT merge.
+- Mac (Apple Silicon) and Linux (Wayland, X11 fallback) builds.
+
+**Non-goals**
+- Windows, mobile, web, collaboration with other people, plugins, themes beyond light/dark,
+  inline images, tables, nested lists, footnotes, Scrivener import, public roadmap/changelog.
+
+---
+
+## 2. Stack (verified 2026-10-03)
+
+| Concern | Crate | Version | Notes |
+|---|---|---|---|
+| UI framework | `gpui-pre` (alias as `gpui`) | =0.3.7 | pinned by gpui-component; Mac + Linux platform backends |
+| Components | `gpui-component` | 0.7.0 | dock/splits/tabs, tree, inputs, markdown, theming |
+| Document model / CRDT | `loro` | 1.16 | rich text, movable tree, undo, snapshots, JSON updates |
+| Entity detection | `aho-corasick` | 1.1 | multi-pattern name/alias matching |
+| Grapheme/word boundaries | `unicode-segmentation` | 1.13 | cursor movement, word counts |
+| Spellcheck | `spellbook` | 0.4 | Hunspell-compatible, pure Rust |
+| Index / stats / search | `rusqlite` (bundled) | 0.40 | derived data only, rebuildable |
+| Word export | `docx-rs` | 0.4 | |
+| ePub export | `epub-builder` | 0.8 | |
+| PDF export | `typst` (+ `typst-pdf`) | 0.15 | manuscript template compiled in-process |
+| Snippet images | `tiny-skia` + `cosmic-text` | 0.12 / 0.19 | render quote to PNG |
+| LAN discovery | `mdns-sd` | 0.21 | no async runtime needed |
+| Serialization | `serde`, `serde_json` | | settings, JSON mirror |
+| Editor/PDF font | Libertinus Serif (OFL) | | bundled as embedded asset |
+
+Pin `gpui-pre` and `gpui-component` together and bump them together. Expect API churn.
+
+Cargo alias so code reads naturally:
+```toml
+gpui = { package = "gpui-pre", version = "=0.3.7" }
+```
+
+---
+
+## 3. Architecture
+
+Workspace with these crates:
+
+```
+wordy/
+  crates/
+    wordy-doc       # Loro schema, typed accessors, paragraph model, undo, save/load, migrations
+    wordy-index     # SQLite index: words, backlinks, tags, search, stats; rebuilt from doc
+    wordy-editor    # gpui prose editor element (layout, input, selection, decorations)
+    wordy-export    # docx / epub / pdf / snippet png
+    wordy-sync      # LAN peer discovery + update exchange
+    wordy-app       # gpui-component shell: spaces, panels, views, commands, settings
+```
+
+Dependency direction: `app -> editor, index, export, sync -> doc`. Nothing depends on `app`.
+
+Principle that drives everything: **stored data vs derived data**.
+- Stored: the Loro document (text, marks, tree, metadata). This is the only source of truth.
+- Derived: SQLite index, auto-link decorations, spell squiggles, search hits, stats, backlinks.
+  All rebuildable from the doc at any time. Never written back into the doc.
+
+---
+
+## 4. Data model (Loro)
+
+One `LoroDoc` per project. One project file on disk.
+
+### 4.1 Containers
+
+```
+root map "project"
+  name: String
+  created: i64
+  settings: Map { daily_goal, manuscript_goal, deadline, ... }
+
+tree "nodes"                      # LoroTree — all hierarchy for all spaces
+  node.meta (LoroMap):
+    kind: "act" | "chapter" | "scene" | "folder" | "note" | "entity"
+    title: String
+    space: "manuscript" | "world" | "notes"
+    status: "idea" | "draft" | "revised" | "final"    (scenes)
+    word_goal: i64?                                   (scenes/chapters)
+    tags: LoroList<String>
+    body: LoroText                                    # rich text (scene, note, entity description)
+    # entity-only fields:
+    template: "character" | "location" | "culture" | "system" | "object" | "custom"
+    aliases: LoroList<String>
+    fields: LoroMap<String, LoroText | String>        # template-driven sheet fields
+    relations: LoroList<Map { to: TreeID, kind: String, note: String }>
+    attachments: LoroList<Map { name, path (relative to assets/), mime }>
+    include_in_compile: bool                          (scenes)
+
+map "tasks"                       # project-wide todo list
+  <ulid>: Map { text, done: bool, created, node: TreeID? }
+
+map "comments"                    # inline comments, referenced by comment marks
+  <ulid>: Map { text: LoroText, created: i64, resolved: bool }
+
+map "versions"                    # named scene versions (bookmarks into history)
+  <ulid>: Map { node: TreeID, label, frontiers: bytes, created }
+
+map "sessions"                    # daily writing sessions (for stats)
+  <YYYY-MM-DD>: Map { words_start, words_end, seconds }
+```
+
+Entity ids are `TreeID`s. Links hold a TreeID, never a name. Renames never break links.
+
+### 4.2 Rich text conventions (Quill-style)
+
+- One `LoroText` per body. Paragraphs are separated by `\n`.
+- Inline marks (configured via `config_text_style`):
+  - `bold`, `italic`, `underline`, `strike`, `smallcaps` — expand **after**
+  - `highlight: color-name` — expand **after**
+  - `comment: ulid` — expand **none**
+  - `link: TreeID` — expand **none**
+- Paragraph marks live on the `\n` character, expand **none**:
+  - `block: "p" | "h1" | "h2" | "h3" | "quote" | "break"`
+  - `align: "center"` (headings / scene breaks only)
+- `wordy-doc` exposes a `Paragraphs` view: splits `to_delta()` on `\n` into
+  `Vec<Paragraph { block, runs: Vec<Run { text, marks }> }>` with byte-offset mapping tables
+  (Loro indexes in Unicode code points; gpui wants bytes).
+- Text normalized to NFC on input. Whitespace preserved exactly.
+
+### 4.3 Storage
+
+```
+~/Wordy/<Project>/
+  project.loro          # binary snapshot — the truth
+  project.json          # derived JSON content mirror (get_deep_value), for grep/debugging
+  assets/               # attachments, copied in by content hash name
+  dictionary.txt        # custom words (app-level copy also kept)
+  index.sqlite          # derived, safe to delete
+  snapshots/            # rolling backups: project-YYYYMMDD-HHMM.loro (keep last 10 + daily 30)
+```
+
+- Autosave: debounce 1.5s after last edit, atomic write (tmp + rename).
+- On open: import snapshot, rebuild index if `index.sqlite` missing or stale.
+- History pruning: shallow snapshot at startup if history older than 365 days.
+- Undo: Loro `UndoManager`, merge interval 500ms, exclude remote (sync) ops.
+
+---
+
+## 5. Editor design (`wordy-editor`)
+
+The single biggest piece. Build it as a reusable gpui element that edits any `LoroText`.
+
+### 5.1 Layers
+1. **Model** — `LoroText` + `Paragraphs` view (from wordy-doc). Subscribes to Loro events and
+   re-derives only the affected paragraphs.
+2. **Decorations** — computed per paragraph, not stored:
+   - auto-links (entity mentions), ambiguous mentions
+   - spell errors
+   - search matches
+   - selection, cursor, composition range (IME)
+3. **Layout** — each paragraph shaped with gpui's text system into wrapped lines with styled runs
+   = marks ∪ decorations. Cache shaped lines per paragraph; invalidate on edit or width change.
+4. **Input** — implements gpui's `EntityInputHandler` (IME, marked text, dead keys, dictation).
+   Keybindings via gpui actions. Mouse: click/drag/double/triple select via line x→index mapping.
+
+### 5.2 Behaviors (in order of implementation)
+- Insert / delete / newline with paragraph mark carry-over (Enter in heading → next is `p`).
+- Cursor movement by grapheme, word, line, paragraph; Home/End; Shift-extends.
+- Selection rendering across wrapped lines and paragraphs.
+- Mark toggles: Cmd/Ctrl-B/I/U, strike, highlight picker, clear formatting.
+- Block type switch: paragraph, headings, quote, scene break (`***` auto-converts).
+- Smart typography on input: curly quotes, em dash from `--`, ellipsis.
+- Undo/redo via Loro UndoManager; restore selection from undo metadata.
+- Copy/paste: plain text + custom `application/x-wordy-delta` for in-app rich paste.
+- Link insertion: select text → Cmd-K → entity picker (fuzzy over names/aliases) → `link` mark.
+  Typing `[[` opens the same picker inline.
+- Click link → open entity in reference pane; Cmd-click → navigate.
+- Find/replace within document; project-wide search lives in app using the index.
+- Spellcheck: on-idle per paragraph, squiggle decorations, right-click suggestions, add to dictionary.
+- Focus mode: hide chrome, typewriter scrolling (optional).
+
+### 5.3 Testing
+- `wordy-doc` unit tests for every edit op using a text-only fake renderer.
+- Property tests: random edit sequences keep `Paragraphs` consistent with `to_delta()`.
+- Golden tests: delta → paragraphs → runs byte offsets.
+
+---
+
+## 6. Entity linking and the index (`wordy-index`)
+
+- Build an Aho-Corasick automaton from all entity names + aliases (case-insensitive, whole-word
+  boundaries checked post-match). Rebuild when any entity name/alias changes.
+- Scan a paragraph on edit (debounced ~150ms) → mention decorations. Unique match = auto-link
+  style; multiple candidates = ambiguous style with click-to-pin (converts to explicit `link` mark).
+- Backlinks table: `(entity_id, node_id, kind: explicit|auto, count)` rebuilt per node on save.
+- Entity sheet shows "Appears in" from backlinks; scene list can filter by entity (this covers
+  most of EmberWrite's tagging; explicit `tags` remain for free-form labels like POV or timeline).
+- Rename entity → optional scoped replace over explicitly-linked text ranges only.
+
+SQLite tables: `nodes(id, kind, space, title, status, words, updated)`, `backlinks`, `tags`,
+`fts_body` (FTS5 over plain text), `daily_words(date, words)`.
+
+---
+
+## 7. App shell (`wordy-app`)
+
+gpui-component dock layout, persisted per project.
+
+- **Left rail**: space switcher (Home, Manuscript, World, Notes) + settings.
+- **Sidebar**: tree for current space (gpui-component Tree), drag-reorder → `LoroTree::mov`.
+  Context menu: new, rename, duplicate, status color, delete (to trash folder, not hard delete).
+- **Center**: tabbed editor panes; split horizontally/vertically; drag tabs between panes.
+- **Right (Reference pane)**: pinned entity sheet / note / previous version, toggled with ⌘⇧R.
+  Read-only; double-click opens the node in an editor tab.
+- **Home space**: Dashboard (today's words, streak, goal progress, deadline pace),
+  Reports (words per day chart, per-chapter table), Tasks (checklist), Placeholders
+  (list of `[TODO ...]` / `[[?]]` markers found in text), Export.
+- **Entity sheet**: template-driven fields (character: role, physical, personality, backstory,
+  pronunciation; location: demographics, description; etc.), image attachment shown at top,
+  Relations tab with linked entities, Appears-in tab from backlinks.
+- **Versions**: "Save version" bookmarks current frontiers with a label; "Compare" opens a
+  read-only checkout in the reference pane; "Restore" copies old text into current body
+  (as a normal edit, so it's undoable).
+- **Status bar**: words in doc / chapter / manuscript, session words, spell language.
+- **Command palette** (⌘K): all actions, fuzzy.
+
+---
+
+## 8. Export (`wordy-export`)
+
+Compile = walk manuscript tree in order, include scenes where `include_in_compile`, map
+paragraphs → target format.
+
+- **docx**: standard manuscript format (12pt serif, double-spaced, chapter headings, `#` scene
+  breaks). Marks → runs. Links → plain text.
+- **epub**: one XHTML file per chapter, CSS for italics/bold/small caps, cover image optional.
+- **pdf**: typst template embedded as a string; compile in-process with a virtual filesystem
+  (`typst::World` impl); fonts bundled.
+- **Snippet**: select text → render to 1080x1080 or 1200x630 PNG with cosmic-text on tiny-skia,
+  dark/light variants, copied to clipboard and saved.
+- **Whole project**: zip of the project folder (that's the backup format too).
+
+---
+
+## 9. LAN sync (`wordy-sync`)
+
+Manual, two-machine, conflict-free.
+
+1. Both machines advertise `_wordy._tcp` via mDNS with a project id and peer name.
+2. User presses **Sync** → picks the peer → TCP connection, pre-shared pairing code typed once
+   and stored (plain TCP on LAN is acceptable for a private tool; upgrade to TLS later if wanted).
+3. Protocol: exchange version vectors → each side `export(Updates { from: other_vv })` → both import.
+   Loro merges; no conflict copies ever.
+4. Assets: exchange a manifest of `assets/` by hash; copy missing files both ways.
+5. Also exchange `dictionary.txt` (union).
+6. After sync: rebuild affected index rows, save snapshot, show summary (n changes in, n out).
+
+Fallback with zero code: copy `project.loro` from the other machine and use **Import snapshot**
+— Loro merges it the same way.
+
+---
+
+## 10. Phases and milestones
+
+Each phase ends with something usable. Don't start the next until the acceptance line holds.
+
+### Phase 0 — Skeleton (1 week)
+- Cargo workspace, crates stubbed, CI builds on macOS + Ubuntu (Wayland + X11 runtime check).
+- gpui-component window with dock layout, placeholder sidebar/center/right panels, light/dark.
+- Bundle Libertinus Serif as an embedded asset; register with the text system.
+- `wordy-doc`: create/open/save project; LoroTree with Manuscript/World/Notes roots.
+- **Accept:** app opens, creates a project file, restarts and reloads it.
+
+### Phase 1 — Plain editor on Loro (3–4 weeks)
+- `Paragraphs` view with byte/codepoint mapping + tests.
+- Editor element: text insert/delete, paragraphs, cursor, selection, mouse, scrolling, IME.
+- Undo/redo via UndoManager.
+- Scene tree: create/rename/reorder/delete scenes, open in tabs; status + include-in-compile
+  toggles in context menu.
+- Autosave + rolling snapshots. Word counts in status bar.
+- **Accept:** draft a chapter for a week in it without reaching for another app.
+
+### Phase 2 — Rich text + blocks (2 weeks)
+- Marks: bold/italic/underline/strike/smallcaps/highlight. Paragraph marks: headings/quote/break.
+- Smart typography. Copy/paste (plain + rich in-app).
+- Inline comments: add on selection, margin display, resolve/delete.
+- Find/replace in document.
+- **Accept:** a formatted scene round-trips through save/load and undo with no loss.
+
+### Phase 3 — World space + linking (3 weeks)
+- Entity nodes with templates and fields; entity sheet view; attachments (open externally).
+- Explicit links (⌘K picker, `[[`), link mark rendering, click → reference pane.
+- Aho-Corasick auto-link decorations; ambiguity + pin.
+- SQLite index: backlinks, FTS, per-node word counts. "Appears in" on sheets.
+- Split panes + reference pane wired up.
+- **Accept:** add a character, every past mention lights up; rename keeps explicit links intact.
+
+### Phase 4 — Momentum tools (2 weeks)
+- Goals (daily, manuscript, deadline → required pace), sessions, streak.
+- Dashboard + Reports (simple bar chart via gpui-component charts).
+- Tasks list; Placeholders scan; scene status colors in tree; tags + filter.
+- Scene versions (bookmark / compare / restore).
+- Spellcheck with spellbook + custom dictionary.
+- **Accept:** dashboard matches a manual count; a saved version can be viewed and restored.
+
+### Phase 5 — Export (1–2 weeks)
+- docx, epub, typst PDF, snippet PNG, project zip.
+- **Accept:** compiled manuscript opens cleanly in Word/Pages, Apple Books/Calibre, and a PDF viewer.
+
+### Phase 6 — LAN sync (1–2 weeks)
+- mDNS discovery, pairing, update exchange, asset manifest, dictionary union.
+- **Accept:** edit the same scene on both machines offline, sync, both converge with both edits.
+
+### Phase 7 — Polish (ongoing)
+- Focus mode, typewriter scroll, keyboard-only navigation, performance pass on long scenes,
+  history pruning, crash-safe recovery from `snapshots/`.
+
+Rough total: 3–4 months of evenings/weekends; faster if full-time. The editor (Phases 1–2) is
+roughly half the effort.
+
+---
+
+## 11. Risks and mitigations
+
+| Risk | Mitigation |
+|---|---|
+| gpui / gpui-component API churn | Pin exact versions; upgrade only between phases; keep UI code thin over `wordy-editor`. |
+| Editor correctness (IME, selection, wrapping) | Build on Loro deltas with exhaustive doc-level tests; test on a real Mac and Linux box from Phase 1. |
+| Loro Unicode-codepoint indexing vs byte offsets | Single mapping table per paragraph in `wordy-doc`; never index Loro from UI code directly. |
+| Linux HiDPI / Wayland quirks | Test early; keep X11 fallback; avoid fractional scaling assumptions. |
+| History growth | Shallow snapshot pruning; rolling backups. |
+| Single-file project corruption | Atomic writes + rolling snapshots + JSON mirror. |
+| Scope creep | Phase gates with acceptance lines; non-goals list is binding. |
+
+---
+
+## 12. Decisions (resolved 2026-10-03)
+
+1. **Project location:** fixed at `~/Wordy/`, one subfolder per project. No folder picker.
+2. **Fonts:** bundle a single open serif (Libertinus Serif) used by both the editor and the typst
+   PDF template, so output is identical on Mac and Linux. Embed via gpui asset source.
+3. **Comments:** inline only. `comment: ulid` mark on a text range; comment text lives in a
+   `comments` map (`<ulid>: Map { text: LoroText, created, resolved: bool }`). Shown in the margin
+   beside the range; resolved comments hidden by default.
+4. **Reference pane:** read-only. Renders the same `Paragraphs` view without an input handler.
+   Double-click or "Open" button opens the node in an editor tab.
+5. **Include in compile:** added in Phase 1 with the scene tree as a checkbox in the scene
+   context menu and inspector. Export reads it in Phase 5.
