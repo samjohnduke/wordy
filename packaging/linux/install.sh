@@ -28,14 +28,21 @@ if [ "${1:-}" = "--uninstall" ]; then
     exit 0
 fi
 
-bin=${WORDY_BIN:-$root/target/release/wordy}
+# In a release tarball the binary and icon sit next to this script; in a checkout
+# they come from target/release and packaging/.
+bin=${WORDY_BIN:-}
+if [ -z "$bin" ]; then
+    if [ -x "$here/wordy" ]; then bin=$here/wordy; else bin=$root/target/release/wordy; fi
+fi
 if [ ! -x "$bin" ] || [ "${1:-}" = "--build" ]; then
     (cd "$root" && cargo build --release)
 fi
+svg=$here/wordy.svg
+[ -f "$svg" ] || svg=$root/packaging/wordy.svg
 
 install -Dm755 "$bin" "$bin_dir/wordy"
 install -Dm644 "$here/$app.desktop" "$apps_dir/$app.desktop"
-install -Dm644 "$root/packaging/wordy.svg" "$icons_dir/scalable/apps/$app.svg"
+install -Dm644 "$svg" "$icons_dir/scalable/apps/$app.svg"
 for s in $sizes; do
     install -Dm644 "$here/icon-$s.png" "$icons_dir/${s}x${s}/apps/$app.png"
 done

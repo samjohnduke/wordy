@@ -1,0 +1,87 @@
+---
+import { getCollection, render } from "astro:content";
+import Base from "../layouts/Base.astro";
+import { RELEASES_URL } from "../lib/site";
+import { formatDate } from "../lib/releases";
+
+const entries = (await getCollection("changelog")).sort(
+  (a, b) => b.data.date.getTime() - a.data.date.getTime(),
+);
+const rendered = await Promise.all(
+  entries.map(async (e) => ({ ...e, Content: (await render(e)).Content })),
+);
+---
+
+<Base title="Changelog" description="What changed in each release of Wordy.">
+  <section class="section">
+    <div class="wrap">
+      <p class="eyebrow">Changelog</p>
+      <h1>What's new</h1>
+      <p class="lede">
+        One entry per release. Binaries for each are on the{" "}
+        <a href={RELEASES_URL}>releases page</a>; there is also an{" "}
+        <a href="/changelog.xml">RSS feed</a>.
+      </p>
+
+      {rendered.map((e) => (
+        <article id={`v${e.data.version}`} class="release">
+          <header>
+            <h2>
+              <a href={`#v${e.data.version}`}>{e.data.version}</a>{" "}
+              <span class="t">{e.data.title}</span>
+            </h2>
+            <time
+              datetime={e.data.date.toISOString().slice(0, 10)}
+              class="muted"
+            >
+              {formatDate(e.data.date)}
+            </time>
+          </header>
+          <div class="prose">
+            <e.Content />
+          </div>
+        </article>
+      ))}
+    </div>
+  </section>
+</Base>
+
+<style>
+  .release {
+    display: grid;
+    gap: 0.5rem 3rem;
+    padding-block: 2.2rem;
+    border-top: 1px solid var(--rule);
+    margin-top: 1rem;
+  }
+  @media (min-width: 800px) {
+    .release {
+      grid-template-columns: 14rem 1fr;
+    }
+  }
+  .release header h2 {
+    font-size: 1.6rem;
+    margin-bottom: 0.2rem;
+  }
+  .release header h2 a {
+    color: var(--ink);
+    text-decoration: none;
+  }
+  .release header h2 a:hover {
+    color: var(--accent);
+  }
+  .t {
+    display: block;
+    font-size: 1.1rem;
+    font-weight: 400;
+    color: var(--ink-2);
+  }
+  .release .prose :global(h2),
+  .release .prose :global(h3) {
+    font-size: 1.15rem;
+    margin-top: 1.2em;
+  }
+  .release .prose :global(> :first-child) {
+    margin-top: 0;
+  }
+</style>

@@ -1,0 +1,139 @@
+---
+import Base from "../layouts/Base.astro";
+import { ASSETS, RELEASES_URL, REPO_URL, type Platform } from "../lib/site";
+import {
+  assetFor,
+  formatDate,
+  formatSize,
+  latestRelease,
+} from "../lib/releases";
+
+const release = await latestRelease();
+const platforms = (Object.keys(ASSETS) as Platform[]).map((p) => ({
+  key: p,
+  ...ASSETS[p],
+  asset: assetFor(release, p),
+}));
+---
+
+<Base
+  title="Download"
+  description="Download Wordy for macOS (Apple Silicon) or Linux (x86_64), or build it from source with Cargo."
+>
+  <section class="section">
+    <div class="wrap">
+      <p class="eyebrow">Download</p>
+      <h1>Get Wordy</h1>
+      {release ? (
+        <p class="lede">
+          Latest release <strong>{release.version}</strong>, published{" "}
+          {formatDate(release.publishedAt)}.
+          <a href={`/changelog#v${release.version}`}>Release notes</a>
+        </p>
+      ) : (
+        <p class="lede">
+          There is no packaged release yet. The first one appears here as soon
+          as it is tagged; until then you can build Wordy from source below.
+        </p>
+      )}
+
+      <div class="grid">
+        {platforms.map((p) => (
+          <div class="card plat">
+            <h2>{p.label}</h2>
+            <p class="muted">{p.detail}</p>
+            {p.asset ? (
+              <>
+                <a class="btn btn-primary" href={p.asset.url} download>
+                  Download {p.asset.name}
+                </a>
+                <p class="muted small">
+                  {formatSize(p.asset.size)} ·{" "}
+                  <a href={`${p.asset.url}.sha256`}>SHA-256</a>
+                </p>
+              </>
+            ) : (
+              <>
+                <span class="btn btn-primary" aria-disabled="true">
+                  Not released yet
+                </span>
+                <p class="muted small">
+                  Will be <code>{p.name}</code> on the{" "}
+                  <a href={RELEASES_URL}>releases page</a>.
+                </p>
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div class="prose notes">
+        <h2>After downloading</h2>
+        <h3>macOS</h3>
+        <p>
+          Unzip and drag <code>Wordy.app</code> to Applications. The build is
+          not signed or notarised, so Gatekeeper will refuse it the first time.
+          Either right-click the app and choose Open, or clear the quarantine
+          flag once:
+        </p>
+        <pre><code>xattr -dr com.apple.quarantine /Applications/Wordy.app</code></pre>
+        <h3>Linux</h3>
+        <p>
+          Extract the archive and run the installer. It copies the binary to{" "}
+          <code>~/.local/bin</code>
+          and adds a launcher entry and icon under <code>~/.local/share</code>;
+          no root needed. Run it again with <code>--uninstall</code> to remove
+          everything.
+        </p>
+        <pre><code>tar xzf wordy-linux-x86_64.tar.gz
+cd wordy-*-linux-x86_64
+./install.sh</code></pre>
+        <p class="muted">
+          The binary needs Wayland or X11, Vulkan, fontconfig and ALSA at
+          runtime. Most desktop distributions have these already.
+        </p>
+
+        <h2>Build from source</h2>
+        <p>
+          Wordy is a Rust workspace. With a stable toolchain from{" "}
+          <a href="https://rustup.rs">rustup</a>:
+        </p>
+        <pre><code>git clone {REPO_URL}.git
+cd wordy
+cargo build --release
+./target/release/wordy</code></pre>
+        <p>
+          On Linux you also need the GPUI development packages (Wayland, X11,
+          fontconfig, freetype, ALSA, Vulkan, OpenSSL); the exact apt list is in
+          the repository's CI workflow. On macOS the Xcode command line tools
+          are enough. <code>packaging/linux/install.sh</code> and
+          <code>packaging/macos/bundle.sh</code> turn a release build into the
+          same install or app bundle as the downloads above.
+        </p>
+        <p>
+          Older releases and checksums are on the{" "}
+          <a href={RELEASES_URL}>GitHub releases page</a>.
+        </p>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .grid {
+    margin-top: 2rem;
+  }
+  .plat h2 {
+    margin-bottom: 0.2rem;
+  }
+  .plat .btn {
+    margin-top: 0.75rem;
+  }
+  .small {
+    font-size: 0.9rem;
+    margin: 0.75rem 0 0;
+  }
+  .notes {
+    margin-top: 3rem;
+  }
+</style>

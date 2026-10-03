@@ -1,0 +1,221 @@
+---
+import Base from "../layouts/Base.astro";
+import AppMock from "../components/AppMock.astro";
+import { REPO_URL } from "../lib/site";
+
+const spaces = [
+  {
+    name: "Manuscript",
+    text: "Acts, chapters and scenes in a tree you can drag around. Each scene is rich text with its own versions, tags, status and word count.",
+  },
+  {
+    name: "World",
+    text: "Characters, locations, cultures, systems and objects as sheets with fields, relations and aliases. Every mention in the manuscript is detected and linked back.",
+  },
+  {
+    name: "Notes",
+    text: "Research, outlines, loose threads. Same editor, same links, same search, kept out of the manuscript word count.",
+  },
+];
+
+const features = [
+  [
+    "A real editor",
+    "Bold, italic, underline, strikethrough, highlight colours, smart quotes and dashes, inline comments, find and replace, rich copy and paste.",
+  ],
+  [
+    "Links and mentions",
+    "Link to an entity explicitly, or let Wordy spot names and aliases as you type. Backlinks are indexed; the reference pane pins whatever you click.",
+  ],
+  [
+    "Versions and history",
+    "Snapshot a scene and diff it against the live text. Every keystroke is kept in the document's history, with rolling backups on disk.",
+  ],
+  [
+    "Goals and reports",
+    "A daily word goal, a streak, a manuscript target and a deadline. Reports by chapter, by day and by entity.",
+  ],
+  [
+    "Export",
+    "Manuscript to .docx, .epub, .pdf and Markdown. Quotes to a PNG snippet. The whole project to a zip.",
+  ],
+  [
+    "Sync between two machines",
+    "Pair a laptop and a desktop over the LAN with a short code. Changes merge without conflicts, because the document is a CRDT.",
+  ],
+  [
+    "Focus",
+    "Focus mode, typewriter scrolling, split panes, a command palette and keyboard navigation through the whole tree.",
+  ],
+  [
+    "Spellcheck",
+    "Hunspell dictionaries, a personal dictionary that syncs with the project, and a toggle when you want it out of the way.",
+  ],
+];
+---
+
+<Base
+  title="Wordy"
+  description="Wordy is a native writing desk for fiction on macOS and Linux: manuscript, world and notes in one window, with full history, exports, and sync between your own machines."
+>
+  <section class="hero wrap">
+    <div class="copy">
+      <p class="eyebrow">For macOS and Linux</p>
+      <h1>A writing desk for fiction, on your own machine.</h1>
+      <p class="lede">
+        Manuscript, world and notes in one native window. Rich text with full
+        history, exports to Word, ePub and PDF, and sync between your two
+        computers over the LAN. No account, no cloud, no subscription.
+      </p>
+      <div class="cta">
+        <a class="btn btn-primary" href="/download">
+          Download
+        </a>
+        <a class="btn btn-secondary" href="/changelog">
+          What's new
+        </a>
+      </div>
+    </div>
+    <AppMock />
+  </section>
+
+  <section class="section">
+    <div class="wrap">
+      <p class="eyebrow">Three spaces</p>
+      <h2>Everything a novel needs, nothing it doesn't.</h2>
+      <div class="grid spaces">
+        {spaces.map((s) => (
+          <div class="card">
+            <h3>{s.name}</h3>
+            <p>{s.text}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="wrap">
+      <p class="eyebrow">Features</p>
+      <h2>Built for the long middle of a book.</h2>
+      <dl class="features">
+        {features.map(([name, text]) => (
+          <div>
+            <dt>{name}</dt>
+            <dd>{text}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="wrap two">
+      <div>
+        <p class="eyebrow">Yours, on disk</p>
+        <h2>A project is a folder.</h2>
+        <p>
+          One file holds the whole project and its history. Next to it sits a
+          readable JSON mirror, a folder of rolling backups, and your
+          attachments. Copy the folder and you have copied the book. Nothing
+          leaves the machine unless you point Wordy at your other one.
+        </p>
+      </div>
+      <pre><code>My Novel/
+├── project.loro     the project and its full history
+├── project.json     readable mirror, rewritten as you work
+├── snapshots/       rolling backups
+├── assets/          attachments
+└── index.sqlite     search index, safe to delete</code></pre>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="wrap two">
+      <div>
+        <p class="eyebrow">Native</p>
+        <h2>Fast to open, light to run.</h2>
+        <p>
+          Wordy is written in Rust on GPUI, the GPU-rendered UI framework behind
+          the Zed editor. It starts in a blink, follows your system's light or
+          dark theme, and runs on Apple Silicon Macs and on Linux under Wayland
+          or X11.
+        </p>
+        <p>
+          The source is public on{" "}
+          <a href={REPO_URL} rel="noopener">
+            GitHub
+          </a>
+          . It is a personal tool first, shared in case it is useful to you too.
+        </p>
+      </div>
+      <div class="card">
+        <h3>Get it</h3>
+        <p>
+          Unsigned builds for macOS and Linux, or build it yourself with Cargo.
+        </p>
+        <a class="btn btn-primary" href="/download">
+          Download Wordy
+        </a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .hero {
+    display: grid;
+    gap: 2.5rem;
+    padding-block: clamp(3rem, 8vw, 6rem) clamp(2rem, 5vw, 4rem);
+    align-items: center;
+  }
+  @media (min-width: 960px) {
+    .hero {
+      grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+      gap: 3.5rem;
+    }
+  }
+  .cta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-top: 1.5rem;
+  }
+  .spaces h3 {
+    margin-bottom: 0.4rem;
+  }
+  .spaces p {
+    margin: 0;
+    color: var(--ink-2);
+  }
+  .features {
+    display: grid;
+    gap: 1.6rem 2.5rem;
+    grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+    margin: 1.5rem 0 0;
+  }
+  .features dt {
+    font-family: var(--serif);
+    font-weight: 700;
+    font-size: 1.2rem;
+    margin-bottom: 0.25rem;
+  }
+  .features dd {
+    margin: 0;
+    color: var(--ink-2);
+  }
+  .two {
+    display: grid;
+    gap: 2rem;
+    align-items: start;
+  }
+  @media (min-width: 800px) {
+    .two {
+      grid-template-columns: 1fr 1fr;
+      gap: 3rem;
+    }
+  }
+  .two pre {
+    margin: 0;
+  }
+</style>

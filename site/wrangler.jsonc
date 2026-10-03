@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "wordy-site",
+  "main": "@astrojs/cloudflare/entrypoints/server",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+  },
+  "observability": {
+    "enabled": true,
+  },
+  // Uncomment to serve from a custom domain on the Cloudflare zone (DNS is created on deploy),
+  // then set `site` in astro.config.mjs to match.
+  // "routes": [{ "pattern": "wordy.samduke.dev", "custom_domain": true }]
+}

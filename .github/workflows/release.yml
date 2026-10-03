@@ -1,0 +1,108 @@
+name: Release
+
+# Push a tag like v0.1.0 (matching [workspace.package] version in Cargo.toml) to build
+# unsigned binaries for both platforms and publish them as a GitHub Release. The release
+# body is site/src/content/changelog/<version>.md, which is also what the website shows.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check-version:
+    name: Tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: |
+          tag=${GITHUB_REF_NAME#v}
+          cargo=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -n1)
+          echo "tag $tag, Cargo.toml $cargo"
+          test "$tag" = "$cargo"
+          test -f "site/src/content/changelog/$tag.md" || echo "::warning::no changelog entry for $tag"
+
+  linux:
+    name: Linux x86_64
+    needs: check-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build dependencies for gpui (Wayland, X11, fonts, audio, Vulkan)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config cmake clang \
+            libasound2-dev libfontconfig-dev libfreetype-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-xcb-dev libxcb1-dev libxcb-xkb-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev \
+            libssl-dev libzstd-dev libsqlite3-dev libvulkan-dev libgl-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - name: Package
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          d=wordy-$v-linux-x86_64
+          mkdir "$d"
+          cp target/release/wordy packaging/linux/install.sh packaging/linux/dev.sam.wordy.desktop \
+             packaging/linux/icon-*.png packaging/wordy.svg "$d/"
+          tar czf wordy-linux-x86_64.tar.gz "$d"
+          sha256sum wordy-linux-x86_64.tar.gz > wordy-linux-x86_64.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: wordy-linux-x86_64.tar.gz*
+          if-no-files-found: error
+
+  macos:
+    name: macOS arm64
+    needs: check-version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sh packaging/macos/bundle.sh
+      - name: Package
+        run: |
+          ditto -c -k --keepParent target/release/Wordy.app Wordy-macos-arm64.zip
+          shasum -a 256 Wordy-macos-arm64.zip > Wordy-macos-arm64.zip.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: Wordy-macos-arm64.zip*
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    needs: [linux, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release notes from the changelog entry
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          f=site/src/content/changelog/$v.md
+          if [ -f "$f" ]; then
+            # Drop the YAML front matter; the rest is the GitHub Release body.
+            awk 'NR==1 && /^---$/ {skip=1; next} skip && /^---$/ {skip=0; next} !skip' "$f" > notes.md
+          else
+            echo "Wordy $v" > notes.md
+          fi
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          gh release create "$GITHUB_REF_NAME" --title "Wordy $v" --notes-file notes.md --verify-tag dist/*

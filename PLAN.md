@@ -23,7 +23,9 @@ docx/pdf/epub export, LAN sync).
 
 **Non-goals**
 - Windows, mobile, web, collaboration with other people, plugins, themes beyond light/dark,
-  inline images, tables, nested lists, footnotes, Scrivener import, public roadmap/changelog.
+  inline images, tables, nested lists, footnotes, Scrivener import, public roadmap.
+  (A public website with downloads and a changelog was added in Phase 14; the app itself
+  stays single-user and offline.)
 
 ---
 
@@ -454,3 +456,31 @@ roughly half the effort.
    Double-click or "Open" button opens the node in an editor tab.
 5. **Include in compile:** added in Phase 1 with the scene tree as a checkbox in the scene
    context menu and inspector. Export reads it in Phase 5.
+
+### Phase 14 — Website and releases (2026-10-04)
+
+- `site/`: Astro 7 + `@astrojs/cloudflare`, every page prerendered, served by a Cloudflare
+  Worker from static assets (`wrangler.jsonc`, name `wordy-site`). Pages: landing (feature
+  copy and an HTML illustration of the window, since no clean screenshot exists yet),
+  `/download`, `/changelog`, `/changelog.xml` (RSS), 404. Libertinus Serif from
+  `assets/fonts` for headings; palette from the icon.
+- Changelog entries are `site/src/content/changelog/<version>.md` (front matter: version,
+  date, title). `0.1.0.md` summarises Phases 0–13.
+- `/download` fetches the latest GitHub Release at build time (`GITHUB_TOKEN` optional) and
+  falls back to "not released yet" plus build-from-source instructions. Asset names are
+  versionless so `releases/latest/download/<name>` stays valid.
+- `.github/workflows/release.yml`: on a `v*` tag, checks the tag against the workspace
+  version, builds `wordy-linux-x86_64.tar.gz` (binary + `install.sh` + desktop file + icons)
+  on ubuntu-latest and `Wordy-macos-arm64.zip` (via `bundle.sh` and `ditto`) on
+  macos-latest, with `.sha256` files, and publishes a GitHub Release whose body is the
+  changelog entry. `install.sh` now also works from inside the tarball.
+- *(manual)* Deploy: `cd site && pnpm wrangler login && pnpm deploy`. Then optionally
+  uncomment `routes` in `site/wrangler.jsonc` for a custom domain and set `site` in
+  `astro.config.mjs` to match. The first tag (`v0.1.0`) has not been pushed.
+- *(manual)* Replace the HTML window illustration with a real screenshot
+  (`site/public/screenshot.png`) from a demo project once one exists.
+
+**Accept:** `pnpm build` and `pnpm check` clean; `wrangler dev` serves all routes (verified
+2026-10-04 with headless Chromium at desktop, mobile and dark); release.yml parses and the
+tarball layout matches what `install.sh` expects.
+

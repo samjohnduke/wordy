@@ -43,6 +43,11 @@ cargo test --all-targets
    hint, type a sentence into a new scene, quit with Cmd-Q, relaunch with
    the same path and see the sentence again. Delete `/tmp/launch-check`.
 3. Run the two-host sync checklist in [`docs/sync-test.md`](docs/sync-test.md).
+4. Bump `version` in the root `Cargo.toml`, add `site/src/content/changelog/<version>.md`,
+   then push a `v<version>` tag. `.github/workflows/release.yml` builds the Linux
+   tarball and the macOS app zip and publishes a GitHub Release with the changelog
+   entry as its notes. Redeploy the website afterwards so the download page picks
+   the release up.
 
 ## Install
 
@@ -61,6 +66,20 @@ packaging/macos/bundle.sh
 
 The icon is `packaging/wordy.svg`; the PNGs next to the scripts are rendered
 from it with `rsvg-convert` and checked in so neither script needs it.
+
+## Website
+
+`site/` is the public site (landing page, downloads, changelog): Astro on Cloudflare
+Workers, deployed with Wrangler. The download page reads the latest GitHub Release at
+build time, so it needs no changes per release.
+
+```sh
+cd site
+pnpm install
+pnpm dev              # http://localhost:4321
+pnpm preview          # production build served by wrangler dev
+pnpm deploy           # astro build && wrangler deploy (needs `pnpm wrangler login` once)
+```
 
 ## Data on disk
 

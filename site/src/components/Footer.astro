@@ -1,0 +1,37 @@
+---
+import { REPO_URL } from "../lib/site";
+---
+
+<footer>
+  <div class="wrap row">
+    <p>
+      Wordy is a personal project by <a href="https://samduke.dev">Sam Duke</a>.
+      Source on{" "}
+      <a href={REPO_URL} rel="noopener">
+        GitHub
+      </a>
+      .
+    </p>
+    <p>
+      <a href="/changelog.xml">Changelog feed</a>
+    </p>
+  </div>
+</footer>
+
+<style>
+  footer {
+    border-top: 1px solid var(--rule);
+    padding-block: 1.6rem;
+    font-size: 0.9rem;
+    color: var(--muted);
+  }
+  .row {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 0.5rem 2rem;
+  }
+  p {
+    margin: 0;
+  }
+</style>

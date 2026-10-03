@@ -1,0 +1,81 @@
+---
+import { REPO_URL } from "../lib/site";
+
+const path = Astro.url.pathname;
+const links = [
+  { href: "/download", label: "Download" },
+  { href: "/changelog", label: "Changelog" },
+];
+---
+
+<header>
+  <div class="wrap bar">
+    <a href="/" class="brand" aria-label="Wordy home">
+      <img src="/favicon.svg" alt="" width="28" height="28" />
+      <span>Wordy</span>
+    </a>
+    <nav aria-label="Site">
+      {links.map((l) => (
+        <a href={l.href} aria-current={path === l.href ? "page" : undefined}>
+          {l.label}
+        </a>
+      ))}
+      <a href={REPO_URL} rel="noopener">
+        GitHub
+      </a>
+    </nav>
+  </div>
+</header>
+
+<style>
+  header {
+    border-bottom: 1px solid var(--rule);
+    background: color-mix(in srgb, var(--paper) 88%, transparent);
+    backdrop-filter: blur(10px);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  .bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding-block: 0.7rem;
+  }
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-family: var(--serif);
+    font-weight: 700;
+    font-size: 1.35rem;
+    color: var(--ink);
+    text-decoration: none;
+  }
+  .brand img {
+    border-radius: 7px;
+  }
+  nav {
+    display: flex;
+    gap: 1.4rem;
+    font-size: 0.95rem;
+  }
+  nav a {
+    color: var(--ink-2);
+    text-decoration: none;
+    padding-block: 0.25rem;
+    border-bottom: 2px solid transparent;
+  }
+  nav a:hover,
+  nav a[aria-current="page"] {
+    color: var(--ink);
+    border-bottom-color: var(--accent);
+  }
+  @media (max-width: 480px) {
+    nav {
+      gap: 1rem;
+      font-size: 0.9rem;
+    }
+  }
+</style>
