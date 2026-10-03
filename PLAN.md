@@ -408,8 +408,10 @@ here rather than done in code.
 - macOS bundle: `packaging/macos/bundle.sh` builds a release binary and wraps it in
   `Wordy.app` with `Info.plist` and an `.icns` made with `sips` + `iconutil`. *(manual: run
   and open on a Mac; this machine cannot.)*
-- *(manual)* First real CI run: the apt package list in `ci.yml` was written blind; fix whatever
-  the first `ubuntu-latest` and `macos-latest` runs reject.
+- First real CI run (done 2026-10-03): the apt package list in `ci.yml` was written blind and
+  held up; the only breakage was an unquoted colon in a step name. Both `ubuntu-latest` and
+  `macos-latest` pass fmt, clippy, build and test (26 and 34 minutes cold). *(manual, still
+  open)* the Mac binary has not been launched by a person.
 - *(manual)* Two-host sync checklist (`docs/sync-test.md`) has never been run; sync is plain
   TCP on the LAN with no TLS, by design for a two-machine private tool.
 - *(manual)* HiDPI and fractional scaling: check text crispness and hit targets at 1.5× and 2×

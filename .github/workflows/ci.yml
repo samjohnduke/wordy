@@ -20,7 +20,7 @@ jobs:
         # macos-latest is Apple Silicon (arm64); ubuntu-latest is x86_64.
         os: [macos-latest, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Linux build dependencies for gpui (Wayland, X11, fonts, audio, Vulkan)
         if: runner.os == 'Linux'
