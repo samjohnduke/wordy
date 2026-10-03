@@ -1606,6 +1606,12 @@ impl Panel for HomePanel {
     fn tab_name(&self, _: &App) -> Option<SharedString> {
         Some("Home".into())
     }
+
+    /// The panel draws its own header, so the extra gap the tab group adds
+    /// under the tab bar once a second tab opens would only shift the layout.
+    fn inner_padding(&self, _: &App) -> bool {
+        false
+    }
 }
 
 impl EventEmitter<HomeEvent> for HomePanel {}
