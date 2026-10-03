@@ -634,7 +634,7 @@ impl SidebarPanel {
             }
             return;
         }
-        let frac = f32::from((pos.y - b.origin.y) / b.size.height);
+        let frac: f32 = (pos.y - b.origin.y) / b.size.height;
         let zone = if is_container {
             if frac < 0.25 {
                 DropZone::Before

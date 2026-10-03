@@ -359,8 +359,8 @@ impl HomePanel {
             self.set_status("This project is not saved to disk yet.".into(), None, false, cx);
             return;
         };
-        // Flush pending edits so the archive is current.
-        if let Err(e) = self.project.project.save() {
+        // Flush pending edits so the archive is current, project.json included.
+        if let Err(e) = self.project.project.save_and_mirror() {
             tracing::error!("save before backup: {e:#}");
         }
         let name = format!(

@@ -381,7 +381,7 @@ sidebar and editor) is **intentional** and stays.
   goal progress bars.
 - **Accept:** screenshots of every space look like one app, not a debug UI.
 
-### Phase 12 — Infrastructure and robustness
+### Phase 12 — Infrastructure and robustness (done 2026-10-03)
 - GitHub Actions: build + test on `macos-latest` (Apple Silicon) and `ubuntu-latest`; clippy
   and fmt gates. Mac binary verified to launch at least once (manual step documented).
 - Startup pruning: if the oldest change is older than 365 days, take a backup and shallow-snapshot

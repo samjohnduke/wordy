@@ -285,6 +285,21 @@ pub fn open_main_window(cx: &mut App) {
             return;
         }
     };
+    // Startup housekeeping: a project with more than a year of edit history
+    // gets backed up and compacted so it never needs manual attention.
+    let notice = match project.prune_if_old() {
+        Ok(Some(r)) => Some(format!(
+            "compacted edit history older than {} days: project.loro {} → {}; the full file was backed up to snapshots/",
+            r.age_days,
+            human_size(r.before.file_bytes),
+            human_size(r.after.file_bytes)
+        )),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::error!("startup pruning: {e:#}");
+            None
+        }
+    };
     let shared: SharedProject = Rc::new(ProjectHandle::new(project));
     wordy_editor::SpellState::set_custom_words(cx, shared.load_dictionary());
 
@@ -297,12 +312,26 @@ pub fn open_main_window(cx: &mut App) {
     };
 
     if let Err(e) = gpui_kit::open_window(options, cx, move |window, cx| {
-        cx.new(|cx| Workspace::new(shared, window, cx))
+        cx.new(|cx| {
+            let mut ws = Workspace::new(shared, window, cx);
+            ws.set_notice(notice);
+            ws
+        })
     }) {
         tracing::error!("open window: {e:#}");
         cx.quit();
     }
     cx.activate(true);
+}
+
+fn human_size(n: u64) -> String {
+    if n < 1024 {
+        format!("{n} B")
+    } else if n < 1024 * 1024 {
+        format!("{:.0} KB", n as f64 / 1024.)
+    } else {
+        format!("{:.1} MB", n as f64 / (1024. * 1024.))
+    }
 }
 
 pub fn toggle_theme(window: &mut Window, cx: &mut App) {

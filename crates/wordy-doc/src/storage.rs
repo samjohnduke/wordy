@@ -73,11 +73,22 @@ pub fn save(doc: &LoroDoc, dir: &Path) -> Result<()> {
 
 /// Write an already exported snapshot plus the JSON mirror of `doc`.
 pub fn write_project(doc: &LoroDoc, dir: &Path, snapshot: &[u8]) -> Result<()> {
+    write_snapshot(dir, snapshot)?;
+    write_json_mirror(doc, dir)
+}
+
+/// Write only `project.loro`, the file that matters.
+pub fn write_snapshot(dir: &Path, snapshot: &[u8]) -> Result<()> {
     std::fs::create_dir_all(dir)?;
-    write_atomic(&snapshot_path(dir), snapshot)?;
+    write_atomic(&snapshot_path(dir), snapshot)
+}
+
+/// Write `project.json`, a readable copy of the current state for grep and
+/// debugging. It is derived, so callers may skip it on most autosaves.
+pub fn write_json_mirror(doc: &LoroDoc, dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
     let json = serde_json::to_string_pretty(&doc.get_deep_value())?;
-    write_atomic(&json_path(dir), json.as_bytes())?;
-    Ok(())
+    write_atomic(&json_path(dir), json.as_bytes())
 }
 
 /// Rolling backups under `snapshots/`, newest first.

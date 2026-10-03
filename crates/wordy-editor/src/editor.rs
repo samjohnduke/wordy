@@ -19,6 +19,7 @@ use wordy_doc::{Block, Comments, Highlight, Marks, Paragraphs, Run, BULK_ORIGIN,
 use wordy_doc::{EntityNames, Matcher, TreeID};
 
 use crate::element::{FrameLayout, ProseElement};
+use crate::ime::{self, Composition};
 use crate::spell::{self, SpellState};
 use crate::style::EditorStyle;
 use crate::typography::smart_replace;
@@ -1335,9 +1336,10 @@ impl ProseEditor {
         }
         let r = self.sel.range();
         if r.is_empty() {
-            let mut m = Marks::default();
-            m.comment = self.current_marks().comment;
-            self.pending = Some(m);
+            self.pending = Some(Marks {
+                comment: self.current_marks().comment,
+                ..Default::default()
+            });
             cx.emit(EditorEvent::SelectionChanged);
             cx.notify();
             return;
@@ -1763,7 +1765,7 @@ impl ProseEditor {
             return;
         }
         let r = self.sel.range();
-        if self.matches.iter().any(|m| *m == r) {
+        if self.matches.contains(&r) {
             self.begin_edit();
             self.delete_cp_range(r.clone());
             self.insert_at(r.start, with);
@@ -1797,7 +1799,7 @@ impl ProseEditor {
             return cp.saturating_sub(1);
         };
         let before = &p.text[..pos.byte];
-        let start = before.grapheme_indices(true).last().map(|(b, _)| b).unwrap_or(0);
+        let start = before.grapheme_indices(true).next_back().map(|(b, _)| b).unwrap_or(0);
         self.paras.cp_at(pos.para, start)
     }
 
@@ -2172,27 +2174,24 @@ impl ProseEditor {
 
     // ----- UTF-16 helpers for the platform IME bridge ---------------------
 
-    fn cp_to_utf16(&self, cp: usize) -> usize {
-        self.plain.chars().take(cp).map(|c| c.len_utf16()).sum()
-    }
-
-    fn utf16_to_cp(&self, u: usize) -> usize {
-        let mut acc = 0;
-        for (i, c) in self.plain.chars().enumerate() {
-            if acc >= u {
-                return i;
-            }
-            acc += c.len_utf16();
-        }
-        self.plain.chars().count()
-    }
-
     fn range_cp_to_utf16(&self, r: &Range<usize>) -> Range<usize> {
-        self.cp_to_utf16(r.start)..self.cp_to_utf16(r.end)
+        ime::range_cp_to_utf16(&self.plain, r)
     }
 
     fn range_utf16_to_cp(&self, r: &Range<usize>) -> Range<usize> {
-        self.utf16_to_cp(r.start)..self.utf16_to_cp(r.end)
+        ime::range_utf16_to_cp(&self.plain, r)
+    }
+
+    fn composition(&self) -> Composition {
+        Composition {
+            marked: self.marked.clone(),
+            sel: self.sel,
+        }
+    }
+
+    fn set_composition(&mut self, st: Composition) {
+        self.marked = st.marked;
+        self.sel = st.sel;
     }
 }
 
@@ -2229,7 +2228,9 @@ impl EntityInputHandler for ProseEditor {
     }
 
     fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.marked = None;
+        let mut st = self.composition();
+        ime::unmark(&mut st);
+        self.set_composition(st);
         cx.notify();
     }
 
@@ -2243,12 +2244,7 @@ impl EntityInputHandler for ProseEditor {
         if self.read_only {
             return;
         }
-        let target = range_utf16
-            .map(|r| self.range_utf16_to_cp(&r))
-            .or_else(|| self.marked.clone())
-            .unwrap_or_else(|| self.sel.range());
-        let max = self.paras.max_cursor();
-        let target = target.start.min(max)..target.end.min(max);
+        let target = ime::target_range(&self.plain, &self.composition(), range_utf16, self.paras.max_cursor());
         // `[[` opens the link picker in place of the brackets.
         if text == "[" && self.marked.is_none() && target.is_empty() && target == self.sel.range() {
             let cp = target.start;
@@ -2268,10 +2264,9 @@ impl EntityInputHandler for ProseEditor {
             return;
         }
         self.begin_edit();
-        self.delete_cp_range(target.clone());
-        self.insert_at(target.start, text);
-        self.sel = Selection::caret(target.start + text.chars().count());
-        self.marked = None;
+        let mut st = self.composition();
+        ime::replace(&self.text, &mut st, target, text);
+        self.set_composition(st);
         self.goal_x = None;
         self.commit(cx);
     }
@@ -2287,47 +2282,11 @@ impl EntityInputHandler for ProseEditor {
         if self.read_only {
             return;
         }
-        let target = range_utf16
-            .map(|r| self.range_utf16_to_cp(&r))
-            .or_else(|| self.marked.clone())
-            .unwrap_or_else(|| self.sel.range());
-        let max = self.paras.max_cursor();
-        let target = target.start.min(max)..target.end.min(max);
+        let target = ime::target_range(&self.plain, &self.composition(), range_utf16, self.paras.max_cursor());
         self.begin_edit();
-        self.delete_cp_range(target.clone());
-        self.insert_at(target.start, new_text);
-        let n = new_text.chars().count();
-        self.marked = if n == 0 {
-            None
-        } else {
-            Some(target.start..target.start + n)
-        };
-        // The platform gives the selection relative to the marked text, in UTF-16.
-        let sel = match new_selected_range_utf16 {
-            Some(r) => {
-                let s = new_text.encode_utf16().take(r.start).count();
-                let e = new_text.encode_utf16().take(r.end).count();
-                let to_cp = |u: usize| {
-                    let mut acc = 0;
-                    let mut i = 0;
-                    for c in new_text.chars() {
-                        if acc >= u {
-                            break;
-                        }
-                        acc += c.len_utf16();
-                        i += 1;
-                    }
-                    i
-                };
-                let _ = (s, e);
-                Selection {
-                    anchor: target.start + to_cp(r.start),
-                    head: target.start + to_cp(r.end),
-                }
-            }
-            None => Selection::caret(target.start + n),
-        };
-        self.sel = sel;
+        let mut st = self.composition();
+        ime::replace_and_mark(&self.text, &mut st, target, new_text, new_selected_range_utf16);
+        self.set_composition(st);
         self.commit(cx);
     }
 
@@ -2361,7 +2320,7 @@ impl EntityInputHandler for ProseEditor {
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
         let cp = self.cp_for_window_point(point)?;
-        Some(self.cp_to_utf16(cp))
+        Some(ime::cp_to_utf16(&self.plain, cp))
     }
 
     fn text_length_utf16(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<usize> {

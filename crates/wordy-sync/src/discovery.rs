@@ -70,10 +70,8 @@ impl Discovery {
                             p2.lock().unwrap().insert(info.fullname.clone(), peer);
                             g2.fetch_add(1, Ordering::Relaxed);
                         }
-                        ServiceEvent::ServiceRemoved(_, fullname) => {
-                            if p2.lock().unwrap().remove(&fullname).is_some() {
-                                g2.fetch_add(1, Ordering::Relaxed);
-                            }
+                        ServiceEvent::ServiceRemoved(_, fullname) if p2.lock().unwrap().remove(&fullname).is_some() => {
+                            g2.fetch_add(1, Ordering::Relaxed);
                         }
                         _ => {}
                     }

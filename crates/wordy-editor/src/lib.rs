@@ -7,6 +7,7 @@
 
 mod editor;
 mod element;
+pub mod ime;
 pub mod spell;
 mod style;
 mod typography;

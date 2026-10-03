@@ -1,12 +1,14 @@
 //! A Wordy project: one LoroDoc plus typed access to its containers.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
 use loro::{
-    CommitOptions, ExportMode, Frontiers, LoroDoc, LoroMap, LoroTree, LoroValue, TreeID, TreeParentId, ValueOrContainer,
+    CommitOptions, ExportMode, Frontiers, LoroDoc, LoroMap, LoroTree, LoroValue, TreeID, TreeParentId,
+    ValueOrContainer, ID,
 };
 
 use crate::comments::Comments;
@@ -31,6 +33,24 @@ pub struct Project {
     /// Set by [`Project::compact_history`]: saves drop history before this
     /// version. The in-memory doc keeps its full history until the next launch.
     shallow_root: RefCell<Option<Frontiers>>,
+    /// When `project.json` was last written; see [`MIRROR_INTERVAL`].
+    last_mirror: Cell<Option<Instant>>,
+}
+
+/// `project.json` is rewritten at most this often by [`Project::save`].
+/// [`Project::save_and_mirror`] (used on quit) always writes it.
+pub const MIRROR_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// History older than this is discarded automatically at startup.
+pub const PRUNE_AFTER_DAYS: i64 = 365;
+
+/// What [`Project::prune_if_old`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PruneReport {
+    /// Age of the oldest change that was discarded, in days.
+    pub age_days: i64,
+    pub before: HistoryStats,
+    pub after: HistoryStats,
 }
 
 /// Size of the edit history, for the dashboard.
@@ -59,6 +79,7 @@ impl Project {
             dir: None,
             recovered_from: None,
             shallow_root: RefCell::new(None),
+            last_mirror: Cell::new(None),
         };
         project.init_schema(name)?;
         project.ensure_id()?;
@@ -118,6 +139,7 @@ impl Project {
             dir: Some(dir.to_path_buf()),
             recovered_from,
             shallow_root: RefCell::new(None),
+            last_mirror: Cell::new(None),
         };
         p.ensure_roots()?;
         if p.recovered_from.is_some() {
@@ -158,7 +180,25 @@ impl Project {
         self.recovered_from.as_deref()
     }
 
+    /// Write the snapshot. The JSON mirror is refreshed only if it is older
+    /// than [`MIRROR_INTERVAL`] (or was never written); it is a convenience
+    /// copy, and serializing the whole project on every autosave is wasted work.
     pub fn save(&self) -> Result<()> {
+        let due = self
+            .last_mirror
+            .get()
+            .map(|t| t.elapsed() >= MIRROR_INTERVAL)
+            .unwrap_or(true);
+        self.save_inner(due)
+    }
+
+    /// Write the snapshot and the JSON mirror unconditionally. Use on quit
+    /// and for explicit saves, so the mirror never lags behind for long.
+    pub fn save_and_mirror(&self) -> Result<()> {
+        self.save_inner(true)
+    }
+
+    fn save_inner(&self, mirror: bool) -> Result<()> {
         let Some(dir) = &self.dir else { return Ok(()) };
         self.commit_meta();
         let bytes = match &*self.shallow_root.borrow() {
@@ -171,7 +211,70 @@ impl Project {
                 .export(ExportMode::Snapshot)
                 .map_err(|e| anyhow!("export: {e}"))?,
         };
-        storage::write_project(&self.doc, dir, &bytes)
+        storage::write_snapshot(dir, &bytes)?;
+        if mirror {
+            storage::write_json_mirror(&self.doc, dir)?;
+            self.last_mirror.set(Some(Instant::now()));
+        }
+        Ok(())
+    }
+
+    /// Unix time (seconds) of the oldest change still in the op log, if any.
+    /// Loro records a timestamp on every commit (see `set_record_timestamp`).
+    pub fn oldest_change_timestamp(&self) -> Option<i64> {
+        let vv = self.doc.oplog_vv();
+        let since = self.doc.shallow_since_vv();
+        let mut oldest: Option<i64> = None;
+        for (peer, end) in vv.iter() {
+            let start = since.get(peer).copied().unwrap_or(0);
+            if start >= *end {
+                continue;
+            }
+            if let Some(meta) = self.doc.get_change(ID::new(*peer, start)) {
+                // Loro stores seconds; be tolerant of a millisecond value.
+                let mut ts = meta.timestamp;
+                if ts > 100_000_000_000 {
+                    ts /= 1000;
+                }
+                if ts > 0 {
+                    oldest = Some(oldest.map_or(ts, |o| o.min(ts)));
+                }
+            }
+        }
+        oldest
+    }
+
+    /// Days between the oldest change in the op log and now.
+    pub fn history_age_days(&self) -> Option<i64> {
+        let oldest = self.oldest_change_timestamp()?;
+        let now = chrono::Utc::now().timestamp();
+        Some((now - oldest).max(0) / 86_400)
+    }
+
+    /// Startup housekeeping: if the op log reaches back more than
+    /// [`PRUNE_AFTER_DAYS`], back the full file up and compact the history,
+    /// so a years-old project never needs the user to find the Compact button.
+    /// Returns what happened, or `None` if nothing needed doing.
+    pub fn prune_if_old(&self) -> Result<Option<PruneReport>> {
+        let Some(age_days) = self.history_age_days() else {
+            return Ok(None);
+        };
+        // Fewer than two changes means there is nothing behind the head to drop.
+        if age_days <= PRUNE_AFTER_DAYS || self.doc.len_changes() < 2 {
+            return Ok(None);
+        }
+        let before = self.history_stats();
+        let after = self.compact_history()?;
+        tracing::info!(
+            "pruned history older than {age_days} days: project.loro {} -> {} bytes (in-memory history is dropped on relaunch)",
+            before.file_bytes,
+            after.file_bytes
+        );
+        Ok(Some(PruneReport {
+            age_days,
+            before,
+            after,
+        }))
     }
 
     pub fn history_stats(&self) -> HistoryStats {
@@ -743,6 +846,7 @@ mod tests {
             dir: None,
             recovered_from: None,
             shallow_root: RefCell::new(None),
+            last_mirror: Cell::new(None),
         };
         q.ensure_roots().unwrap();
         assert_eq!(q.name(), "Round");
@@ -782,6 +886,94 @@ mod tests {
         Project::create(&dir2, "Other").unwrap();
         std::fs::write(storage::snapshot_path(&dir2), b"garbage").unwrap();
         assert!(Project::open(&dir2).is_err());
+    }
+
+    #[test]
+    fn json_mirror_is_throttled_and_forced_on_quit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("Mirror");
+        let p = Project::create(&dir, "Mirror").unwrap();
+        let json = storage::json_path(&dir);
+        let first = std::fs::read_to_string(&json).unwrap();
+        assert!(first.contains("Mirror"), "create writes the mirror once");
+
+        p.set_name("Renamed").unwrap();
+        p.save().unwrap();
+        // The snapshot is current, the mirror is not: it was written seconds ago.
+        let reopened = Project::open(&dir).unwrap();
+        assert_eq!(reopened.name(), "Renamed");
+        assert_eq!(std::fs::read_to_string(&json).unwrap(), first);
+
+        p.save_and_mirror().unwrap();
+        let forced = std::fs::read_to_string(&json).unwrap();
+        assert!(forced.contains("Renamed") && forced != first);
+
+        // Once the interval has passed, a plain save refreshes it again.
+        p.last_mirror.set(Some(
+            Instant::now() - MIRROR_INTERVAL - std::time::Duration::from_secs(1),
+        ));
+        p.set_name("Again").unwrap();
+        p.save().unwrap();
+        assert!(std::fs::read_to_string(&json).unwrap().contains("Again"));
+    }
+
+    #[test]
+    fn startup_pruning_compacts_year_old_history_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("Old");
+        std::fs::create_dir_all(dir.join("snapshots")).unwrap();
+        // Loro never lets a commit's timestamp go below its predecessors',
+        // so the old change has to be the very first one in the document.
+        let doc = LoroDoc::new();
+        doc.set_record_timestamp(true);
+        schema::configure_text_styles(&doc);
+        let long_ago = chrono::Utc::now().timestamp() - 400 * 86_400;
+        doc.set_next_commit_timestamp(long_ago);
+        doc.get_text("scratch").insert(0, "first draft").unwrap();
+        doc.commit();
+        let p = Project {
+            doc,
+            dir: Some(dir.clone()),
+            recovered_from: None,
+            shallow_root: RefCell::new(None),
+            last_mirror: Cell::new(None),
+        };
+        p.init_schema("Old").unwrap();
+        p.ensure_id().unwrap();
+        let sc = p
+            .create_node(p.root(Space::Manuscript), NodeKind::Scene, "One")
+            .unwrap();
+        let body = p.node(sc).unwrap().body().unwrap();
+        for i in 0..20 {
+            body.insert(body.len_unicode(), &format!("w{i} ")).unwrap();
+            p.doc.commit();
+        }
+        body.insert(body.len_unicode(), "end").unwrap();
+        p.doc.commit();
+        p.save().unwrap();
+        assert!(p.history_age_days().unwrap() >= 399, "{:?}", p.history_age_days());
+
+        let report = p.prune_if_old().unwrap().expect("old history gets pruned");
+        assert!(report.age_days >= 399);
+        // The in-memory doc keeps its history until relaunch; the file shrinks now.
+        assert!(
+            report.after.shallow && report.after.file_bytes < report.before.file_bytes,
+            "{report:?}"
+        );
+        assert_eq!(storage::backups(&dir).len(), 1, "the full file is backed up first");
+
+        // Reopened: content intact, shallow, and nothing left to prune.
+        let p2 = Project::open(&dir).unwrap();
+        assert!(p2.doc.is_shallow());
+        assert!(
+            p2.node(sc).unwrap().plain_text().contains("w0 w1") && p2.node(sc).unwrap().plain_text().contains("end")
+        );
+        assert_eq!(p2.prune_if_old().unwrap(), None);
+        assert_eq!(storage::backups(&dir).len(), 1);
+
+        // A fresh project is left alone.
+        let fresh = Project::create(&tmp.path().join("Fresh"), "Fresh").unwrap();
+        assert_eq!(fresh.prune_if_old().unwrap(), None);
     }
 
     #[test]

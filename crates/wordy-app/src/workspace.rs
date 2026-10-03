@@ -213,6 +213,9 @@ pub struct Workspace {
     /// Nodes edited since the last save; re-indexed on save.
     dirty_nodes: HashSet<TreeID>,
     last_saved: Option<String>,
+    /// One-off message for the status bar (e.g. "history compacted at
+    /// startup"). Cleared by the next save, so it is seen once per launch.
+    notice: Option<String>,
     save_task: Option<Task<()>>,
     layout_task: Option<Task<()>>,
     /// Set once `restore_layout` has run; layout writes before that are noise.
@@ -312,6 +315,7 @@ impl Workspace {
             last_edit: None,
             dirty_nodes: HashSet::new(),
             last_saved: None,
+            notice: None,
             save_task: None,
             layout_task: None,
             restoring: true,
@@ -1317,12 +1321,26 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Something worth telling the user once, shown in the status bar until
+    /// the next save.
+    pub fn set_notice(&mut self, notice: Option<String>) {
+        self.notice = notice;
+    }
+
+    /// Autosave: the snapshot now, the JSON mirror at most every 30 s.
     fn save_now(&mut self, cx: &mut Context<Self>) {
+        self.save_with(false, cx);
+    }
+
+    fn save_with(&mut self, mirror: bool, cx: &mut Context<Self>) {
         self.save_task = None;
         self.record_session();
-        match self.project.project.save() {
+        let p = &self.project.project;
+        let result = if mirror { p.save_and_mirror() } else { p.save() };
+        match result {
             Ok(()) => {
                 self.dirty = false;
+                self.notice = None;
                 self.last_saved = Some(chrono_time());
                 for id in std::mem::take(&mut self.dirty_nodes) {
                     self.project.update_index_node(id);
@@ -1382,8 +1400,9 @@ impl Workspace {
         self.last_backup = Some(Instant::now());
     }
 
+    /// Explicit save: everything on disk is current, mirror included.
     fn save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
-        self.save_now(cx);
+        self.save_with(true, cx);
         self.backup_now();
     }
 
@@ -1392,11 +1411,8 @@ impl Workspace {
     }
 
     fn quit(&mut self, _: &Quit, _: &mut Window, cx: &mut Context<Self>) {
-        if self.dirty {
-            self.save_now(cx);
-        } else {
-            self.save_layout(cx);
-        }
+        // Always: an autosave may have skipped the JSON mirror.
+        self.save_with(true, cx);
         cx.quit();
     }
 
@@ -1551,6 +1567,7 @@ impl Render for Workspace {
                     n.to_string_lossy()
                 )
             });
+        let notice = self.notice.clone();
         let focus_mode = self.focus_mode;
 
         v_flex()
@@ -1629,6 +1646,7 @@ impl Render for Workspace {
                                     .child(save_state),
                             )
                             .children(recovered.map(|r| div().flex_shrink_0().text_color(cx.theme().danger).child(r)))
+                            .children(notice.map(|n| div().flex_shrink_0().text_color(cx.theme().primary).child(n)))
                             .child(
                                 div()
                                     .id("status-spell")
