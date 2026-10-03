@@ -13,7 +13,10 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use wordy_doc::{NodeKind, Space, Status, TreeID};
 
-use crate::app::SharedProject;
+use crate::app::{
+    SharedProject, SidebarActivate, SidebarBack, SidebarDown, SidebarLeft, SidebarRename, SidebarRight, SidebarTrash,
+    SidebarUp, SIDEBAR_CONTEXT,
+};
 
 pub enum SidebarEvent {
     /// Open a node with a body in an editor tab.
@@ -22,6 +25,8 @@ pub enum SidebarEvent {
     Changed,
     /// A node was trashed or deleted; close its tab if open.
     Removed(TreeID),
+    /// Escape: hand focus back to the active editor.
+    FocusEditor,
 }
 
 struct Rename {
@@ -151,6 +156,170 @@ impl SidebarPanel {
 
     pub fn select(&mut self, id: Option<TreeID>, cx: &mut Context<Self>) {
         self.selected = id;
+        cx.notify();
+    }
+
+    // ----- keyboard navigation --------------------------------------------
+
+    /// Focus the tree for arrow-key navigation, selecting the first row if
+    /// nothing is selected.
+    pub fn focus_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected.is_none() {
+            self.selected = self.visible_rows().first().copied();
+        }
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// Rows currently shown, top to bottom (collapsed subtrees skipped).
+    fn visible_rows(&self) -> Vec<TreeID> {
+        let p = &self.project.project;
+        let mut out = Vec::new();
+        self.collect_visible(p.root(self.space), &mut out);
+        if self.show_trash {
+            self.collect_visible(p.trash(self.space), &mut out);
+        }
+        out
+    }
+
+    fn collect_visible(&self, parent: TreeID, out: &mut Vec<TreeID>) {
+        for child in self.project.project.children(parent) {
+            out.push(child);
+            if !self.collapsed.contains(&child) {
+                self.collect_visible(child, out);
+            }
+        }
+    }
+
+    /// Keys go to the search box or the rename field while one has focus.
+    fn keyboard_blocked(&self, window: &Window, cx: &App) -> bool {
+        self.rename.is_some() || self.search.read(cx).focus_handle(cx).is_focused(window)
+    }
+
+    fn step_selection(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.keyboard_blocked(window, cx) {
+            cx.propagate();
+            return;
+        }
+        let rows = self.visible_rows();
+        if rows.is_empty() {
+            return;
+        }
+        let ix = self.selected.and_then(|s| rows.iter().position(|r| *r == s));
+        let next = match ix {
+            Some(i) => (i as isize + delta).clamp(0, rows.len() as isize - 1) as usize,
+            None if delta > 0 => 0,
+            None => rows.len() - 1,
+        };
+        self.selected = Some(rows[next]);
+        cx.notify();
+    }
+
+    fn on_up(&mut self, _: &SidebarUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_selection(-1, window, cx);
+    }
+
+    fn on_down(&mut self, _: &SidebarDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_selection(1, window, cx);
+    }
+
+    /// Left: collapse an open container, else jump to the parent.
+    fn on_left(&mut self, _: &SidebarLeft, window: &mut Window, cx: &mut Context<Self>) {
+        if self.keyboard_blocked(window, cx) {
+            cx.propagate();
+            return;
+        }
+        let Some(id) = self.selected else { return };
+        let p = &self.project.project;
+        let Ok(node) = p.node(id) else { return };
+        if node.kind().is_container() && !self.collapsed.contains(&id) && !p.children(id).is_empty() {
+            self.collapsed.insert(id);
+        } else if let Some(parent) = node.parent() {
+            let parent_is_root =
+                p.node(parent).map(|n| matches!(n.kind(), NodeKind::Root | NodeKind::Trash)).unwrap_or(true);
+            if !parent_is_root {
+                self.selected = Some(parent);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Right: expand a collapsed container, else step into its first child.
+    fn on_right(&mut self, _: &SidebarRight, window: &mut Window, cx: &mut Context<Self>) {
+        if self.keyboard_blocked(window, cx) {
+            cx.propagate();
+            return;
+        }
+        let Some(id) = self.selected else { return };
+        let p = &self.project.project;
+        let Ok(node) = p.node(id) else { return };
+        if !node.kind().is_container() {
+            return;
+        }
+        if self.collapsed.remove(&id) {
+            cx.notify();
+            return;
+        }
+        if let Some(first) = p.children(id).first().copied() {
+            self.selected = Some(first);
+        }
+        cx.notify();
+    }
+
+    /// Enter: open a document, or fold/unfold a container.
+    fn on_activate(&mut self, _: &SidebarActivate, window: &mut Window, cx: &mut Context<Self>) {
+        if self.keyboard_blocked(window, cx) {
+            cx.propagate();
+            return;
+        }
+        let Some(id) = self.selected else { return };
+        let Ok(node) = self.project.project.node(id) else { return };
+        if node.kind().is_container() {
+            if !self.collapsed.remove(&id) {
+                self.collapsed.insert(id);
+            }
+            cx.notify();
+        } else {
+            self.activate(id, cx);
+        }
+    }
+
+    fn on_back(&mut self, _: &SidebarBack, _: &mut Window, cx: &mut Context<Self>) {
+        if self.rename.is_some() {
+            cx.propagate();
+            return;
+        }
+        cx.emit(SidebarEvent::FocusEditor);
+    }
+
+    fn on_rename(&mut self, _: &SidebarRename, window: &mut Window, cx: &mut Context<Self>) {
+        if self.keyboard_blocked(window, cx) {
+            cx.propagate();
+            return;
+        }
+        if let Some(id) = self.selected {
+            self.begin_rename(id, window, cx);
+        }
+    }
+
+    /// Delete: move the selection to the trash (never deletes for good).
+    fn on_trash(&mut self, _: &SidebarTrash, window: &mut Window, cx: &mut Context<Self>) {
+        if self.keyboard_blocked(window, cx) {
+            cx.propagate();
+            return;
+        }
+        let Some(id) = self.selected else { return };
+        if !self.project.project.is_live(id) {
+            return;
+        }
+        let rows = self.visible_rows();
+        let ix = rows.iter().position(|r| *r == id);
+        self.trash(id, cx);
+        // Keep the keyboard somewhere useful: the row that moved up into place.
+        let rows = self.visible_rows();
+        if let Some(ix) = ix {
+            self.selected = rows.get(ix).or_else(|| rows.last()).copied();
+        }
         cx.notify();
     }
 
@@ -572,6 +741,15 @@ impl Render for SidebarPanel {
         v_flex()
             .size_full()
             .track_focus(&self.focus)
+            .key_context(SIDEBAR_CONTEXT)
+            .on_action(cx.listener(Self::on_up))
+            .on_action(cx.listener(Self::on_down))
+            .on_action(cx.listener(Self::on_left))
+            .on_action(cx.listener(Self::on_right))
+            .on_action(cx.listener(Self::on_activate))
+            .on_action(cx.listener(Self::on_back))
+            .on_action(cx.listener(Self::on_rename))
+            .on_action(cx.listener(Self::on_trash))
             .p_1()
             .child(header)
             .child(div().px_1().pb_1().child(Input::new(&self.search).small()))

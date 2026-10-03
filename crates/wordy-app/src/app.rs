@@ -27,11 +27,36 @@ gpui_kit::actions!(
         CloseFind,
         ToggleReference,
         SearchProject,
-        ShowHome
+        ShowHome,
+        ToggleFocusMode,
+        ToggleTypewriter,
+        QuickOpen,
+        CloseQuickOpen,
+        QuickOpenUp,
+        QuickOpenDown,
+        NextTab,
+        PrevTab,
+        CloseTab,
+        NextDocument,
+        PrevDocument,
+        FocusSidebar,
+        SpaceManuscript,
+        SpaceWorld,
+        SpaceNotes,
+        SidebarUp,
+        SidebarDown,
+        SidebarLeft,
+        SidebarRight,
+        SidebarActivate,
+        SidebarBack,
+        SidebarRename,
+        SidebarTrash
     ]
 );
 
 pub const EDITOR_PANEL_CONTEXT: &str = "EditorPanel";
+pub const QUICK_OPEN_CONTEXT: &str = "QuickOpen";
+pub const SIDEBAR_CONTEXT: &str = "Sidebar";
 
 /// The open project, shared by every view in the window.
 ///
@@ -178,6 +203,31 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-shift-r", ToggleReference, None),
         KeyBinding::new("secondary-shift-f", SearchProject, None),
         KeyBinding::new("secondary-shift-h", ShowHome, None),
+        KeyBinding::new("secondary-shift-d", ToggleFocusMode, None),
+        KeyBinding::new("secondary-shift-y", ToggleTypewriter, None),
+        KeyBinding::new("secondary-p", QuickOpen, None),
+        KeyBinding::new("escape", CloseQuickOpen, Some(QUICK_OPEN_CONTEXT)),
+        KeyBinding::new("up", QuickOpenUp, Some(QUICK_OPEN_CONTEXT)),
+        KeyBinding::new("ctrl-p", QuickOpenUp, Some(QUICK_OPEN_CONTEXT)),
+        KeyBinding::new("down", QuickOpenDown, Some(QUICK_OPEN_CONTEXT)),
+        KeyBinding::new("ctrl-n", QuickOpenDown, Some(QUICK_OPEN_CONTEXT)),
+        KeyBinding::new("ctrl-tab", NextTab, None),
+        KeyBinding::new("ctrl-shift-tab", PrevTab, None),
+        KeyBinding::new("secondary-w", CloseTab, None),
+        KeyBinding::new("secondary-alt-down", NextDocument, None),
+        KeyBinding::new("secondary-alt-up", PrevDocument, None),
+        KeyBinding::new("secondary-e", FocusSidebar, None),
+        KeyBinding::new("secondary-1", SpaceManuscript, None),
+        KeyBinding::new("secondary-2", SpaceWorld, None),
+        KeyBinding::new("secondary-3", SpaceNotes, None),
+        KeyBinding::new("up", SidebarUp, Some(SIDEBAR_CONTEXT)),
+        KeyBinding::new("down", SidebarDown, Some(SIDEBAR_CONTEXT)),
+        KeyBinding::new("left", SidebarLeft, Some(SIDEBAR_CONTEXT)),
+        KeyBinding::new("right", SidebarRight, Some(SIDEBAR_CONTEXT)),
+        KeyBinding::new("enter", SidebarActivate, Some(SIDEBAR_CONTEXT)),
+        KeyBinding::new("escape", SidebarBack, Some(SIDEBAR_CONTEXT)),
+        KeyBinding::new("f2", SidebarRename, Some(SIDEBAR_CONTEXT)),
+        KeyBinding::new("delete", SidebarTrash, Some(SIDEBAR_CONTEXT)),
     ]);
     Theme::sync_system_appearance(None, cx);
 }

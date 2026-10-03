@@ -1,7 +1,8 @@
 //! `ProseElement`: lays out, paints, and hit-tests a `ProseEditor`.
 //!
-//! Each paragraph is shaped as one wrapped line (gpui caches shaping per
-//! frame, so re-shaping unchanged paragraphs is cheap). The resulting
+//! Each paragraph is shaped as one wrapped line (gpui's text system caches
+//! shaping and wrapping across frames, so unchanged paragraphs cost a hash
+//! lookup). Prepaint logs at debug level when a frame takes over 8 ms. The resulting
 //! geometry is published to the editor as a `FrameLayout` so keyboard
 //! movement, mouse clicks, and the IME bridge can all hit-test against the
 //! same numbers the painter used.
@@ -62,6 +63,8 @@ pub(crate) struct FrameLayout {
     pub origin: Point<Pixels>,
     #[allow(dead_code)]
     pub wrap_width: Pixels,
+    /// Viewport height the frame was laid out for.
+    pub view_height: Pixels,
     pub paras: Vec<ParaLayout>,
     pub max_scroll: Pixels,
     pub cards: Vec<CommentCard>,
@@ -152,6 +155,8 @@ struct Palette {
     mention: Hsla,
     ambiguous: Hsla,
     spelling: Hsla,
+    /// Paragraphs outside the caret's in focus mode.
+    dim: Hsla,
 }
 
 impl Palette {
@@ -174,6 +179,7 @@ impl Palette {
             mention: t.primary.opacity(0.75),
             ambiguous: hsla(0.08, 0.9, 0.5, 0.95),
             spelling: hsla(0.0, 0.85, 0.55, 0.95),
+            dim: t.foreground.opacity(0.35),
         }
     }
 }
@@ -253,6 +259,7 @@ impl ProseElement {
         active_comment: Option<&str>,
         show_resolved_comments: &dyn Fn(&str) -> bool,
         mentions: &[(Range<usize>, Underline)],
+        dim: bool,
     ) -> (SharedString, Vec<TextRun>) {
         let family = style.font_family.clone();
         let base_weight = if para.block.is_heading() { FontWeight::BOLD } else { FontWeight::NORMAL };
@@ -276,7 +283,15 @@ impl ProseElement {
             let m = &r.marks;
             let weight = if m.bold { FontWeight::BOLD } else { base_weight };
             let italic = m.italic ^ base_italic;
-            let color = if m.link.is_some() { pal.link } else if para.block == Block::Quote { pal.muted } else { pal.fg };
+            let color = if dim {
+                pal.dim
+            } else if m.link.is_some() {
+                pal.link
+            } else if para.block == Block::Quote {
+                pal.muted
+            } else {
+                pal.fg
+            };
             let features = if m.smallcaps {
                 FontFeatures(Arc::new(vec![("smcp".to_string(), 1)]))
             } else {
@@ -402,9 +417,10 @@ impl Element for ProseElement {
         window: &mut Window,
         cx: &mut App,
     ) -> ProsePrepaint {
+        let started = std::time::Instant::now();
         let pal = Palette::from_theme(cx);
 
-        let (style, scroll_y, want_scroll, head, frame_cell, active_comment, anchors) = {
+        let (style, scroll_y, want_scroll, head, frame_cell, active_comment, anchors, typewriter, dim_inactive) = {
             let e = self.editor.read(cx);
             (
                 e.style.clone(),
@@ -414,9 +430,15 @@ impl Element for ProseElement {
                 e.frame.clone(),
                 e.active_comment(),
                 e.comment_anchors(),
+                e.typewriter,
+                e.dim_inactive,
             )
         };
-        let paras = self.editor.read(cx).paragraphs().clone();
+        let paras = self.editor.read(cx).paragraphs_rc();
+        // Typewriter mode needs half a view of slack above the text so the
+        // first line can sit at the centre too.
+        let padding_top = style.padding_top + if typewriter { bounds.size.height * 0.5 } else { px(0.) };
+        let caret_para = paras.locate(head).para;
         let visible_comment = |id: &str| anchors.iter().any(|a| a.id == id);
         // Mentions and misspellings as byte ranges within their paragraph.
         let mut para_mentions: Vec<Vec<(Range<usize>, Underline)>> = vec![Vec::new(); paras.len()];
@@ -459,8 +481,16 @@ impl Element for ProseElement {
         for (pix, para) in paras.iter().enumerate() {
             let font_size = style.font_size_for(para.block);
             let line_height = style.line_height_for(para.block);
-            let (text, runs) =
-                Self::runs_for(para, &style, &pal, active_comment.as_deref(), &visible_comment, &para_mentions[pix]);
+            let dim = dim_inactive && pix != caret_para;
+            let (text, runs) = Self::runs_for(
+                para,
+                &style,
+                &pal,
+                active_comment.as_deref(),
+                &visible_comment,
+                &para_mentions[pix],
+                dim,
+            );
             y += style.space_before(para.block, prev);
             let line = text_system
                 .shape_text(text, font_size, &runs, Some(wrap_width), None)
@@ -479,19 +509,29 @@ impl Element for ProseElement {
             prev = Some(para.block);
         }
         let text_height = y;
-        let content_height = style.padding_top + text_height + bounds.size.height * 0.5;
+        let content_height = padding_top + text_height + bounds.size.height * 0.5;
         let max_scroll = (content_height - bounds.size.height).max(px(0.));
 
+        // A new wrap width or viewport height moves every line, so bring the
+        // caret back into view (or back to centre) as if it had just moved.
+        let relaid = frame_cell
+            .borrow()
+            .as_ref()
+            .map(|f| f.wrap_width != wrap_width || f.view_height != bounds.size.height)
+            .unwrap_or(false);
+        let want_scroll = want_scroll || relaid;
         let mut scroll_y = scroll_y.max(px(0.)).min(max_scroll);
         if want_scroll {
             let pos = paras.locate(head);
             if let Some(pl) = layouts.get(pos.para) {
                 if let Some(p) = pl.line.position_for_index(pos.byte, pl.line_height) {
-                    let caret_top = style.padding_top + pl.y + p.y;
+                    let caret_top = padding_top + pl.y + p.y;
                     let caret_bottom = caret_top + pl.line_height;
                     let margin = pl.line_height * 1.5;
                     let view_h = bounds.size.height;
-                    if caret_top - scroll_y < margin {
+                    if typewriter {
+                        scroll_y = (caret_top + pl.line_height * 0.5 - view_h * 0.5).max(px(0.)).min(max_scroll);
+                    } else if caret_top - scroll_y < margin {
                         scroll_y = (caret_top - margin).max(px(0.));
                     } else if caret_bottom - scroll_y > view_h - margin {
                         scroll_y = (caret_bottom - view_h + margin).min(max_scroll);
@@ -500,7 +540,7 @@ impl Element for ProseElement {
             }
         }
 
-        let origin = point(column_x, bounds.origin.y + style.padding_top - scroll_y);
+        let origin = point(column_x, bounds.origin.y + padding_top - scroll_y);
 
         // Comment cards in the right margin, stacked so they never overlap.
         let mut cards = Vec::new();
@@ -515,6 +555,7 @@ impl Element for ProseElement {
                 bounds_origin: bounds.origin,
                 origin,
                 wrap_width,
+                view_height: bounds.size.height,
                 paras: layouts,
                 max_scroll,
                 cards: Vec::new(),
@@ -559,6 +600,7 @@ impl Element for ProseElement {
             bounds_origin: bounds.origin,
             origin,
             wrap_width,
+            view_height: bounds.size.height,
             paras: layouts,
             max_scroll,
             cards,
@@ -568,6 +610,11 @@ impl Element for ProseElement {
             e.scroll_y = scroll_y;
             e.scroll_to_cursor = false;
         });
+
+        let took = started.elapsed();
+        if took > std::time::Duration::from_millis(8) {
+            tracing::debug!("slow prose prepaint: {took:?} for {} paragraphs", paras.len());
+        }
 
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         ProsePrepaint { hitbox }
@@ -592,7 +639,7 @@ impl Element for ProseElement {
                 e.selection(),
                 e.blink_on,
                 e.frame.clone(),
-                e.paragraphs().clone(),
+                e.paragraphs_rc(),
                 e.style.font_size,
                 e.matches.clone(),
                 e.match_ix,

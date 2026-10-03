@@ -160,7 +160,7 @@ pub struct ProseEditor {
     undo_sel: SelSnapshot,
     /// Selection handed back by the undo manager after undo/redo.
     undo_restore: SelRestore,
-    paras: Paragraphs,
+    paras: Rc<Paragraphs>,
     /// The full plain text including newlines (for UTF-16 conversions).
     plain: String,
     sel: Selection,
@@ -170,6 +170,10 @@ pub struct ProseEditor {
     pub style: EditorStyle,
     pub(crate) scroll_y: Pixels,
     pub(crate) scroll_to_cursor: bool,
+    /// Keep the caret's line vertically centred (typewriter scrolling).
+    pub typewriter: bool,
+    /// Paint every paragraph but the caret's in the muted colour (focus mode).
+    pub dim_inactive: bool,
     pub(crate) frame: Rc<RefCell<Option<FrameLayout>>>,
     pub(crate) blink_on: bool,
     blink_epoch: usize,
@@ -220,7 +224,7 @@ impl ProseEditor {
             let _ = text.insert(text.len_unicode(), "\n");
             doc.commit();
         }
-        let paras = Paragraphs::from_text(&text);
+        let paras = Rc::new(Paragraphs::from_text(&text));
         let plain = text.to_string();
 
         let undo_sel: SelSnapshot = Arc::new(Mutex::new((0, 0)));
@@ -266,6 +270,8 @@ impl ProseEditor {
             style: EditorStyle::default(),
             scroll_y: px(0.),
             scroll_to_cursor: false,
+            typewriter: false,
+            dim_inactive: false,
             frame: Rc::new(RefCell::new(None)),
             blink_on: true,
             blink_epoch: 0,
@@ -617,6 +623,23 @@ impl ProseEditor {
         &self.paras
     }
 
+    /// The paragraph view as a shared handle (cheap for the element to hold).
+    pub fn paragraphs_rc(&self) -> Rc<Paragraphs> {
+        self.paras.clone()
+    }
+
+    /// Toggle typewriter scrolling and re-centre the caret.
+    pub fn set_typewriter(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.typewriter = on;
+        self.scroll_to_cursor = true;
+        cx.notify();
+    }
+
+    pub fn set_dim_inactive(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.dim_inactive = on;
+        cx.notify();
+    }
+
     pub fn selection(&self) -> Selection {
         self.sel
     }
@@ -746,7 +769,7 @@ impl ProseEditor {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.paras = Paragraphs::from_text(&self.text);
+        self.paras = Rc::new(Paragraphs::from_text(&self.text));
         self.plain = self.text.to_string();
         let max = self.paras.max_cursor();
         self.sel.anchor = self.sel.anchor.min(max);
@@ -941,11 +964,8 @@ impl ProseEditor {
         if !r.is_empty() {
             self.delete_cp_range(r.clone());
         }
-        let paras = if r.is_empty() {
-            std::borrow::Cow::Borrowed(&self.paras)
-        } else {
-            std::borrow::Cow::Owned(Paragraphs::from_text(&self.text))
-        };
+        let paras: Rc<Paragraphs> =
+            if r.is_empty() { self.paras.clone() } else { Rc::new(Paragraphs::from_text(&self.text)) };
         let cp = r.start;
         let pos = paras.locate(cp);
         let (block, at_end, old_nl) = match paras.get(pos.para) {

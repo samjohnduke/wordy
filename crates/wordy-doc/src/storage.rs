@@ -47,23 +47,61 @@ pub fn list_projects(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Write `bytes` to a sibling temp file, fsync it, then rename it into place,
+/// so a crash mid-write leaves either the old file or the new one, never a
+/// torn one.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    {
+        let mut f = std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+        f.write_all(bytes).with_context(|| format!("writing {}", tmp.display()))?;
+        f.sync_all().with_context(|| format!("syncing {}", tmp.display()))?;
+    }
     std::fs::rename(&tmp, path).with_context(|| format!("renaming into {}", path.display()))?;
     Ok(())
 }
 
 /// Save snapshot + JSON mirror.
 pub fn save(doc: &LoroDoc, dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(dir)?;
     let bytes = doc
         .export(loro::ExportMode::Snapshot)
         .map_err(|e| anyhow!("export snapshot: {e}"))?;
-    write_atomic(&snapshot_path(dir), &bytes)?;
+    write_project(doc, dir, &bytes)
+}
+
+/// Write an already exported snapshot plus the JSON mirror of `doc`.
+pub fn write_project(doc: &LoroDoc, dir: &Path, snapshot: &[u8]) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    write_atomic(&snapshot_path(dir), snapshot)?;
     let json = serde_json::to_string_pretty(&doc.get_deep_value())?;
     write_atomic(&json_path(dir), json.as_bytes())?;
     Ok(())
+}
+
+/// Rolling backups under `snapshots/`, newest first.
+pub fn backups(dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir.join(BACKUP_DIR))
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().map(|e| e == "loro").unwrap_or(false))
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort();
+    files.reverse();
+    files
+}
+
+/// Move a damaged main file aside (`project.loro.corrupt-<stamp>`) so a
+/// recovery save does not destroy the evidence.
+pub fn quarantine(path: &Path) -> Result<PathBuf> {
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let name = format!("{}.corrupt-{stamp}", path.file_name().and_then(|n| n.to_str()).unwrap_or("project.loro"));
+    let dst = path.with_file_name(name);
+    std::fs::rename(path, &dst).with_context(|| format!("moving {} aside", path.display()))?;
+    Ok(dst)
 }
 
 /// Copy the current snapshot into `snapshots/` with a timestamp and prune old ones.

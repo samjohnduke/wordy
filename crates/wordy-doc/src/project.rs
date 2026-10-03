@@ -1,9 +1,12 @@
 //! A Wordy project: one LoroDoc plus typed access to its containers.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use loro::{CommitOptions, LoroDoc, LoroMap, LoroTree, LoroValue, TreeID, TreeParentId, ValueOrContainer};
+use loro::{
+    CommitOptions, ExportMode, Frontiers, LoroDoc, LoroMap, LoroTree, LoroValue, TreeID, TreeParentId, ValueOrContainer,
+};
 
 use crate::comments::Comments;
 
@@ -18,6 +21,22 @@ pub struct Project {
     pub doc: LoroDoc,
     /// Folder on disk; `None` for an in-memory project (tests).
     pub dir: Option<PathBuf>,
+    /// The backup this project was loaded from because `project.loro` was unreadable.
+    recovered_from: Option<PathBuf>,
+    /// Set by [`Project::compact_history`]: saves drop history before this
+    /// version. The in-memory doc keeps its full history until the next launch.
+    shallow_root: RefCell<Option<Frontiers>>,
+}
+
+/// Size of the edit history, for the dashboard.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HistoryStats {
+    pub changes: usize,
+    pub ops: usize,
+    /// History before some version has been discarded.
+    pub shallow: bool,
+    /// Size of `project.loro` on disk.
+    pub file_bytes: u64,
 }
 
 pub(crate) fn now_ms() -> i64 {
@@ -30,7 +49,7 @@ impl Project {
         let doc = LoroDoc::new();
         doc.set_record_timestamp(true);
         schema::configure_text_styles(&doc);
-        let project = Self { doc, dir: None };
+        let project = Self { doc, dir: None, recovered_from: None, shallow_root: RefCell::new(None) };
         project.init_schema(name)?;
         project.ensure_id()?;
         Ok(project)
@@ -50,15 +69,46 @@ impl Project {
     }
 
     /// Open an existing project folder.
+    ///
+    /// If `project.loro` is missing or will not load (a crash mid-write, a
+    /// bad disk), the newest readable backup in `snapshots/` is used instead,
+    /// the damaged file is moved aside, and [`Project::recovered_from`] says so.
     pub fn open(dir: &Path) -> Result<Self> {
-        let bytes = std::fs::read(storage::snapshot_path(dir))
-            .with_context(|| format!("reading {}", storage::snapshot_path(dir).display()))?;
-        let doc = LoroDoc::new();
-        doc.set_record_timestamp(true);
-        schema::configure_text_styles(&doc);
-        doc.import(&bytes).map_err(|e| anyhow!("import snapshot: {e}"))?;
-        let p = Self { doc, dir: Some(dir.to_path_buf()) };
+        let main = storage::snapshot_path(dir);
+        let mut recovered_from = None;
+        let doc = match Self::load_doc(&main) {
+            Ok(doc) => doc,
+            Err(main_err) => {
+                let mut found = None;
+                for backup in storage::backups(dir) {
+                    match Self::load_doc(&backup) {
+                        Ok(doc) => {
+                            found = Some((doc, backup));
+                            break;
+                        }
+                        Err(e) => tracing::warn!("backup {} unusable: {e:#}", backup.display()),
+                    }
+                }
+                let Some((doc, backup)) = found else {
+                    return Err(main_err.context("and no readable backup in snapshots/"));
+                };
+                tracing::error!("{main_err:#}; recovering from {}", backup.display());
+                if main.exists() {
+                    match storage::quarantine(&main) {
+                        Ok(aside) => tracing::info!("damaged file kept as {}", aside.display()),
+                        Err(e) => tracing::error!("{e:#}"),
+                    }
+                }
+                recovered_from = Some(backup);
+                doc
+            }
+        };
+        let p = Self { doc, dir: Some(dir.to_path_buf()), recovered_from, shallow_root: RefCell::new(None) };
         p.ensure_roots()?;
+        if p.recovered_from.is_some() {
+            // Put a good main file back right away.
+            p.save()?;
+        }
         if p.ensure_id()? {
             // A project from before ids: write it down now so a copy made
             // before the next edit carries the same id.
@@ -75,10 +125,63 @@ impl Project {
         self.doc.commit_with(CommitOptions::default().origin(META_ORIGIN));
     }
 
+    fn load_doc(path: &Path) -> Result<LoroDoc> {
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let doc = LoroDoc::new();
+        doc.set_record_timestamp(true);
+        schema::configure_text_styles(&doc);
+        doc.import(&bytes).map_err(|e| anyhow!("import {}: {e}", path.display()))?;
+        if doc.get_tree(schema::NODES).is_empty() && doc.get_map(schema::PROJECT).is_empty() {
+            bail!("{} holds no project data", path.display());
+        }
+        Ok(doc)
+    }
+
+    /// The backup this project was recovered from at open, if any.
+    pub fn recovered_from(&self) -> Option<&Path> {
+        self.recovered_from.as_deref()
+    }
+
     pub fn save(&self) -> Result<()> {
         let Some(dir) = &self.dir else { return Ok(()) };
         self.commit_meta();
-        storage::save(&self.doc, dir)
+        let bytes = match &*self.shallow_root.borrow() {
+            Some(f) => self.doc.export(ExportMode::shallow_snapshot(f)).map_err(|e| anyhow!("export: {e}"))?,
+            None => self.doc.export(ExportMode::Snapshot).map_err(|e| anyhow!("export: {e}"))?,
+        };
+        storage::write_project(&self.doc, dir, &bytes)
+    }
+
+    pub fn history_stats(&self) -> HistoryStats {
+        let file_bytes = self
+            .dir
+            .as_deref()
+            .and_then(|d| std::fs::metadata(storage::snapshot_path(d)).ok())
+            .map(|m| m.len())
+            .unwrap_or(0);
+        HistoryStats {
+            changes: self.doc.len_changes(),
+            ops: self.doc.len_ops(),
+            shallow: self.doc.is_shallow() || self.shallow_root.borrow().is_some(),
+            file_bytes,
+        }
+    }
+
+    /// Discard edit history before the current version. The full file is
+    /// backed up to `snapshots/` first. Saved versions and comments are
+    /// ordinary data and are kept; only the CRDT op log shrinks.
+    ///
+    /// Sync note: another machine can still exchange changes after this as
+    /// long as it already has everything this copy has now. Compact right
+    /// after a sync.
+    pub fn compact_history(&self) -> Result<HistoryStats> {
+        if let Some(dir) = &self.dir {
+            storage::backup(dir)?;
+        }
+        self.commit_meta();
+        *self.shallow_root.borrow_mut() = Some(self.doc.oplog_frontiers());
+        self.save()?;
+        Ok(self.history_stats())
     }
 
     /// Import another copy of this project (e.g. from the other machine). Loro merges.
@@ -444,11 +547,96 @@ mod tests {
         let q = LoroDoc::new();
         schema::configure_text_styles(&q);
         q.import(&bytes).unwrap();
-        let q = Project { doc: q, dir: None };
+        let q = Project { doc: q, dir: None, recovered_from: None, shallow_root: RefCell::new(None) };
         q.ensure_roots().unwrap();
         assert_eq!(q.name(), "Round");
         assert_eq!(q.tree().roots().len(), 6);
         assert_eq!(q.node(sc).unwrap().plain_text(), "hello");
+    }
+
+    #[test]
+    fn corrupt_main_file_recovers_from_newest_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("Novel");
+        let p = Project::create(&dir, "Novel").unwrap();
+        let sc = p.create_node(p.root(Space::Notes), NodeKind::Note, "Idea").unwrap();
+        p.node(sc).unwrap().body().unwrap().insert(0, "kept").unwrap();
+        p.save().unwrap();
+        storage::backup(&dir).unwrap();
+        // Edits after the backup are lost by design; the file is then torn.
+        p.node(sc).unwrap().body().unwrap().insert(4, " lost").unwrap();
+        p.save().unwrap();
+        let main = storage::snapshot_path(&dir);
+        let bytes = std::fs::read(&main).unwrap();
+        std::fs::write(&main, &bytes[..bytes.len() / 2]).unwrap();
+
+        let q = Project::open(&dir).unwrap();
+        assert!(q.recovered_from().is_some(), "should report the backup used");
+        assert_eq!(q.node(sc).unwrap().plain_text(), "kept");
+        // The main file is good again and the damaged one was kept aside.
+        assert!(Project::open(&dir).unwrap().recovered_from().is_none());
+        let aside = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with("project.loro.corrupt-"));
+        assert!(aside);
+
+        // No backup at all: a clear error, not a silent empty project.
+        let dir2 = tmp.path().join("Other");
+        Project::create(&dir2, "Other").unwrap();
+        std::fs::write(storage::snapshot_path(&dir2), b"garbage").unwrap();
+        assert!(Project::open(&dir2).is_err());
+    }
+
+    #[test]
+    fn compact_history_keeps_content_and_stays_syncable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("Novel");
+        let a = Project::create(&dir, "Novel").unwrap();
+        let sc = a.create_node(a.root(Space::Manuscript), NodeKind::Scene, "One").unwrap();
+        let body = a.node(sc).unwrap().body().unwrap();
+        for i in 0..50 {
+            body.insert(body.len_unicode(), &format!("w{i} ")).unwrap();
+            a.doc.commit();
+        }
+        a.save().unwrap();
+        let before = a.history_stats();
+        assert!(before.ops >= 50 && !before.shallow, "{before:?}");
+
+        // The other machine is a copy of this one, in sync at the moment of compaction.
+        let dir_b = tmp.path().join("Novel-B");
+        std::fs::create_dir_all(&dir_b).unwrap();
+        std::fs::copy(storage::snapshot_path(&dir), storage::snapshot_path(&dir_b)).unwrap();
+        let b = Project::open(&dir_b).unwrap();
+
+        let after = a.compact_history().unwrap();
+        assert!(after.shallow);
+        assert!(after.file_bytes < before.file_bytes, "{after:?} vs {before:?}");
+        assert!(storage::backups(&dir).len() == 1, "full history backed up first");
+
+        // Reopen: content intact, history gone, and further saves stay shallow.
+        let a2 = Project::open(&dir).unwrap();
+        assert!(a2.doc.is_shallow());
+        assert!(a2.history_stats().ops < before.ops, "{:?} vs {before:?}", a2.history_stats());
+        assert!(a2.node(sc).unwrap().plain_text().contains("w0 w1 w2"));
+        a2.node(sc).unwrap().body().unwrap().insert(0, "A: ").unwrap();
+        a2.save().unwrap();
+        let a3 = Project::open(&dir).unwrap();
+        assert!(a3.doc.is_shallow());
+        assert!(a3.node(sc).unwrap().plain_text().starts_with("A: "));
+
+        // Concurrent edit on B, then exchange updates both ways.
+        let bb = b.node(sc).unwrap().body().unwrap();
+        bb.insert(bb.len_unicode(), "B end").unwrap();
+        b.doc.commit();
+        let to_b = a3.doc.export(ExportMode::updates(&b.doc.oplog_vv())).unwrap();
+        let to_a = b.doc.export(ExportMode::updates(&a3.doc.oplog_vv())).unwrap();
+        let st = b.doc.import(&to_b).unwrap();
+        assert!(st.pending.is_none(), "B must be able to apply A's post-compaction ops");
+        a3.import_bytes(&to_a).unwrap();
+        assert_eq!(a3.node(sc).unwrap().plain_text(), b.node(sc).unwrap().plain_text());
+        assert!(a3.node(sc).unwrap().plain_text().starts_with("A: "));
+        assert!(a3.node(sc).unwrap().plain_text().ends_with("B end"));
     }
 
     #[test]

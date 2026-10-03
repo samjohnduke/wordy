@@ -1,5 +1,6 @@
 //! The main window: title bar, space rail, dock area, status bar.
-//! Owns the open editor tabs and the autosave timer.
+//! Owns the open editor tabs, the autosave timer, focus mode, the quick-open
+//! palette and keyboard navigation between tabs and documents.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -7,6 +8,7 @@ use std::time::{Duration, Instant};
 use gpui_kit::base::dock::PanelId;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dock::{panel_handle, DockArea, DockLayout, DockPlacement, DockSkin, PanelStyle};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Sizable as _, TitleBar};
 use gpui_kit::prelude::*;
@@ -15,7 +17,11 @@ use wordy_doc::momentum::today;
 use wordy_doc::{storage, Space, TreeID, Version};
 use wordy_editor::SpellState;
 
-use crate::app::{self, NewItem, Quit, Save, SearchProject, SharedProject, ShowHome, ToggleReference, ToggleTheme};
+use crate::app::{
+    self, CloseQuickOpen, CloseTab, FocusSidebar, NewItem, NextDocument, NextTab, PrevDocument, PrevTab, QuickOpen,
+    QuickOpenDown, QuickOpenUp, Quit, Save, SearchProject, SharedProject, ShowHome, SpaceManuscript, SpaceNotes,
+    SpaceWorld, ToggleFocusMode, ToggleReference, ToggleTheme, ToggleTypewriter, QUICK_OPEN_CONTEXT,
+};
 use crate::panels::editor::{EditorPanel, EditorPanelEvent};
 use crate::panels::home::{HomeEvent, HomePanel};
 use crate::panels::reference::{ReferenceEvent, ReferencePanel};
@@ -25,6 +31,27 @@ use crate::sync::{SyncEvent, SyncManager};
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(1500);
 /// Gaps between edits longer than this do not count as writing time.
 const SESSION_IDLE: Duration = Duration::from_secs(60);
+/// A snapshot copy goes to `snapshots/` on the first save of a session and
+/// then at most this often (Ctrl-S always writes one).
+const BACKUP_INTERVAL: Duration = Duration::from_secs(30 * 60);
+/// Rows shown in the quick-open palette.
+const QUICK_OPEN_LIMIT: usize = 12;
+
+/// The quick-open palette (Ctrl-P): a filter box over every node.
+struct QuickOpenState {
+    input: Entity<InputState>,
+    selected: usize,
+    _sub: Subscription,
+}
+
+/// One quick-open row.
+struct QuickOpenHit {
+    id: TreeID,
+    title: String,
+    kind: &'static str,
+    space: Space,
+    has_body: bool,
+}
 
 pub struct Workspace {
     project: SharedProject,
@@ -36,7 +63,17 @@ pub struct Workspace {
     home: Option<Entity<HomePanel>>,
     sync: Entity<SyncManager>,
     editors: HashMap<TreeID, Entity<EditorPanel>>,
+    /// Open editor tabs in opening order, for Ctrl-Tab cycling.
+    tab_order: Vec<TreeID>,
     active: Option<TreeID>,
+    /// Focus mode: rail, status bar and both docks hidden; meta bars gone;
+    /// paragraphs away from the caret dimmed.
+    focus_mode: bool,
+    /// Which docks were open when focus mode started, to restore on exit.
+    docks_before_focus: (bool, bool),
+    typewriter: bool,
+    quick_open: Option<QuickOpenState>,
+    last_backup: Option<Instant>,
     dirty: bool,
     /// Writing time since the last save, and when the last edit happened.
     session_seconds: f64,
@@ -82,6 +119,7 @@ impl Workspace {
             SidebarEvent::Open(id) => this.open_node(*id, window, cx),
             SidebarEvent::Changed => this.on_tree_changed(cx),
             SidebarEvent::Removed(id) => this.close_node(*id, window, cx),
+            SidebarEvent::FocusEditor => this.focus_active(window, cx),
         });
         let ref_sub = cx.subscribe_in(&reference, window, |this, _, ev: &ReferenceEvent, window, cx| match ev {
             ReferenceEvent::Open(id) => this.open_node(*id, window, cx),
@@ -112,7 +150,13 @@ impl Workspace {
             home: None,
             sync,
             editors: HashMap::new(),
+            tab_order: Vec::new(),
             active: None,
+            focus_mode: false,
+            docks_before_focus: (true, false),
+            typewriter: false,
+            quick_open: None,
+            last_backup: None,
             dirty: false,
             session_seconds: 0.,
             last_edit: None,
@@ -323,6 +367,7 @@ impl Workspace {
             }
             EditorPanelEvent::Closed => {
                 this.editors.remove(&id);
+                this.tab_order.retain(|t| *t != id);
                 if this.active == Some(id) {
                     this.active = None;
                 }
@@ -331,6 +376,12 @@ impl Workspace {
         });
         self._subs.push(sub);
         self.editors.insert(id, panel.clone());
+        self.tab_order.push(id);
+        let (focus_mode, typewriter) = (self.focus_mode, self.typewriter);
+        panel.update(cx, |p, cx| {
+            p.set_focus_mode(focus_mode, cx);
+            p.set_typewriter(typewriter, cx);
+        });
 
         let placeholder = self.placeholder.take();
         let pid = PanelId::from(panel.entity_id());
@@ -348,12 +399,399 @@ impl Workspace {
 
     fn close_node(&mut self, id: TreeID, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(panel) = self.editors.remove(&id) {
+            self.tab_order.retain(|t| *t != id);
             self.dock.update(cx, |dock, cx| dock.remove_panel(panel, window, cx));
         }
         if self.active == Some(id) {
             self.active = None;
         }
         self.on_edited(cx);
+    }
+
+    // ----- focus mode, typewriter ------------------------------------------
+
+    fn toggle_focus_mode(&mut self, _: &ToggleFocusMode, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_mode = !self.focus_mode;
+        let on = self.focus_mode;
+        let (left, right) = {
+            let d = self.dock.read(cx);
+            (d.is_dock_open(DockPlacement::Left), d.is_dock_open(DockPlacement::Right))
+        };
+        let (want_left, want_right) = if on {
+            self.docks_before_focus = (left, right);
+            (false, false)
+        } else {
+            self.docks_before_focus
+        };
+        self.dock.update(cx, |dock, cx| {
+            if left != want_left {
+                dock.toggle_dock(DockPlacement::Left, window, cx);
+            }
+            if right != want_right {
+                dock.toggle_dock(DockPlacement::Right, window, cx);
+            }
+        });
+        for panel in self.editors.values() {
+            panel.update(cx, |p, cx| p.set_focus_mode(on, cx));
+        }
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn toggle_typewriter(&mut self, _: &ToggleTypewriter, _: &mut Window, cx: &mut Context<Self>) {
+        self.typewriter = !self.typewriter;
+        let on = self.typewriter;
+        for panel in self.editors.values() {
+            panel.update(cx, |p, cx| p.set_typewriter(on, cx));
+        }
+        cx.notify();
+    }
+
+    /// Put keyboard focus back where writing happens: the active editor, else
+    /// the Home tab, else the workspace itself.
+    fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(panel) = self.active.and_then(|id| self.editors.get(&id)).cloned() {
+            panel.update(cx, |p, cx| p.focus_editor(window, cx));
+        } else if let Some(home) = &self.home {
+            let f = home.read(cx).focus_handle(cx);
+            window.focus(&f, cx);
+        } else {
+            window.focus(&self.focus, cx);
+        }
+    }
+
+    // ----- tabs and documents ----------------------------------------------
+
+    /// Tabs in bar order: Home first when open, then editors by opening order.
+    fn tab_items(&self) -> Vec<Option<TreeID>> {
+        let mut items = Vec::with_capacity(self.tab_order.len() + 1);
+        if self.home.is_some() {
+            items.push(None);
+        }
+        items.extend(self.tab_order.iter().copied().map(Some));
+        items
+    }
+
+    fn current_tab(&self) -> Option<Option<TreeID>> {
+        match self.active {
+            Some(id) => Some(Some(id)),
+            None => self.home.is_some().then_some(None),
+        }
+    }
+
+    fn show_tab(&mut self, tab: Option<TreeID>, window: &mut Window, cx: &mut Context<Self>) {
+        match tab {
+            None => self.show_home(window, cx),
+            Some(id) => self.open_node(id, window, cx),
+        }
+    }
+
+    fn cycle_tab(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let items = self.tab_items();
+        if items.is_empty() {
+            return;
+        }
+        let cur = self.current_tab().and_then(|c| items.iter().position(|i| *i == c));
+        let next = match cur {
+            Some(ix) => (ix as isize + delta).rem_euclid(items.len() as isize) as usize,
+            None => 0,
+        };
+        self.show_tab(items[next], window, cx);
+    }
+
+    fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_tab(1, window, cx);
+    }
+
+    fn prev_tab(&mut self, _: &PrevTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_tab(-1, window, cx);
+    }
+
+    /// Close the displayed tab and show its neighbour.
+    fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(cur) = self.current_tab() else { return };
+        let items = self.tab_items();
+        let ix = items.iter().position(|i| *i == cur).unwrap_or(0);
+        match cur {
+            Some(id) => {
+                if let Some(panel) = self.editors.remove(&id) {
+                    self.tab_order.retain(|t| *t != id);
+                    self.dock.update(cx, |dock, cx| dock.remove_panel(panel, window, cx));
+                }
+                self.active = None;
+            }
+            None => {
+                if let Some(home) = self.home.take() {
+                    self.dock.update(cx, |dock, cx| dock.remove_panel(home, window, cx));
+                }
+            }
+        }
+        let items = self.tab_items();
+        if items.is_empty() {
+            self.ensure_placeholder(window, cx);
+        } else {
+            let next = items[ix.min(items.len() - 1)];
+            self.show_tab(next, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// With no tabs left, show the "open a scene" placeholder again.
+    fn ensure_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.placeholder.is_some() || !self.editors.is_empty() || self.home.is_some() {
+            return;
+        }
+        let placeholder = cx.new(|cx| EditorPanel::placeholder(self.project.clone(), cx));
+        self.dock.update(cx, |dock, cx| {
+            dock.add_panel_view(panel_handle(placeholder.clone()), DockPlacement::Center, None, window, cx);
+        });
+        self.placeholder = Some(placeholder);
+        window.focus(&self.focus, cx);
+    }
+
+    /// Open the next (or previous) document with a body in the active
+    /// document's space, in tree order.
+    fn step_document(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let docs = {
+            let p = &self.project.project;
+            let space = self.active.and_then(|a| p.node(a).ok()).map(|n| n.space()).unwrap_or(self.space);
+            let mut docs = Vec::new();
+            p.walk(p.root(space), &mut |id, n| {
+                if n.kind().has_body() {
+                    docs.push(id);
+                }
+            });
+            docs
+        };
+        if docs.is_empty() {
+            return;
+        }
+        let cur = self.active.and_then(|a| docs.iter().position(|d| *d == a));
+        let next = match cur {
+            Some(ix) => (ix as isize + delta).rem_euclid(docs.len() as isize) as usize,
+            None if delta > 0 => 0,
+            None => docs.len() - 1,
+        };
+        let id = docs[next];
+        self.open_node(id, window, cx);
+        self.sidebar.update(cx, |s, cx| s.select(Some(id), cx));
+    }
+
+    fn next_document(&mut self, _: &NextDocument, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_document(1, window, cx);
+    }
+
+    fn prev_document(&mut self, _: &PrevDocument, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_document(-1, window, cx);
+    }
+
+    fn open_left_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dock.update(cx, |dock, cx| {
+            if !dock.is_dock_open(DockPlacement::Left) {
+                dock.toggle_dock(DockPlacement::Left, window, cx);
+            }
+        });
+    }
+
+    fn focus_sidebar(&mut self, _: &FocusSidebar, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_left_dock(window, cx);
+        self.sidebar.update(cx, |s, cx| s.focus_tree(window, cx));
+    }
+
+    fn space_shortcut(&mut self, space: Space, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_left_dock(window, cx);
+        self.set_space(space, cx);
+    }
+
+    // ----- quick open --------------------------------------------------------
+
+    fn quick_open(&mut self, _: &QuickOpen, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(q) = &self.quick_open {
+            q.input.update(cx, |s, cx| {
+                s.focus(window, cx);
+                s.select_all(window, cx);
+            });
+            return;
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Jump to a scene, entity, or note…"));
+        input.update(cx, |s, cx| s.focus(window, cx));
+        let sub = cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, window, cx| match ev {
+            InputEvent::Change => {
+                if let Some(q) = &mut this.quick_open {
+                    q.selected = 0;
+                }
+                cx.notify();
+            }
+            InputEvent::PressEnter { .. } => this.quick_open_confirm(window, cx),
+            _ => {}
+        });
+        self.quick_open = Some(QuickOpenState { input, selected: 0, _sub: sub });
+        cx.notify();
+    }
+
+    fn close_quick_open(&mut self, _: &CloseQuickOpen, window: &mut Window, cx: &mut Context<Self>) {
+        if self.quick_open.take().is_some() {
+            self.focus_active(window, cx);
+            cx.notify();
+        } else {
+            cx.propagate();
+        }
+    }
+
+    /// Every live node whose title contains all the query words; titles that
+    /// start with the first word come first. Tree order otherwise.
+    fn quick_open_hits(&self, cx: &App) -> Vec<QuickOpenHit> {
+        let query =
+            self.quick_open.as_ref().map(|q| q.input.read(cx).value().trim().to_lowercase()).unwrap_or_default();
+        let terms: Vec<&str> = query.split_whitespace().collect();
+        let p = &self.project.project;
+        let mut starts = Vec::new();
+        let mut rest = Vec::new();
+        for id in p.all_nodes() {
+            let Ok(n) = p.node(id) else { continue };
+            let title = n.title();
+            let lower = title.to_lowercase();
+            if !terms.iter().all(|t| lower.contains(t)) {
+                continue;
+            }
+            let kind = n.kind();
+            let hit = QuickOpenHit { id, title, kind: kind.as_str(), space: n.space(), has_body: kind.has_body() };
+            if terms.first().map(|t| lower.starts_with(t)).unwrap_or(false) {
+                starts.push(hit);
+            } else {
+                rest.push(hit);
+            }
+            if starts.len() >= QUICK_OPEN_LIMIT {
+                break;
+            }
+        }
+        starts.extend(rest);
+        starts.truncate(QUICK_OPEN_LIMIT);
+        starts
+    }
+
+    fn quick_open_move(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let n = self.quick_open_hits(cx).len();
+        if let Some(q) = &mut self.quick_open {
+            if n > 0 {
+                q.selected = (q.selected as isize + delta).rem_euclid(n as isize) as usize;
+            }
+        }
+        cx.notify();
+    }
+
+    fn quick_open_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sel) = self.quick_open.as_ref().map(|q| q.selected) else { return };
+        let hits = self.quick_open_hits(cx);
+        let Some(hit) = hits.get(sel) else { return };
+        let (id, space, has_body) = (hit.id, hit.space, hit.has_body);
+        self.quick_open = None;
+        self.set_space(space, cx);
+        self.sidebar.update(cx, |s, cx| s.select(Some(id), cx));
+        if has_body {
+            self.open_node(id, window, cx);
+        } else {
+            self.open_left_dock(window, cx);
+            self.sidebar.update(cx, |s, cx| s.focus_tree(window, cx));
+        }
+        cx.notify();
+    }
+
+    fn render_quick_open(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let q = self.quick_open.as_ref()?;
+        let hits = self.quick_open_hits(cx);
+        let selected = q.selected.min(hits.len().saturating_sub(1));
+        let (accent, secondary, muted, border, popover) = {
+            let t = cx.theme();
+            (t.accent, t.secondary, t.muted_foreground, t.border, t.popover)
+        };
+        let empty = hits.is_empty();
+        let rows: Vec<AnyElement> = hits
+            .into_iter()
+            .enumerate()
+            .map(|(ix, hit)| {
+                h_flex()
+                    .id(ElementId::Name(format!("qo-{ix}").into()))
+                    .w_full()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .text_sm()
+                    .cursor_pointer()
+                    .when(ix == selected, |d| d.bg(accent))
+                    .when(ix != selected, |d| d.hover(|s| s.bg(secondary)))
+                    .child(
+                        div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(hit.title),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .flex_shrink_0()
+                            .child(format!("{} · {}", hit.space.label(), hit.kind)),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(q) = &mut this.quick_open {
+                            q.selected = ix;
+                        }
+                        this.quick_open_confirm(window, cx);
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+
+        Some(
+            div()
+                .id("quick-open-layer")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .occlude()
+                .key_context(QUICK_OPEN_CONTEXT)
+                .on_action(cx.listener(Self::close_quick_open))
+                .on_action(cx.listener(|this, _: &QuickOpenUp, _, cx| this.quick_open_move(-1, cx)))
+                .on_action(cx.listener(|this, _: &QuickOpenDown, _, cx| this.quick_open_move(1, cx)))
+                // The input swallows plain up/down, so steer the list from the
+                // raw key event before bindings are consulted.
+                .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
+                    let k = &ev.keystroke;
+                    let delta = match (k.key.as_str(), k.modifiers.control) {
+                        ("up", _) | ("p", true) => -1,
+                        ("down", _) | ("n", true) => 1,
+                        _ => return,
+                    };
+                    this.quick_open_move(delta, cx);
+                    cx.stop_propagation();
+                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| this.close_quick_open(&CloseQuickOpen, window, cx)),
+                )
+                .child(
+                    v_flex()
+                        .id("quick-open")
+                        .w(px(560.))
+                        .max_w_full()
+                        .mx_auto()
+                        .mt(px(72.))
+                        .p_2()
+                        .gap_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(border)
+                        .bg(popover)
+                        .shadow_lg()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(Input::new(&q.input).small())
+                        .children(rows)
+                        .when(empty, |d| d.child(div().px_2().py_1().text_sm().text_color(muted).child("No matches."))),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Titles, aliases, or structure changed: refresh names everywhere and
@@ -403,6 +841,9 @@ impl Workspace {
                     panel.update(cx, |_, cx| cx.notify());
                 }
                 tracing::info!("saved");
+                if self.last_backup.map(|t| t.elapsed() >= BACKUP_INTERVAL).unwrap_or(true) {
+                    self.backup_now();
+                }
             }
             Err(e) => tracing::error!("save failed: {e:#}"),
         }
@@ -432,15 +873,20 @@ impl Workspace {
         }
     }
 
+    /// Copy the saved snapshot into `snapshots/` (pruned there).
+    fn backup_now(&mut self) {
+        let Some(dir) = self.project.dir().cloned() else { return };
+        match storage::backup(&dir) {
+            Ok(Some(p)) => tracing::info!("backup written: {}", p.display()),
+            Ok(None) => {}
+            Err(e) => tracing::error!("backup failed: {e:#}"),
+        }
+        self.last_backup = Some(Instant::now());
+    }
+
     fn save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
         self.save_now(cx);
-        if let Some(dir) = self.project.dir() {
-            match storage::backup(dir) {
-                Ok(Some(p)) => tracing::info!("backup written: {}", p.display()),
-                Ok(None) => {}
-                Err(e) => tracing::error!("backup failed: {e:#}"),
-            }
-        }
+        self.backup_now();
     }
 
     fn new_item(&mut self, _: &NewItem, window: &mut Window, cx: &mut Context<Self>) {
@@ -521,6 +967,9 @@ impl Workspace {
             let streak = streak.max(if today_words > 0 { 1 } else { 0 });
             parts.push(format!("streak {streak}"));
         }
+        if self.typewriter {
+            parts.push("typewriter".to_string());
+        }
         parts.join("  ·  ")
     }
 }
@@ -548,6 +997,13 @@ impl Render for Workspace {
             }
         };
         let right = self.status_right(cx);
+        let recovered = self
+            .project
+            .project
+            .recovered_from()
+            .and_then(|p| p.file_name())
+            .map(|n| format!("recovered from backup {}; the damaged file was kept next to it", n.to_string_lossy()));
+        let focus_mode = self.focus_mode;
 
         v_flex()
             .size_full()
@@ -558,6 +1014,20 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_reference))
             .on_action(cx.listener(Self::search_project))
             .on_action(cx.listener(Self::on_show_home))
+            .on_action(cx.listener(Self::toggle_focus_mode))
+            .on_action(cx.listener(Self::toggle_typewriter))
+            .on_action(cx.listener(Self::quick_open))
+            .on_action(cx.listener(Self::next_tab))
+            .on_action(cx.listener(Self::prev_tab))
+            .on_action(cx.listener(Self::close_tab))
+            .on_action(cx.listener(Self::next_document))
+            .on_action(cx.listener(Self::prev_document))
+            .on_action(cx.listener(Self::focus_sidebar))
+            .on_action(cx.listener(|this, _: &SpaceManuscript, window, cx| {
+                this.space_shortcut(Space::Manuscript, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SpaceWorld, window, cx| this.space_shortcut(Space::World, window, cx)))
+            .on_action(cx.listener(|this, _: &SpaceNotes, window, cx| this.space_shortcut(Space::Notes, window, cx)))
             .on_action(|_: &ToggleTheme, window, cx| app::toggle_theme(window, cx))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -582,19 +1052,40 @@ impl Render for Workspace {
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_rail(cx))
-                    .child(div().flex_1().min_w_0().h_full().child(self.dock.clone())),
+                    .when(!focus_mode, |d| d.child(self.render_rail(cx)))
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .child(self.dock.clone())
+                            .children(self.render_quick_open(cx)),
+                    ),
             )
-            .child(
-                StatusBar::new()
-                    .left(
+            .when(!focus_mode, |d| {
+                d.child(
+                    // One flex row rather than StatusBar's left/right regions so
+                    // the project path is the only thing that ever gets truncated.
+                    StatusBar::new().child(
                         h_flex()
+                            .w_full()
                             .gap_3()
                             .text_xs()
-                            .child(dir)
-                            .child(div().text_color(cx.theme().muted_foreground).child(save_state)),
-                    )
-                    .right(div().text_xs().child(right)),
-            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .child(dir),
+                            )
+                            .child(div().flex_shrink_0().text_color(cx.theme().muted_foreground).child(save_state))
+                            .children(recovered.map(|r| div().flex_shrink_0().text_color(cx.theme().danger).child(r)))
+                            .child(div().flex_shrink_0().whitespace_nowrap().child(right)),
+                    ),
+                )
+            })
     }
 }

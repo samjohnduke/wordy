@@ -182,7 +182,17 @@ impl Session<'_> {
         outcome.ops_out = ops_out;
         if !incoming.is_empty() {
             // Validate on the scratch copy before the UI touches the live doc.
-            doc.import(&incoming).map_err(|e| anyhow!("peer updates do not apply: {e}"))?;
+            doc.import(&incoming).map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("shallow") {
+                    anyhow!(
+                        "peer updates do not apply: one copy compacted its history after the other \
+                         last synced; copy the project folder across instead ({msg})"
+                    )
+                } else {
+                    anyhow!("peer updates do not apply: {msg}")
+                }
+            })?;
             outcome.ops_in = ops_between(&my_vv, &doc.oplog_vv());
             if outcome.ops_in > 0 {
                 outcome.incoming_updates = incoming;

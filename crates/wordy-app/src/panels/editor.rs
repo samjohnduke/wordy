@@ -61,6 +61,8 @@ pub struct EditorPanel {
     /// Transient message in the meta bar (e.g. "Snippet copied").
     notice: Option<String>,
     _notice_task: Option<Task<()>>,
+    /// Focus mode hides the meta bar and dims paragraphs away from the caret.
+    focus_mode: bool,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -76,6 +78,7 @@ impl EditorPanel {
             find: None,
             notice: None,
             _notice_task: None,
+            focus_mode: false,
             focus: cx.focus_handle(),
             _subs: Vec::new(),
         }
@@ -161,6 +164,7 @@ impl EditorPanel {
             find: None,
             notice: None,
             _notice_task: None,
+            focus_mode: false,
             focus: cx.focus_handle(),
             _subs: subs,
         }
@@ -371,6 +375,9 @@ impl EditorPanel {
     }
 
     fn render_meta_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.focus_mode {
+            return None;
+        }
         let meta = self.meta.as_ref()?;
         let id = self.node?;
         let node = self.project.project.node(id).ok()?;
@@ -582,6 +589,22 @@ impl EditorPanel {
         match self.node.and_then(|id| self.project.project.node(id).ok()) {
             Some(n) => n.title().into(),
             None => "Welcome".into(),
+        }
+    }
+
+    /// Focus mode: no meta bar, inactive paragraphs dimmed.
+    pub fn set_focus_mode(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.focus_mode = on;
+        if let Some(editor) = &self.editor {
+            editor.update(cx, |e, cx| e.set_dim_inactive(on, cx));
+        }
+        cx.notify();
+    }
+
+    /// Typewriter scrolling keeps the caret line vertically centred.
+    pub fn set_typewriter(&mut self, on: bool, cx: &mut Context<Self>) {
+        if let Some(editor) = &self.editor {
+            editor.update(cx, |e, cx| e.set_typewriter(on, cx));
         }
     }
 

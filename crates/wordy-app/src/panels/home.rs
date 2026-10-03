@@ -1,5 +1,5 @@
-//! Home tab: dashboard (goals, streak, pace), reports (words per day),
-//! tasks, the placeholder scan, export, and LAN sync.
+//! Home tab: dashboard (goals, streak, pace, project file), reports (words
+//! per day), tasks, the placeholder scan, export, LAN sync, and shortcuts.
 
 use std::net::{SocketAddr, ToSocketAddrs as _};
 use std::path::PathBuf;
@@ -44,10 +44,19 @@ enum Page {
     Placeholders,
     Export,
     Sync,
+    Shortcuts,
 }
 
 impl Page {
-    const ALL: [Page; 6] = [Page::Dashboard, Page::Reports, Page::Tasks, Page::Placeholders, Page::Export, Page::Sync];
+    const ALL: [Page; 7] = [
+        Page::Dashboard,
+        Page::Reports,
+        Page::Tasks,
+        Page::Placeholders,
+        Page::Export,
+        Page::Sync,
+        Page::Shortcuts,
+    ];
     fn label(self) -> &'static str {
         match self {
             Page::Dashboard => "Dashboard",
@@ -56,6 +65,7 @@ impl Page {
             Page::Placeholders => "Placeholders",
             Page::Export => "Export",
             Page::Sync => "Sync",
+            Page::Shortcuts => "Shortcuts",
         }
     }
     fn id(self) -> &'static str {
@@ -66,6 +76,7 @@ impl Page {
             Page::Placeholders => "home-placeholders",
             Page::Export => "home-export",
             Page::Sync => "home-sync",
+            Page::Shortcuts => "home-shortcuts",
         }
     }
 }
@@ -93,6 +104,8 @@ pub struct HomePanel {
     project: SharedProject,
     sync: Entity<SyncManager>,
     page: Page,
+    /// Result line under the "Compact history" button.
+    compact_status: Option<String>,
     daily: Entity<InputState>,
     manuscript: Entity<InputState>,
     deadline: Entity<InputState>,
@@ -204,6 +217,7 @@ impl HomePanel {
             project,
             sync,
             page: Page::Dashboard,
+            compact_status: None,
             daily,
             manuscript,
             deadline,
@@ -760,7 +774,116 @@ impl HomePanel {
             }))
             .child(rows);
 
-        v_flex().gap_3().w_full().child(today_box).child(goal_box).child(structure).into_any_element()
+        // ---- project file ----
+        let stats = p.history_stats();
+        let backups = self.project.dir().map(|d| storage::backups(d).len()).unwrap_or(0);
+        let mut summary = format!(
+            "{} on disk · {} changes · {} operations · {} backup{} in snapshots/",
+            human_size(stats.file_bytes as usize),
+            stats.changes,
+            stats.ops,
+            backups,
+            if backups == 1 { "" } else { "s" }
+        );
+        if stats.shallow {
+            summary.push_str(" · history compacted");
+        }
+        let file_box = Self::section("Project file", cx)
+            .child(div().text_sm().child(summary))
+            .child(div().text_xs().text_color(muted).child(
+                "Every keystroke is kept as history so the two machines can merge. Compacting drops the history \
+                 before now and keeps only the current text. Do it right after a sync: the other machine must sync \
+                 again before it edits, or copy this folder across instead.",
+            ))
+            .child(
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        Button::new("compact-history")
+                            .outline()
+                            .small()
+                            .label("Compact history")
+                            .on_click(cx.listener(|this, _, _, cx| this.compact_history(cx))),
+                    )
+                    .children(self.compact_status.clone().map(|t| div().text_xs().text_color(muted).child(t))),
+            );
+
+        v_flex()
+            .gap_3()
+            .w_full()
+            .child(today_box)
+            .child(goal_box)
+            .child(structure)
+            .child(file_box)
+            .into_any_element()
+    }
+
+    fn compact_history(&mut self, cx: &mut Context<Self>) {
+        self.compact_status = Some(match self.project.project.compact_history() {
+            Ok(s) => format!("Compacted: {} on disk, {} operations.", human_size(s.file_bytes as usize), s.ops),
+            Err(e) => format!("Compaction failed: {e:#}"),
+        });
+        cx.notify();
+    }
+
+    fn render_shortcuts(&self, cx: &mut Context<Self>) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let (m, alt, shift) = if cfg!(target_os = "macos") { ("⌘", "⌥", "⇧") } else { ("Ctrl", "Alt", "Shift") };
+        let j = |parts: &[&str]| parts.join(if cfg!(target_os = "macos") { "" } else { "+" });
+        let groups: Vec<(&str, Vec<(String, &str)>)> = vec![
+            (
+                "Navigation",
+                vec![
+                    (j(&[m, "P"]), "Quick open: jump to any scene, entity, or note"),
+                    (j(&[m, "E"]), "Focus the sidebar (arrows move, Enter opens, F2 renames, Delete trashes, Esc returns)"),
+                    (j(&[m, "1"]) + " / 2 / 3", "Manuscript, World, Notes"),
+                    (j(&[m, alt, "↓"]) + " / ↑", "Next / previous document in this space"),
+                    (j(&["Ctrl", "Tab"]) + " / " + &j(&["Ctrl", shift, "Tab"]), "Next / previous tab"),
+                    (j(&[m, "W"]), "Close tab"),
+                    (j(&[m, shift, "H"]), "Home tab"),
+                    (j(&[m, shift, "F"]), "Search the project"),
+                    (j(&[m, shift, "R"]), "Show / hide the reference pane"),
+                ],
+            ),
+            (
+                "Writing",
+                vec![
+                    (j(&[m, shift, "D"]), "Focus mode: just the page, other paragraphs dimmed"),
+                    (j(&[m, shift, "Y"]), "Typewriter scrolling: the caret line stays centred"),
+                    (j(&[m, "N"]), "New scene / entity / note next to the selection"),
+                    (j(&[m, "S"]), "Save now and write a backup to snapshots/"),
+                    (j(&[m, "F"]) + " / " + &j(&[m, "H"]), "Find / find and replace in this document"),
+                    (j(&[m, "G"]) + " / " + &j(&[m, shift, "G"]), "Next / previous match"),
+                ],
+            ),
+            (
+                "Formatting",
+                vec![
+                    (j(&[m, "B"]) + " / I / U", "Bold / italic / underline"),
+                    (j(&[m, shift, "X"]), "Strikethrough"),
+                    (j(&[m, shift, "K"]), "Small caps"),
+                    (j(&[m, shift, "H"]) + " (in text)", "Highlight"),
+                    (j(&[m, alt, "0"]) + " / 1 / 2 / 3", "Paragraph / heading 1 / 2 / 3"),
+                    (j(&[m, shift, "Q"]), "Quote"),
+                    (j(&[m, shift, "Enter"]), "Scene break"),
+                    (j(&[m, "K"]) + " / " + &j(&[m, shift, "L"]), "Insert link / remove link"),
+                    (j(&[m, shift, "M"]) + " / " + &j(&[m, shift, "E"]), "Add comment / edit comment at caret"),
+                    ("@".to_string(), "Mention an entity (type to filter, Enter to insert)"),
+                ],
+            ),
+        ];
+        let sections = groups.into_iter().map(|(title, rows)| {
+            Self::section(title, cx).children(rows.into_iter().map(|(keys, what)| {
+                h_flex()
+                    .gap_3()
+                    .items_start()
+                    .text_sm()
+                    .child(div().w(px(200.)).flex_shrink_0().font_semibold().child(keys))
+                    .child(div().flex_1().min_w_0().text_color(muted).child(what))
+            }))
+        });
+        v_flex().gap_3().w_full().children(sections).into_any_element()
     }
 
     fn render_reports(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1025,6 +1148,7 @@ impl Render for HomePanel {
             Page::Placeholders => self.render_placeholders(cx),
             Page::Export => self.render_export(cx),
             Page::Sync => self.render_sync(cx),
+            Page::Shortcuts => self.render_shortcuts(cx),
         };
         v_flex().size_full().track_focus(&self.focus).bg(cx.theme().background).child(tabs).child(
             div()
