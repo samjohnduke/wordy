@@ -21,11 +21,7 @@ pub fn render(c: &Compiled) -> Result<Vec<u8>> {
     let mut docx = Docx::new()
         .default_fonts(RunFonts::new().ascii(FONT).hi_ansi(FONT).cs(FONT))
         .default_size(SIZE)
-        .default_line_spacing(
-            LineSpacing::new()
-                .line(DOUBLE)
-                .line_rule(LineSpacingType::Auto),
-        )
+        .default_line_spacing(LineSpacing::new().line(DOUBLE).line_rule(LineSpacingType::Auto))
         .page_size(12240, 15840)
         .page_margin(
             PageMargin::new()
@@ -56,10 +52,9 @@ pub fn render(c: &Compiled) -> Result<Vec<u8>> {
             .add_paragraph(centered("by", false))
             .add_paragraph(centered(&c.author, false));
     }
-    docx = docx.add_paragraph(Paragraph::new()).add_paragraph(centered(
-        &format!("About {} words", round_words(c.word_count())),
-        false,
-    ));
+    docx = docx
+        .add_paragraph(Paragraph::new())
+        .add_paragraph(centered(&format!("About {} words", round_words(c.word_count())), false));
 
     for chapter in &c.chapters {
         // Chapter title about a third of the way down a fresh page. Empty
@@ -110,11 +105,7 @@ fn header(c: &Compiled) -> Header {
     Header::new().add_paragraph(
         Paragraph::new()
             .align(AlignmentType::Right)
-            .line_spacing(
-                LineSpacing::new()
-                    .line(240)
-                    .line_rule(LineSpacingType::Auto),
-            )
+            .line_spacing(LineSpacing::new().line(240).line_rule(LineSpacingType::Auto))
             .add_run(Run::new().add_text(lead))
             .add_run(
                 Run::new()
@@ -157,12 +148,7 @@ fn body_paragraph(p: &DocParagraph, separator: &str) -> Paragraph {
     match p.block {
         Block::Break => return centered(separator, false),
         Block::Paragraph => {
-            para = para.indent(
-                None,
-                Some(SpecialIndentType::FirstLine(INCH / 2)),
-                None,
-                None,
-            );
+            para = para.indent(None, Some(SpecialIndentType::FirstLine(INCH / 2)), None, None);
         }
         Block::Quote => {
             para = para.indent(Some(INCH / 2), None, Some(INCH / 2), None);
@@ -244,10 +230,7 @@ pub(crate) mod tests {
                     scenes: vec![
                         Scene {
                             title: "Dawn".into(),
-                            paragraphs: vec![
-                                para("Hello <world>", Block::Paragraph),
-                                para("Quoted", Block::Quote),
-                            ],
+                            paragraphs: vec![para("Hello <world>", Block::Paragraph), para("Quoted", Block::Quote)],
                         },
                         Scene {
                             title: "Dusk".into(),
@@ -276,8 +259,7 @@ pub(crate) mod tests {
             .collect();
         assert!(names.iter().any(|n| n == "word/document.xml"), "{names:?}");
         let mut doc = String::new();
-        std::io::Read::read_to_string(&mut zip.by_name("word/document.xml").unwrap(), &mut doc)
-            .unwrap();
+        std::io::Read::read_to_string(&mut zip.by_name("word/document.xml").unwrap(), &mut doc).unwrap();
         assert!(doc.contains("Hello &lt;world&gt;"));
         assert!(doc.contains("<w:b />") || doc.contains("<w:b/>"));
         assert!(doc.contains("THE LIGHTHOUSE &amp; THE SEA"));

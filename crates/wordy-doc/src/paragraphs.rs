@@ -73,9 +73,7 @@ pub struct Marks {
 }
 
 impl Marks {
-    pub fn from_attributes<S: std::hash::BuildHasher>(
-        attrs: Option<&HashMap<String, LoroValue, S>>,
-    ) -> Marks {
+    pub fn from_attributes<S: std::hash::BuildHasher>(attrs: Option<&HashMap<String, LoroValue, S>>) -> Marks {
         let mut m = Marks::default();
         let Some(attrs) = attrs else { return m };
         for (k, v) in attrs {
@@ -155,11 +153,7 @@ impl Paragraph {
     /// (how a caret inherits formatting when typing).
     pub fn marks_before(&self, cp: usize) -> Marks {
         if cp == 0 {
-            return self
-                .runs
-                .first()
-                .map(|r| r.marks.clone())
-                .unwrap_or_default();
+            return self.runs.first().map(|r| r.marks.clone()).unwrap_or_default();
         }
         let mut acc = 0;
         for run in &self.runs {
@@ -169,10 +163,7 @@ impl Paragraph {
             }
             acc += n;
         }
-        self.runs
-            .last()
-            .map(|r| r.marks.clone())
-            .unwrap_or_default()
+        self.runs.last().map(|r| r.marks.clone()).unwrap_or_default()
     }
 
     pub fn word_count(&self) -> usize {
@@ -270,10 +261,7 @@ impl Paragraphs {
             });
         }
 
-        Paragraphs {
-            paras,
-            total_cp: cp,
-        }
+        Paragraphs { paras, total_cp: cp }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Paragraph> {

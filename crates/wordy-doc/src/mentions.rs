@@ -98,11 +98,7 @@ impl Matcher {
                 .next_back()
                 .map(|c| !is_word_char(c))
                 .unwrap_or(true);
-            let after_ok = text[end..]
-                .chars()
-                .next()
-                .map(|c| !is_word_char(c))
-                .unwrap_or(true);
+            let after_ok = text[end..].chars().next().map(|c| !is_word_char(c)).unwrap_or(true);
             if !before_ok || !after_ok {
                 continue;
             }
@@ -160,17 +156,10 @@ mod tests {
             },
         ]);
         let hits = m.scan("anna met Annabel, the captain. Hannah too.");
-        let ranges: Vec<_> = hits
-            .iter()
-            .map(|h| (h.range.clone(), h.candidates.clone()))
-            .collect();
+        let ranges: Vec<_> = hits.iter().map(|h| (h.range.clone(), h.candidates.clone())).collect();
         assert_eq!(
             ranges,
-            vec![
-                (0..4, vec![tid(1)]),
-                (9..16, vec![tid(2)]),
-                (18..29, vec![tid(1)])
-            ]
+            vec![(0..4, vec![tid(1)]), (9..16, vec![tid(2)]), (18..29, vec![tid(1)])]
         );
     }
 

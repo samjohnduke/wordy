@@ -152,9 +152,7 @@ pub fn typst_source(c: &Compiled) -> String {
                         s.push_str("\n\n");
                     }
                     Block::H1 => s.push_str(&format!("#heading(level: 3)[{inner}]\n\n")),
-                    Block::H2 | Block::H3 => {
-                        s.push_str(&format!("#heading(level: 4)[{inner}]\n\n"))
-                    }
+                    Block::H2 | Block::H3 => s.push_str(&format!("#heading(level: 4)[{inner}]\n\n")),
                     Block::Quote => s.push_str(&format!("#bq[{inner}]\n\n")),
                     Block::Break => s.push_str("#sep\n\n"),
                 }

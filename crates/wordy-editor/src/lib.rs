@@ -12,8 +12,7 @@ mod style;
 mod typography;
 
 pub use editor::{
-    CommentAnchor, EditorEvent, LinkTarget, MentionSpan, ProseEditor, RichClipboard, RichFragment,
-    Selection,
+    CommentAnchor, EditorEvent, LinkTarget, MentionSpan, ProseEditor, RichClipboard, RichFragment, Selection,
 };
 pub use element::ProseElement;
 pub use spell::SpellState;

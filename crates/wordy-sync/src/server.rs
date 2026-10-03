@@ -36,12 +36,8 @@ pub struct Server {
 
 impl Server {
     /// Bind `port` (0 = any free port) on all interfaces and start accepting.
-    pub fn start(
-        port: u16,
-        on_event: impl Fn(ServerEvent) + Send + Sync + 'static,
-    ) -> Result<Self> {
-        let listener =
-            TcpListener::bind(("0.0.0.0", port)).with_context(|| format!("binding port {port}"))?;
+    pub fn start(port: u16, on_event: impl Fn(ServerEvent) + Send + Sync + 'static) -> Result<Self> {
+        let listener = TcpListener::bind(("0.0.0.0", port)).with_context(|| format!("binding port {port}"))?;
         listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
         let stop = Arc::new(AtomicBool::new(false));
@@ -65,11 +61,7 @@ impl Drop for Server {
     }
 }
 
-fn accept_loop(
-    listener: TcpListener,
-    stop: Arc<AtomicBool>,
-    on_event: Arc<dyn Fn(ServerEvent) + Send + Sync>,
-) {
+fn accept_loop(listener: TcpListener, stop: Arc<AtomicBool>, on_event: Arc<dyn Fn(ServerEvent) + Send + Sync>) {
     while !stop.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, peer)) => {
@@ -78,9 +70,7 @@ fn accept_loop(
                 let result = serve(stream, peer, &on_event);
                 on_event(ServerEvent::Finished { peer, result });
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(150))
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(150)),
             Err(e) => {
                 tracing::error!("sync accept: {e}");
                 thread::sleep(Duration::from_millis(500));

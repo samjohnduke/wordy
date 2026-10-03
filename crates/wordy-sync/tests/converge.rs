@@ -18,10 +18,7 @@ fn state(p: &Project, dir: &std::path::Path, name: &str, code: &str, words: &[&s
     }
 }
 
-fn sync_pair(
-    state_a: LocalState,
-    state_b: LocalState,
-) -> (anyhow::Result<SyncOutcome>, anyhow::Result<SyncOutcome>) {
+fn sync_pair(state_a: LocalState, state_b: LocalState) -> (anyhow::Result<SyncOutcome>, anyhow::Result<SyncOutcome>) {
     let (tx, rx) = mpsc::channel();
     let state_b = Arc::new(state_b);
     let server = Server::start(0, move |ev| match ev {
@@ -74,12 +71,7 @@ fn concurrent_edits_converge_and_assets_and_words_cross() {
         .unwrap()
         .insert(20, " The wind howled.")
         .unwrap();
-    b.node(scene)
-        .unwrap()
-        .body()
-        .unwrap()
-        .insert(0, "Suddenly, ")
-        .unwrap();
+    b.node(scene).unwrap().body().unwrap().insert(0, "Suddenly, ").unwrap();
     a.save().unwrap();
     b.save().unwrap();
     std::fs::write(dir_a.join("assets/from-a.png"), b"AAA").unwrap();
@@ -101,14 +93,8 @@ fn concurrent_edits_converge_and_assets_and_words_cross() {
     assert_eq!(out_b.files_in, vec!["from-a.png"]);
     assert_eq!(out_a.new_words, vec!["Zorbo"]);
     assert_eq!(out_b.new_words, vec!["Elendil"]);
-    assert_eq!(
-        std::fs::read(dir_a.join("assets/from-b.png")).unwrap(),
-        b"BBB"
-    );
-    assert_eq!(
-        std::fs::read(dir_b.join("assets/from-a.png")).unwrap(),
-        b"AAA"
-    );
+    assert_eq!(std::fs::read(dir_a.join("assets/from-b.png")).unwrap(), b"BBB");
+    assert_eq!(std::fs::read(dir_b.join("assets/from-a.png")).unwrap(), b"AAA");
 
     // Apply on each side, as the UI thread would.
     a.import_bytes(&out_a.incoming_updates).unwrap();
@@ -119,10 +105,7 @@ fn concurrent_edits_converge_and_assets_and_words_cross() {
     assert_eq!(ta, "Suddenly, It was a dark night. The wind howled.");
 
     // A second sync has nothing to move.
-    let (out_a, out_b) = sync_pair(
-        state(&a, &dir_a, "A", "4242", &[]),
-        state(&b, &dir_b, "B", "4242", &[]),
-    );
+    let (out_a, out_b) = sync_pair(state(&a, &dir_a, "A", "4242", &[]), state(&b, &dir_b, "B", "4242", &[]));
     let (out_a, out_b) = (out_a.unwrap(), out_b.unwrap());
     assert_eq!((out_a.ops_in, out_a.ops_out), (0, 0));
     assert!(out_a.incoming_updates.is_empty() && out_b.incoming_updates.is_empty());

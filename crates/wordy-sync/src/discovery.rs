@@ -49,9 +49,7 @@ impl Discovery {
                 while let Ok(ev) = rx.recv() {
                     match ev {
                         ServiceEvent::ServiceResolved(info) => {
-                            let Some(addr) =
-                                pick_addr(info.addresses.iter().map(|a| a.to_ip_addr()), info.port)
-                            else {
+                            let Some(addr) = pick_addr(info.addresses.iter().map(|a| a.to_ip_addr()), info.port) else {
                                 continue;
                             };
                             let peer = Peer {
@@ -91,12 +89,7 @@ impl Discovery {
     }
 
     /// Advertise this copy. Peers with this exact name are hidden from `peers()`.
-    pub fn advertise(
-        &mut self,
-        project_id: &str,
-        peer_name: &str,
-        port: u16,
-    ) -> Result<Advertiser> {
+    pub fn advertise(&mut self, project_id: &str, peer_name: &str, port: u16) -> Result<Advertiser> {
         let host = gethostname::gethostname()
             .to_string_lossy()
             .trim_end_matches('.')
@@ -106,20 +99,11 @@ impl Discovery {
         let mut props = HashMap::new();
         props.insert(PROP_PROJECT.to_string(), project_id.to_string());
         props.insert(PROP_PEER.to_string(), peer_name.to_string());
-        let info = ServiceInfo::new(
-            SERVICE_TYPE,
-            &instance,
-            &format!("{host}.local."),
-            (),
-            port,
-            props,
-        )
-        .context("describing our service")?
-        .enable_addr_auto();
+        let info = ServiceInfo::new(SERVICE_TYPE, &instance, &format!("{host}.local."), (), port, props)
+            .context("describing our service")?
+            .enable_addr_auto();
         let fullname = info.get_fullname().to_string();
-        self.daemon
-            .register(info)
-            .context("registering with mDNS")?;
+        self.daemon.register(info).context("registering with mDNS")?;
         self.own_fullname = Some(fullname.clone());
         tracing::info!("mdns: advertising {fullname} on port {port}");
         Ok(Advertiser {

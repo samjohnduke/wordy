@@ -14,9 +14,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use unicode_segmentation::UnicodeSegmentation;
-use wordy_doc::loro::{
-    CommitOptions, ContainerTrait as _, LoroDoc, LoroText, LoroValue, UndoItemMeta, UndoManager,
-};
+use wordy_doc::loro::{CommitOptions, ContainerTrait as _, LoroDoc, LoroText, LoroValue, UndoItemMeta, UndoManager};
 use wordy_doc::{Block, Comments, Marks, Paragraphs, Run, META_ORIGIN};
 use wordy_doc::{EntityNames, Matcher, TreeID};
 
@@ -35,10 +33,7 @@ pub struct Selection {
 
 impl Selection {
     pub fn caret(cp: usize) -> Self {
-        Self {
-            anchor: cp,
-            head: cp,
-        }
+        Self { anchor: cp, head: cp }
     }
 
     pub fn range(&self) -> Range<usize> {
@@ -249,10 +244,7 @@ impl ProseEditor {
             undo.set_on_push(Some(Box::new(move |_kind, _span, _event| {
                 let (a, h) = *snap.lock().unwrap();
                 UndoItemMeta {
-                    value: LoroValue::from(vec![
-                        LoroValue::I64(a as i64),
-                        LoroValue::I64(h as i64),
-                    ]),
+                    value: LoroValue::from(vec![LoroValue::I64(a as i64), LoroValue::I64(h as i64)]),
                     cursors: Vec::new(),
                 }
             })));
@@ -398,9 +390,7 @@ impl ProseEditor {
                 self.spell_waiting = true;
                 cx.spawn(async move |this, cx| {
                     while spell::dictionary().is_none() {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(200))
-                            .await;
+                        cx.background_executor().timer(Duration::from_millis(200)).await;
                     }
                     this.update(cx, |e, cx| {
                         e.spell_waiting = false;
@@ -419,9 +409,7 @@ impl ProseEditor {
         let plain = std::mem::take(&mut self.plain);
         for (br, word) in spell::checkable_words(&plain) {
             let r = cp_at_byte[br.start]..cp_at_byte[br.end];
-            if links
-                .iter()
-                .any(|(l, _)| l.start < r.end && r.start < l.end)
+            if links.iter().any(|(l, _)| l.start < r.end && r.start < l.end)
                 || mentions.iter().any(|m| m.start < r.end && r.start < m.end)
             {
                 continue;
@@ -442,10 +430,7 @@ impl ProseEditor {
         let links = self.link_ranges();
         for m in self.matcher.scan_excluding(&self.plain, self.self_id) {
             let r = cp_at_byte[m.range.start]..cp_at_byte[m.range.end];
-            if links
-                .iter()
-                .any(|(l, _)| l.start < r.end && r.start < l.end)
-            {
+            if links.iter().any(|(l, _)| l.start < r.end && r.start < l.end) {
                 continue;
             }
             self.mentions.push(MentionSpan {
@@ -487,9 +472,7 @@ impl ProseEditor {
     }
 
     pub fn mention_at(&self, cp: usize) -> Option<&MentionSpan> {
-        self.mentions
-            .iter()
-            .find(|m| m.range.start <= cp && cp < m.range.end)
+        self.mentions.iter().find(|m| m.range.start <= cp && cp < m.range.end)
     }
 
     pub fn is_picking_link(&self) -> bool {
@@ -530,25 +513,21 @@ impl ProseEditor {
         self.comment_edit = None;
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Link to…"));
         input.update(cx, |s, cx| s.focus(window, cx));
-        let sub = cx.subscribe_in(
-            &input,
-            window,
-            |this, input, ev: &InputEvent, window, cx| match ev {
-                InputEvent::Change => {
-                    let q = input.read(cx).value().to_string();
-                    if let Some(p) = &mut this.link_picker {
-                        p.query = q;
-                        p.selected = 0;
-                    }
-                    cx.notify();
+        let sub = cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, window, cx| match ev {
+            InputEvent::Change => {
+                let q = input.read(cx).value().to_string();
+                if let Some(p) = &mut this.link_picker {
+                    p.query = q;
+                    p.selected = 0;
                 }
-                InputEvent::PressEnter { .. } => {
-                    let ix = this.link_picker.as_ref().map(|p| p.selected).unwrap_or(0);
-                    this.confirm_link_pick(ix, window, cx);
-                }
-                _ => {}
-            },
-        );
+                cx.notify();
+            }
+            InputEvent::PressEnter { .. } => {
+                let ix = this.link_picker.as_ref().map(|p| p.selected).unwrap_or(0);
+                this.confirm_link_pick(ix, window, cx);
+            }
+            _ => {}
+        });
         self.link_picker = Some(LinkPicker {
             range,
             input,
@@ -577,12 +556,7 @@ impl ProseEditor {
             .link_targets
             .iter()
             .enumerate()
-            .filter(|(_, t)| {
-                p.restrict
-                    .as_ref()
-                    .map(|r| r.contains(&t.id))
-                    .unwrap_or(true)
-            })
+            .filter(|(_, t)| p.restrict.as_ref().map(|r| r.contains(&t.id)).unwrap_or(true))
             .filter_map(|(ix, t)| {
                 if q.is_empty() {
                     return Some((2, ix, t));
@@ -600,11 +574,7 @@ impl ProseEditor {
             })
             .collect();
         scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.title.cmp(&b.2.title)));
-        scored
-            .into_iter()
-            .take(8)
-            .map(|(_, ix, t)| (ix, t))
-            .collect()
+        scored.into_iter().take(8).map(|(_, ix, t)| (ix, t)).collect()
     }
 
     fn move_picker_selection(&mut self, delta: i32, cx: &mut Context<Self>) {
@@ -664,13 +634,7 @@ impl ProseEditor {
 
     /// Clicking a link opens it; clicking a unique mention opens it too, and an
     /// ambiguous mention asks which entity it means.
-    fn follow_at(
-        &mut self,
-        cp: usize,
-        navigate: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn follow_at(&mut self, cp: usize, navigate: bool, window: &mut Window, cx: &mut Context<Self>) {
         if let Some((_, id)) = self.link_at(cp) {
             cx.emit(EditorEvent::OpenLink { id, navigate });
             return;
@@ -731,10 +695,7 @@ impl ProseEditor {
     /// Block type of the paragraph at the selection head.
     pub fn current_block(&self) -> Block {
         let pos = self.paras.locate(self.sel.head);
-        self.paras
-            .get(pos.para)
-            .map(|p| p.block)
-            .unwrap_or_default()
+        self.paras.get(pos.para).map(|p| p.block).unwrap_or_default()
     }
 
     /// Marks that the next typed character will get: pending toggles if any,
@@ -829,16 +790,14 @@ impl ProseEditor {
     }
 
     fn commit(&mut self, cx: &mut Context<Self>) {
-        self.doc
-            .commit_with(CommitOptions::default().origin(&self.origin));
+        self.doc.commit_with(CommitOptions::default().origin(&self.origin));
         self.refresh(cx);
         cx.emit(EditorEvent::Edited);
     }
 
     /// Commit a metadata-only change (comment text, resolved flag) outside undo.
     fn commit_meta(&mut self, cx: &mut Context<Self>) {
-        self.doc
-            .commit_with(CommitOptions::default().origin(META_ORIGIN));
+        self.doc.commit_with(CommitOptions::default().origin(META_ORIGIN));
         cx.emit(EditorEvent::Edited);
         cx.notify();
     }
@@ -890,9 +849,7 @@ impl ProseEditor {
         let epoch = self.blink_epoch;
         self.blink_on = true;
         self._blink = cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(530))
-                .await;
+            cx.background_executor().timer(Duration::from_millis(530)).await;
             let keep_going = this.update(cx, |e, cx| {
                 if e.blink_epoch != epoch {
                     return false;
@@ -1372,12 +1329,7 @@ impl ProseEditor {
                 let n = run.text.chars().count();
                 let seg = cp.max(r.start)..(cp + n).min(r.end);
                 if !seg.is_empty() {
-                    let text: String = run
-                        .text
-                        .chars()
-                        .skip(seg.start - cp)
-                        .take(seg.len())
-                        .collect();
+                    let text: String = run.text.chars().skip(seg.start - cp).take(seg.len()).collect();
                     let mut marks = run.marks.clone();
                     marks.comment = None;
                     runs.push(Run { text, marks });
@@ -1656,10 +1608,7 @@ impl ProseEditor {
         let r = self.sel.range();
         let ix = if dir > 0 {
             let from = if inclusive { r.start } else { r.start + 1 };
-            self.matches
-                .iter()
-                .position(|m| m.start >= from)
-                .unwrap_or(0)
+            self.matches.iter().position(|m| m.start >= from).unwrap_or(0)
         } else {
             self.matches
                 .iter()
@@ -1718,11 +1667,7 @@ impl ProseEditor {
             return cp.saturating_sub(1);
         };
         let before = &p.text[..pos.byte];
-        let start = before
-            .grapheme_indices(true)
-            .last()
-            .map(|(b, _)| b)
-            .unwrap_or(0);
+        let start = before.grapheme_indices(true).last().map(|(b, _)| b).unwrap_or(0);
         self.paras.cp_at(pos.para, start)
     }
 
@@ -1732,17 +1677,9 @@ impl ProseEditor {
             return cp;
         };
         if pos.cp >= p.len_cp {
-            return if pos.para + 1 < self.paras.len() {
-                cp + 1
-            } else {
-                cp
-            };
+            return if pos.para + 1 < self.paras.len() { cp + 1 } else { cp };
         }
-        let len = p.text[pos.byte..]
-            .graphemes(true)
-            .next()
-            .map(|g| g.len())
-            .unwrap_or(0);
+        let len = p.text[pos.byte..].graphemes(true).next().map(|g| g.len()).unwrap_or(0);
         self.paras.cp_at(pos.para, pos.byte + len)
     }
 
@@ -1770,11 +1707,7 @@ impl ProseEditor {
             return cp;
         };
         if pos.cp >= p.len_cp {
-            return if pos.para + 1 < self.paras.len() {
-                cp + 1
-            } else {
-                cp
-            };
+            return if pos.para + 1 < self.paras.len() { cp + 1 } else { cp };
         }
         let end = p
             .text
@@ -1878,13 +1811,7 @@ impl ProseEditor {
 
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
         let max = self.paras.max_cursor();
-        self.set_selection(
-            Selection {
-                anchor: 0,
-                head: max,
-            },
-            cx,
-        );
+        self.set_selection(Selection { anchor: 0, head: max }, cx);
     }
 
     /// Select `r` (code points) and scroll it into view.
@@ -1907,12 +1834,7 @@ impl ProseEditor {
         frame.as_ref().map(|f| f.cp_for_point(pt, &self.paras))
     }
 
-    pub(crate) fn on_mouse_down(
-        &mut self,
-        ev: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(cp) = self.cp_for_window_point(ev.position) else {
             return;
         };
@@ -1960,21 +1882,11 @@ impl ProseEditor {
         let Some(cp) = self.cp_for_window_point(ev.position) else {
             return;
         };
-        let Some(r) = self
-            .misspellings
-            .iter()
-            .find(|r| r.start <= cp && cp < r.end)
-            .cloned()
-        else {
+        let Some(r) = self.misspellings.iter().find(|r| r.start <= cp && cp < r.end).cloned() else {
             cx.notify();
             return;
         };
-        let word: String = self
-            .plain
-            .chars()
-            .skip(r.start)
-            .take(r.end - r.start)
-            .collect();
+        let word: String = self.plain.chars().skip(r.start).take(r.end - r.start).collect();
         let suggestions = SpellState::suggest(&word, 6);
         if self.sel.range() != r {
             self.sel = Selection::caret(cp);
@@ -2043,12 +1955,7 @@ impl ProseEditor {
             .max(px(0.));
         let top = pt.y + lh + px(4.) - f.bounds_origin.y;
         let theme = cx.theme();
-        let (bg, border, muted, accent) = (
-            theme.popover,
-            theme.border,
-            theme.muted_foreground,
-            theme.primary,
-        );
+        let (bg, border, muted, accent) = (theme.popover, theme.border, theme.muted_foreground, theme.primary);
         let row = |id: ElementId, label: String, muted_text: bool| {
             div()
                 .id(id)
@@ -2091,33 +1998,19 @@ impl ProseEditor {
                 .border_color(border)
                 .shadow_md()
                 .when(suggestions.is_empty(), |d| {
-                    d.child(
-                        div()
-                            .px_2()
-                            .py_1()
-                            .text_xs()
-                            .text_color(muted)
-                            .child("No suggestions"),
-                    )
+                    d.child(div().px_2().py_1().text_xs().text_color(muted).child("No suggestions"))
                 })
                 .children(suggestions)
                 .child(div().h(px(1.)).w_full().bg(border))
                 .child(
-                    row(
-                        "spell-add".into(),
-                        format!("Add “{}” to dictionary", popup.word),
-                        true,
-                    )
-                    .on_mouse_down(
+                    row("spell-add".into(), format!("Add “{}” to dictionary", popup.word), true).on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|e, _, _, cx| e.add_word_to_dictionary(cx)),
                     ),
                 )
                 .child(
-                    row("spell-ignore".into(), "Ignore".to_string(), true).on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|e, _, _, cx| e.ignore_word(cx)),
-                    ),
+                    row("spell-ignore".into(), "Ignore".to_string(), true)
+                        .on_mouse_down(MouseButton::Left, cx.listener(|e, _, _, cx| e.ignore_word(cx))),
                 )
                 .into_any_element(),
         )
@@ -2138,12 +2031,7 @@ impl ProseEditor {
     }
 
     pub(crate) fn on_scroll(&mut self, delta_y: Pixels, cx: &mut Context<Self>) {
-        let max = self
-            .frame
-            .borrow()
-            .as_ref()
-            .map(|f| f.max_scroll)
-            .unwrap_or(px(0.));
+        let max = self.frame.borrow().as_ref().map(|f| f.max_scroll).unwrap_or(px(0.));
         let new = (self.scroll_y - delta_y).max(px(0.)).min(max);
         if new != self.scroll_y {
             self.scroll_y = new;
@@ -2206,11 +2094,7 @@ impl EntityInputHandler for ProseEditor {
         })
     }
 
-    fn marked_text_range(
-        &self,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<Range<usize>> {
+    fn marked_text_range(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<Range<usize>> {
         self.marked.as_ref().map(|m| self.range_cp_to_utf16(m))
     }
 
@@ -2328,10 +2212,7 @@ impl EntityInputHandler for ProseEditor {
         let frame = self.frame.borrow();
         let f = frame.as_ref()?;
         let (start, lh) = f.point_for_cp(r.start, &self.paras)?;
-        let end = f
-            .point_for_cp(r.end, &self.paras)
-            .map(|(p, _)| p)
-            .unwrap_or(start);
+        let end = f.point_for_cp(r.end, &self.paras).map(|(p, _)| p).unwrap_or(start);
         let width = if end.y == start.y {
             (end.x - start.x).max(px(2.))
         } else {
@@ -2353,11 +2234,7 @@ impl EntityInputHandler for ProseEditor {
         Some(self.cp_to_utf16(cp))
     }
 
-    fn text_length_utf16(
-        &mut self,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<usize> {
+    fn text_length_utf16(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<usize> {
         Some(self.plain.encode_utf16().count())
     }
 }
@@ -2378,14 +2255,10 @@ impl ProseEditor {
                 card.resolved,
             ),
             None => {
-                let anchor = self
-                    .comment_anchors_with(true)
-                    .into_iter()
-                    .find(|a| a.id == edit.id)?;
+                let anchor = self.comment_anchors_with(true).into_iter().find(|a| a.id == edit.id)?;
                 let (pt, lh) = f.point_for_cp(anchor.range.start, &self.paras)?;
                 let width = px(320.).min(f.wrap_width);
-                let left = (pt.x - f.bounds_origin.x)
-                    .min(f.origin.x + f.wrap_width - width - f.bounds_origin.x);
+                let left = (pt.x - f.bounds_origin.x).min(f.origin.x + f.wrap_width - width - f.bounds_origin.x);
                 (
                     left.max(px(0.)),
                     pt.y + lh + px(4.) - f.bounds_origin.y,
@@ -2441,9 +2314,7 @@ impl ProseEditor {
                                         .ghost()
                                         .xsmall()
                                         .label("Delete")
-                                        .on_click(cx.listener(move |e, _, _, cx| {
-                                            e.delete_comment(&id_delete, cx)
-                                        })),
+                                        .on_click(cx.listener(move |e, _, _, cx| e.delete_comment(&id_delete, cx))),
                                 ),
                         ),
                 )
@@ -2464,12 +2335,7 @@ impl ProseEditor {
             .max(px(0.));
         let top = pt.y + lh + px(4.) - f.bounds_origin.y;
         let theme = cx.theme();
-        let (bg, border, muted, accent) = (
-            theme.popover,
-            theme.border,
-            theme.muted_foreground,
-            theme.primary,
-        );
+        let (bg, border, muted, accent) = (theme.popover, theme.border, theme.muted_foreground, theme.primary);
         let selected = picker.selected;
         let linked = self.link_at(picker.range.start).is_some();
         let pinning = picker.restrict.is_some();
@@ -2531,12 +2397,7 @@ impl ProseEditor {
                 .child(Input::new(&picker.input).small())
                 .children(rows)
                 .when(candidates.is_empty(), |d| {
-                    d.child(
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child("No matching entities"),
-                    )
+                    d.child(div().text_xs().text_color(muted).child("No matching entities"))
                 })
                 .when(linked && !pinning, |d| {
                     d.child(
@@ -2638,9 +2499,7 @@ impl Render for ProseEditor {
             .on_action(cx.listener(|e, _: &ToggleSmallCaps, _, cx| e.toggle_mark("smallcaps", cx)))
             .on_action(cx.listener(|e, _: &ToggleHighlight, _, cx| e.toggle_mark("highlight", cx)))
             .on_action(cx.listener(|e, _: &AddComment, window, cx| e.add_comment(window, cx)))
-            .on_action(
-                cx.listener(|e, _: &ToggleResolvedComments, _, cx| e.toggle_show_resolved(cx)),
-            )
+            .on_action(cx.listener(|e, _: &ToggleResolvedComments, _, cx| e.toggle_show_resolved(cx)))
             .on_action(cx.listener(|e, _: &Cancel, window, cx| {
                 if e.spell_popup.is_some() {
                     e.close_spell_popup(cx);

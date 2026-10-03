@@ -20,11 +20,7 @@ pub fn render(c: &Compiled) -> String {
                 s.push_str("* * *\n\n");
             }
             for p in &scene.paragraphs {
-                let inner: String = p
-                    .runs
-                    .iter()
-                    .map(|r| styled(&esc(&r.text), &r.marks))
-                    .collect();
+                let inner: String = p.runs.iter().map(|r| styled(&esc(&r.text), &r.marks)).collect();
                 match p.block {
                     Block::Paragraph => {
                         let _ = writeln!(s, "{inner}\n");

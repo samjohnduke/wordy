@@ -69,8 +69,7 @@ pub fn read_frame<R: Read>(r: &mut R) -> Result<Vec<u8>> {
         bail!("frame too large: {len} bytes");
     }
     let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf)
-        .context("connection closed mid-frame")?;
+    r.read_exact(&mut buf).context("connection closed mid-frame")?;
     Ok(buf)
 }
 
@@ -101,8 +100,7 @@ pub fn hex(bytes: &[u8]) -> String {
 pub fn proof(code: &str, role: &str, client_nonce: &str, server_nonce: &str) -> String {
     use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
-    let mut mac = Hmac::<Sha256>::new_from_slice(code.trim().as_bytes())
-        .expect("hmac accepts any key length");
+    let mut mac = Hmac::<Sha256>::new_from_slice(code.trim().as_bytes()).expect("hmac accepts any key length");
     mac.update(role.as_bytes());
     mac.update(b"\0");
     mac.update(client_nonce.as_bytes());
@@ -116,11 +114,7 @@ pub fn proof_matches(expected: &str, got: &str) -> bool {
     if expected.len() != got.len() {
         return false;
     }
-    expected
-        .bytes()
-        .zip(got.bytes())
-        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-        == 0
+    expected.bytes().zip(got.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -160,13 +154,7 @@ mod tests {
     #[test]
     fn reject_becomes_error() {
         let mut buf = Vec::new();
-        write_msg(
-            &mut buf,
-            &Msg::Reject {
-                reason: "nope".into(),
-            },
-        )
-        .unwrap();
+        write_msg(&mut buf, &Msg::Reject { reason: "nope".into() }).unwrap();
         let err = read_msg(&mut &buf[..]).unwrap_err();
         assert!(err.to_string().contains("nope"));
     }

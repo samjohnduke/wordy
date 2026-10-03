@@ -4,9 +4,7 @@
 
 use anyhow::{anyhow, Result};
 use chrono::{Days, NaiveDate};
-use loro::{
-    ContainerTrait as _, Frontiers, LoroDoc, LoroMap, LoroText, LoroValue, TreeID, ValueOrContainer,
-};
+use loro::{ContainerTrait as _, Frontiers, LoroDoc, LoroMap, LoroText, LoroValue, TreeID, ValueOrContainer};
 
 use crate::node::NodeKind;
 use crate::project::{now_ms, Project};
@@ -176,9 +174,7 @@ pub fn scan_placeholders(text: &str) -> Vec<(usize, String)> {
         let c = chars[i];
         if c == '[' {
             // Bracketed note: [TODO ...], [?], [fix this], up to 80 chars, same paragraph.
-            if let Some(end) =
-                (i + 1..chars.len().min(i + 82)).find(|&j| chars[j] == ']' || chars[j] == '\n')
-            {
+            if let Some(end) = (i + 1..chars.len().min(i + 82)).find(|&j| chars[j] == ']' || chars[j] == '\n') {
                 if chars[end] == ']' {
                     let inner: String = chars[i + 1..end].iter().collect();
                     let t = inner.trim();
@@ -304,8 +300,7 @@ impl Project {
     /// Record the current word count and add active seconds to `date`'s session.
     pub fn update_session(&self, date: NaiveDate, words: i64, add_seconds: i64) -> Result<Session> {
         self.begin_session(date, words)?;
-        let m = child_map(&self.sessions_map(), &date_str(date))
-            .ok_or_else(|| anyhow!("session vanished"))?;
+        let m = child_map(&self.sessions_map(), &date_str(date)).ok_or_else(|| anyhow!("session vanished"))?;
         m.insert(keys::WORDS_END, words)?;
         if add_seconds > 0 {
             let secs = get_i64(&m, keys::SECONDS).unwrap_or(0) + add_seconds;
@@ -477,8 +472,7 @@ impl Project {
             body.delete(0, len)?;
         }
         body.apply_delta(&delta)?;
-        self.doc
-            .commit_with(loro::CommitOptions::default().origin(origin));
+        self.doc.commit_with(loro::CommitOptions::default().origin(origin));
         Ok(())
     }
 
@@ -489,8 +483,7 @@ impl Project {
         let mut out = Vec::new();
         for id in self.all_nodes() {
             let Ok(n) = self.node(id) else { continue };
-            if !n.kind().has_body() || n.kind() == NodeKind::Entity && n.body_if_exists().is_none()
-            {
+            if !n.kind().has_body() || n.kind() == NodeKind::Entity && n.body_if_exists().is_none() {
                 continue;
             }
             let text = n.plain_text();
@@ -577,18 +570,13 @@ mod tests {
         assert_eq!(p.streak(d("2026-03-03")), 2); // yesterday counts
         assert_eq!(p.streak(d("2026-03-04")), 0);
         // begin_session is idempotent within a day.
-        assert_eq!(
-            p.begin_session(d("2026-03-01"), 999).unwrap().words_start,
-            100
-        );
+        assert_eq!(p.begin_session(d("2026-03-01"), 999).unwrap().words_start, 100);
     }
 
     #[test]
     fn tasks_crud() {
         let p = Project::new_in_memory("T").unwrap();
-        let sc = p
-            .create_node(p.root(Space::Manuscript), NodeKind::Scene, "S")
-            .unwrap();
+        let sc = p.create_node(p.root(Space::Manuscript), NodeKind::Scene, "S").unwrap();
         let a = p.add_task("Fix the ending", Some(sc)).unwrap();
         let b = p.add_task("Name the dog", None).unwrap();
         let list = p.task_list();
@@ -608,9 +596,7 @@ mod tests {
     #[test]
     fn versions_view_and_restore() {
         let p = Project::new_in_memory("T").unwrap();
-        let sc = p
-            .create_node(p.root(Space::Manuscript), NodeKind::Scene, "S")
-            .unwrap();
+        let sc = p.create_node(p.root(Space::Manuscript), NodeKind::Scene, "S").unwrap();
         let body = p.node(sc).unwrap().body().unwrap();
         body.delete(0, body.len_unicode()).unwrap();
         body.insert(0, "First draft.\n").unwrap();
@@ -631,8 +617,7 @@ mod tests {
         let delta = p.node(sc).unwrap().body().unwrap().to_delta();
         let bold = delta.iter().any(|d| match d {
             loro::TextDelta::Insert {
-                attributes: Some(a),
-                ..
+                attributes: Some(a), ..
             } => a.contains_key("bold"),
             _ => false,
         });
@@ -647,20 +632,13 @@ mod tests {
     fn versions_survive_save_and_reopen() {
         let dir = std::env::temp_dir().join(format!("wordy-ver-{}", ulid::Ulid::new()));
         let p = Project::create(&dir, "T").unwrap();
-        let sc = p
-            .create_node(p.root(Space::Manuscript), NodeKind::Scene, "S")
-            .unwrap();
+        let sc = p.create_node(p.root(Space::Manuscript), NodeKind::Scene, "S").unwrap();
         let body = p.node(sc).unwrap().body().unwrap();
         body.delete(0, body.len_unicode()).unwrap();
         body.insert(0, "one\n").unwrap();
         p.doc.commit();
         let v = p.save_version(sc, "v").unwrap();
-        p.node(sc)
-            .unwrap()
-            .body()
-            .unwrap()
-            .insert(0, "zero ")
-            .unwrap();
+        p.node(sc).unwrap().body().unwrap().insert(0, "zero ").unwrap();
         p.save().unwrap();
         let q = Project::open(&dir).unwrap();
         assert_eq!(q.node(sc).unwrap().plain_text(), "zero one");
@@ -671,9 +649,8 @@ mod tests {
 
     #[test]
     fn placeholder_scan() {
-        let hits = scan_placeholders(
-            "She said TK and left. [TODO: name] Nothing here [maybe]. TKTK? [?] fine. Stalk TK.",
-        );
+        let hits =
+            scan_placeholders("She said TK and left. [TODO: name] Nothing here [maybe]. TKTK? [?] fine. Stalk TK.");
         let markers: Vec<&str> = hits.iter().map(|(_, m)| m.as_str()).collect();
         assert_eq!(markers, vec!["TK", "[TODO: name]", "TKTK", "[?]", "TK"]);
         assert_eq!(hits[0].0, 9);
@@ -691,9 +668,7 @@ mod tests {
             .unwrap()
             .insert(0, "Line one.\nHe grabbed the TK and ran.\n")
             .unwrap();
-        let note = p
-            .create_node(p.root(Space::Notes), NodeKind::Note, "Ideas")
-            .unwrap();
+        let note = p.create_node(p.root(Space::Notes), NodeKind::Note, "Ideas").unwrap();
         p.node(note)
             .unwrap()
             .body()

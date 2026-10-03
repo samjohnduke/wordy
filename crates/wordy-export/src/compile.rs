@@ -186,12 +186,7 @@ mod tests {
         let act = p.create_node(root, NodeKind::Act, "Act I").unwrap();
         let ch1 = p.create_node(act, NodeKind::Chapter, "One").unwrap();
         let s1 = p.create_node(ch1, NodeKind::Scene, "Dawn").unwrap();
-        p.node(s1)
-            .unwrap()
-            .body()
-            .unwrap()
-            .insert(0, "First scene.\n")
-            .unwrap();
+        p.node(s1).unwrap().body().unwrap().insert(0, "First scene.\n").unwrap();
         let s2 = p.create_node(ch1, NodeKind::Scene, "Noon").unwrap();
         p.node(s2)
             .unwrap()
@@ -209,12 +204,7 @@ mod tests {
             .insert(0, "Third scene.\n\n")
             .unwrap();
         let loose = p.create_node(root, NodeKind::Scene, "Epilogue").unwrap();
-        p.node(loose)
-            .unwrap()
-            .body()
-            .unwrap()
-            .insert(0, "The end.\n")
-            .unwrap();
+        p.node(loose).unwrap().body().unwrap().insert(0, "The end.\n").unwrap();
         p.commit_meta();
         p
     }

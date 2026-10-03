@@ -5,10 +5,7 @@ use std::path::PathBuf;
 use wordy_doc::{Paragraphs, Project};
 
 fn main() -> anyhow::Result<()> {
-    let dir = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .expect("project dir");
+    let dir = std::env::args().nth(1).map(PathBuf::from).expect("project dir");
     let project = Project::open(&dir)?;
     println!("project: {}", project.name());
     for id in project.manuscript_scenes() {
@@ -50,10 +47,7 @@ fn main() -> anyhow::Result<()> {
     let comments = project.comments();
     for id in comments.ids() {
         if let Some(c) = comments.get(&id) {
-            println!(
-                "comment {id}: {:?} resolved={} node={:?}",
-                c.text, c.resolved, c.node
-            );
+            println!("comment {id}: {:?} resolved={} node={:?}", c.text, c.resolved, c.node);
         }
     }
     Ok(())

@@ -83,11 +83,7 @@ fn chapter_body(c: &Compiled, chapter: &Chapter) -> String {
             let _ = writeln!(s, "<p class=\"sep\">{}</p>", esc(&c.separator));
         }
         for p in &scene.paragraphs {
-            let inner: String = p
-                .runs
-                .iter()
-                .map(|r| styled(&esc(&r.text), &r.marks))
-                .collect();
+            let inner: String = p.runs.iter().map(|r| styled(&esc(&r.text), &r.marks)).collect();
             match p.block {
                 Block::Paragraph => {
                     let _ = writeln!(s, "<p>{inner}</p>");
@@ -177,10 +173,7 @@ mod tests {
         let bytes = render(&crate::docx::tests::sample()).unwrap();
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
         let mut mt = String::new();
-        zip.by_name("mimetype")
-            .unwrap()
-            .read_to_string(&mut mt)
-            .unwrap();
+        zip.by_name("mimetype").unwrap().read_to_string(&mut mt).unwrap();
         assert_eq!(mt, "application/epub+zip");
         let mut ch = String::new();
         zip.by_name("OEBPS/chapter-001.xhtml")
@@ -189,10 +182,7 @@ mod tests {
             .unwrap();
         assert!(ch.contains("<h1>One</h1>"));
         assert!(ch.contains("Hello &lt;world&gt;<strong><em> loud</em></strong>"));
-        assert!(
-            ch.contains("<p class=\"sep\">#</p>"),
-            "scene separator between scenes"
-        );
+        assert!(ch.contains("<p class=\"sep\">#</p>"), "scene separator between scenes");
         assert!(zip.by_name("OEBPS/chapter-002.xhtml").is_ok());
     }
 }

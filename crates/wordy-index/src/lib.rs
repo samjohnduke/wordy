@@ -104,9 +104,7 @@ impl Index {
     pub fn rebuild(&mut self, project: &Project, matcher: &Matcher) -> Result<()> {
         let started = std::time::Instant::now();
         let tx = self.conn.transaction()?;
-        tx.execute_batch(
-            "DELETE FROM nodes; DELETE FROM backlinks; DELETE FROM tags; DELETE FROM fts_body;",
-        )?;
+        tx.execute_batch("DELETE FROM nodes; DELETE FROM backlinks; DELETE FROM tags; DELETE FROM fts_body;")?;
         let mut n = 0usize;
         for id in project.all_nodes() {
             if let Ok(node) = project.node(id) {
@@ -245,9 +243,7 @@ impl Index {
     }
 
     pub fn nodes_with_tag(&self, tag: &str) -> Result<Vec<TreeID>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT node_id FROM tags WHERE tag = ?1")?;
+        let mut stmt = self.conn.prepare("SELECT node_id FROM tags WHERE tag = ?1")?;
         let rows = stmt.query_map(params![tag], |r| r.get::<_, String>(0))?;
         Ok(rows
             .flatten()
@@ -265,9 +261,7 @@ impl Index {
     }
 
     pub fn daily_words(&self) -> Result<Vec<(String, i64)>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT date, words FROM daily_words ORDER BY date")?;
+        let mut stmt = self.conn.prepare("SELECT date, words FROM daily_words ORDER BY date")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         Ok(rows.flatten().collect())
     }

@@ -41,14 +41,7 @@ pub mod meta {
 }
 
 /// Inline marks that extend when you type at their right edge.
-pub const INLINE_EXPAND_AFTER: &[&str] = &[
-    "bold",
-    "italic",
-    "underline",
-    "strike",
-    "smallcaps",
-    "highlight",
-];
+pub const INLINE_EXPAND_AFTER: &[&str] = &["bold", "italic", "underline", "strike", "smallcaps", "highlight"];
 /// Marks that never grow: links, comments, and the paragraph attributes on `\n`.
 pub const EXPAND_NONE: &[&str] = &["link", "comment", "block", "align"];
 

@@ -32,11 +32,7 @@ pub fn write_zip<W: Write + io::Seek>(dir: &Path, writer: W) -> Result<usize> {
     let mut zip = ZipWriter::new(writer);
     let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     let mut count = 0;
-    for entry in WalkDir::new(dir)
-        .sort_by_file_name()
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(dir).sort_by_file_name().into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         if path == dir || skip(path) {
             continue;
@@ -82,10 +78,7 @@ mod tests {
         let names: Vec<String> = (0..zip.len())
             .map(|i| zip.by_index(i).unwrap().name().to_string())
             .collect();
-        assert!(
-            names.contains(&"My Novel/project.loro".to_string()),
-            "{names:?}"
-        );
+        assert!(names.contains(&"My Novel/project.loro".to_string()), "{names:?}");
         assert!(names.contains(&"My Novel/snapshots/a.loro".to_string()));
         assert!(!names.iter().any(|n| n.contains("index.sqlite")));
         let mut s = String::new();

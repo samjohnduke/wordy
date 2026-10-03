@@ -146,10 +146,7 @@ pub fn checkable_words(text: &str) -> Vec<(Range<usize>, &str)> {
             if trimmed.is_empty() {
                 return None;
             }
-            let start = i
-                + (w.len()
-                    - w.trim_start_matches(|c: char| c == '\'' || c == '\u{2019}')
-                        .len());
+            let start = i + (w.len() - w.trim_start_matches(|c: char| c == '\'' || c == '\u{2019}').len());
             let end = start + trimmed.len();
             let mut letters = 0;
             let mut lower = false;
@@ -185,10 +182,7 @@ mod tests {
             .into_iter()
             .map(|(_, w)| w)
             .collect();
-        assert_eq!(
-            words,
-            vec!["Don’t", "read", "pages", "quoted", "word", "ish"]
-        );
+        assert_eq!(words, vec!["Don’t", "read", "pages", "quoted", "word", "ish"]);
         let r = &checkable_words("say 'hi'")[1].0;
         assert_eq!(&"say 'hi'"[r.clone()], "hi");
     }

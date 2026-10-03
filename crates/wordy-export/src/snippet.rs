@@ -4,9 +4,7 @@
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use cosmic_text::{
-    fontdb, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache, Wrap,
-};
+use cosmic_text::{fontdb, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache, Wrap};
 use tiny_skia::{Paint, Pixmap, PremultipliedColorU8, Rect, Transform};
 
 use crate::fonts;
@@ -103,11 +101,7 @@ pub fn render(text: &str, opts: &SnippetOptions) -> Result<Vec<u8>> {
         SnippetSize::Wide => 20.0,
     };
     let has_attr = !opts.attribution.trim().is_empty();
-    let attr_h = if has_attr {
-        attr_size * 1.4 + 28.0
-    } else {
-        0.0
-    };
+    let attr_h = if has_attr { attr_size * 1.4 + 28.0 } else { 0.0 };
     let text_w = w as f32 - 2.0 * mx;
     let avail_h = h as f32 - 2.0 * my - attr_h;
 
@@ -116,9 +110,7 @@ pub fn render(text: &str, opts: &SnippetOptions) -> Result<Vec<u8>> {
 
     // Largest size whose wrapped height fits.
     let mut chosen: Option<(Buffer, f32)> = None;
-    for size in [
-        54.0f32, 50.0, 46.0, 42.0, 38.0, 34.0, 30.0, 27.0, 24.0, 21.0, 18.0,
-    ] {
+    for size in [54.0f32, 50.0, 46.0, 42.0, 38.0, 34.0, 30.0, 27.0, 24.0, 21.0, 18.0] {
         let mut buffer = Buffer::new(&mut fs, Metrics::new(size, size * 1.38));
         buffer.set_size(&mut fs, Some(text_w), None);
         buffer.set_wrap(&mut fs, Wrap::WordOrGlyph);
@@ -186,11 +178,7 @@ fn draw_buffer(
                 let ix = (dy * w + dx) as usize;
                 let dst = pixels[ix];
                 let af = a as f32 / 255.0;
-                let blend = |d: u8, s: u8| {
-                    (d as f32 * (1.0 - af) + s as f32 * af)
-                        .round()
-                        .clamp(0.0, 255.0) as u8
-                };
+                let blend = |d: u8, s: u8| (d as f32 * (1.0 - af) + s as f32 * af).round().clamp(0.0, 255.0) as u8;
                 // Background is opaque, so the result stays opaque and premultiplied == straight.
                 pixels[ix] = PremultipliedColorU8::from_rgba(
                     blend(dst.red(), c.r()),
@@ -213,7 +201,11 @@ mod tests {
         for (size, dark) in [(SnippetSize::Square, false), (SnippetSize::Wide, true)] {
             let png = render(
                 "The lighthouse keeper counted the ships that did not come back, and gave each one a name.",
-                &SnippetOptions { size, dark, attribution: "The Lighthouse — Ada Example".into() },
+                &SnippetOptions {
+                    size,
+                    dark,
+                    attribution: "The Lighthouse — Ada Example".into(),
+                },
             )
             .unwrap();
             assert_eq!(&png[1..4], b"PNG");

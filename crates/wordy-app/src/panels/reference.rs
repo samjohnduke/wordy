@@ -46,10 +46,7 @@ impl ReferencePanel {
     }
 
     pub fn pinned_id(&self) -> Option<TreeID> {
-        self.pinned
-            .as_ref()
-            .filter(|p| p.version.is_none())
-            .map(|p| p.id)
+        self.pinned.as_ref().filter(|p| p.version.is_none()).map(|p| p.id)
     }
 
     /// Show a saved version of a body, read-only, with a Restore button.
@@ -139,11 +136,7 @@ impl ReferencePanel {
         }
     }
 
-    pub fn set_link_targets(
-        &mut self,
-        targets: Vec<wordy_editor::LinkTarget>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_link_targets(&mut self, targets: Vec<wordy_editor::LinkTarget>, cx: &mut Context<Self>) {
         if let Some(p) = &self.pinned {
             p.editor.update(cx, |e, cx| e.set_link_targets(targets, cx));
         }
@@ -152,10 +145,7 @@ impl ReferencePanel {
 
     fn render_pinned(&self, pinned: &Pinned, cx: &mut Context<Self>) -> AnyElement {
         let Ok(node) = self.project.project.node(pinned.id) else {
-            return div()
-                .p_2()
-                .child("This item no longer exists.")
-                .into_any_element();
+            return div().p_2().child("This item no longer exists.").into_any_element();
         };
         let id = pinned.id;
         let muted = cx.theme().muted_foreground;
@@ -191,9 +181,7 @@ impl ReferencePanel {
                                         .primary()
                                         .xsmall()
                                         .label("Restore")
-                                        .tooltip(
-                                            "Replace the current body with this version (undoable)",
-                                        )
+                                        .tooltip("Replace the current body with this version (undoable)")
                                         .on_click(cx.listener(move |_, _, _, cx| {
                                             cx.emit(ReferenceEvent::RestoreVersion(restore.clone()))
                                         })),
@@ -217,13 +205,7 @@ impl ReferencePanel {
             return v_flex()
                 .size_full()
                 .child(header)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_h_0()
-                        .w_full()
-                        .child(pinned.editor.clone()),
-                )
+                .child(div().flex_1().min_h_0().w_full().child(pinned.editor.clone()))
                 .into_any_element();
         }
 
@@ -248,9 +230,7 @@ impl ReferencePanel {
                                     .xsmall()
                                     .label("Open")
                                     .tooltip("Open in an editor tab")
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        cx.emit(ReferenceEvent::Open(id))
-                                    })),
+                                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(ReferenceEvent::Open(id)))),
                             )
                             .child(
                                 Button::new("ref-unpin")
@@ -301,9 +281,7 @@ impl ReferencePanel {
                             .text_color(cx.theme().primary)
                             .cursor_pointer()
                             .child(format!("{} ×{}", b.title, b.count))
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.emit(ReferenceEvent::Open(target))
-                            })),
+                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(ReferenceEvent::Open(target)))),
                     );
                 }
                 header = header.child(list);
@@ -312,20 +290,8 @@ impl ReferencePanel {
 
         v_flex()
             .size_full()
-            .child(
-                div()
-                    .id("ref-head")
-                    .max_h(px(320.))
-                    .overflow_y_scroll()
-                    .child(header),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .child(pinned.editor.clone()),
-            )
+            .child(div().id("ref-head").max_h(px(320.)).overflow_y_scroll().child(header))
+            .child(div().flex_1().min_h_0().w_full().child(pinned.editor.clone()))
             .into_any_element()
     }
 }

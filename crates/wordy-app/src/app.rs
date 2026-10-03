@@ -114,11 +114,7 @@ impl ProjectHandle {
 
     pub fn update_index_node(&self, id: TreeID) {
         let matcher = self.matcher();
-        if let Err(e) = self
-            .index
-            .borrow_mut()
-            .update_node(&self.project, id, &matcher)
-        {
+        if let Err(e) = self.index.borrow_mut().update_node(&self.project, id, &matcher) {
             tracing::error!("update index: {e:#}");
         }
     }
@@ -145,13 +141,10 @@ impl ProjectHandle {
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
-        self.index
-            .borrow()
-            .search(query, limit)
-            .unwrap_or_else(|e| {
-                tracing::error!("search: {e:#}");
-                Vec::new()
-            })
+        self.index.borrow().search(query, limit).unwrap_or_else(|e| {
+            tracing::error!("search: {e:#}");
+            Vec::new()
+        })
     }
 
     pub fn nodes_with_tag(&self, tag: &str) -> Vec<TreeID> {

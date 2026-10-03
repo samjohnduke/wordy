@@ -55,12 +55,7 @@ pub struct EntitySheet {
 }
 
 impl EntitySheet {
-    pub fn new(
-        project: SharedProject,
-        id: TreeID,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(project: SharedProject, id: TreeID, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let aliases_now = project
             .project
             .node(id)
@@ -71,16 +66,12 @@ impl EntitySheet {
                 .default_value(aliases_now)
                 .placeholder("Aliases, comma separated")
         });
-        let sub = cx.subscribe_in(
-            &aliases,
-            window,
-            |this, input, ev: &InputEvent, _window, cx| {
-                if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                    let value = input.read(cx).value().to_string();
-                    this.commit_aliases(&value, cx);
-                }
-            },
-        );
+        let sub = cx.subscribe_in(&aliases, window, |this, input, ev: &InputEvent, _window, cx| {
+            if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                let value = input.read(cx).value().to_string();
+                this.commit_aliases(&value, cx);
+            }
+        });
         let mut this = Self {
             project,
             id,
@@ -95,12 +86,7 @@ impl EntitySheet {
     }
 
     pub fn template(&self) -> Template {
-        let id = self
-            .project
-            .project
-            .node(self.id)
-            .ok()
-            .and_then(|n| n.template());
+        let id = self.project.project.node(self.id).ok().and_then(|n| n.template());
         match id {
             Some(id) => templates::by_id(&id),
             None => templates::DEFAULT,
@@ -122,34 +108,22 @@ impl EntitySheet {
             let value = node.field(spec.key);
             let key = spec.key;
             let (input, sub) = if spec.multiline {
-                let state = cx.new(|cx| {
-                    TextareaState::new(window, cx)
-                        .auto_grow(2, 12)
-                        .default_value(value)
+                let state = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 12).default_value(value));
+                let sub = cx.subscribe_in(&state, window, move |this, input, ev: &InputEvent, _window, cx| {
+                    if matches!(ev, InputEvent::Change) {
+                        let v = input.read(cx).value().to_string();
+                        this.set_field(key, &v, cx);
+                    }
                 });
-                let sub = cx.subscribe_in(
-                    &state,
-                    window,
-                    move |this, input, ev: &InputEvent, _window, cx| {
-                        if matches!(ev, InputEvent::Change) {
-                            let v = input.read(cx).value().to_string();
-                            this.set_field(key, &v, cx);
-                        }
-                    },
-                );
                 (FieldInput::Multi(state), sub)
             } else {
                 let state = cx.new(|cx| InputState::new(window, cx).default_value(value));
-                let sub = cx.subscribe_in(
-                    &state,
-                    window,
-                    move |this, input, ev: &InputEvent, _window, cx| {
-                        if matches!(ev, InputEvent::Change) {
-                            let v = input.read(cx).value().to_string();
-                            this.set_field(key, &v, cx);
-                        }
-                    },
-                );
+                let sub = cx.subscribe_in(&state, window, move |this, input, ev: &InputEvent, _window, cx| {
+                    if matches!(ev, InputEvent::Change) {
+                        let v = input.read(cx).value().to_string();
+                        this.set_field(key, &v, cx);
+                    }
+                });
                 (FieldInput::Single(state), sub)
             };
             self.fields.push(Field {
@@ -171,12 +145,7 @@ impl EntitySheet {
         }
     }
 
-    fn set_template(
-        &mut self,
-        template: &'static str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn set_template(&mut self, template: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         if let Ok(node) = self.project.project.node(self.id) {
             if let Err(e) = node.set_template(template) {
                 tracing::error!("set template: {e:#}");
@@ -247,9 +216,7 @@ impl EntitySheet {
         }
         let targets = self.project.link_targets();
         let exact = targets.iter().find(|t| {
-            t.id != self.id
-                && (t.title.to_lowercase() == name
-                    || t.aliases.iter().any(|a| a.to_lowercase() == name))
+            t.id != self.id && (t.title.to_lowercase() == name || t.aliases.iter().any(|a| a.to_lowercase() == name))
         });
         if let Some(t) = exact {
             return Some(t.id);
@@ -350,10 +317,7 @@ impl EntitySheet {
         let mime = mime_guess::from_path(src)
             .first_raw()
             .unwrap_or("application/octet-stream");
-        self.project
-            .project
-            .node(self.id)?
-            .add_attachment(&name, &rel, mime)?;
+        self.project.project.node(self.id)?.add_attachment(&name, &rel, mime)?;
         Ok(())
     }
 
@@ -383,20 +347,15 @@ impl EntitySheet {
 
     fn render_templates(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.template().id;
-        h_flex()
-            .flex_wrap()
-            .gap_1()
-            .children(templates::ALL.iter().map(|t| {
-                let id = t.id;
-                Button::new(ElementId::Name(format!("tpl-{id}").into()))
-                    .ghost()
-                    .xsmall()
-                    .label(t.label)
-                    .toggled(current == id)
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| this.set_template(id, window, cx)),
-                    )
-            }))
+        h_flex().flex_wrap().gap_1().children(templates::ALL.iter().map(|t| {
+            let id = t.id;
+            Button::new(ElementId::Name(format!("tpl-{id}").into()))
+                .ghost()
+                .xsmall()
+                .label(t.label)
+                .toggled(current == id)
+                .on_click(cx.listener(move |this, _, window, cx| this.set_template(id, window, cx)))
+        }))
     }
 
     fn render_fields(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -433,9 +392,7 @@ impl EntitySheet {
                         .xsmall()
                         .icon(IconName::Plus)
                         .tooltip("Add relation")
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.begin_relation(window, cx)),
-                        ),
+                        .on_click(cx.listener(|this, _, window, cx| this.begin_relation(window, cx))),
                 ),
         );
         for (ix, r) in relations.iter().enumerate() {
@@ -451,11 +408,7 @@ impl EntitySheet {
                     .gap_1()
                     .items_center()
                     .text_sm()
-                    .child(
-                        div()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(r.kind.clone()),
-                    )
+                    .child(div().text_color(cx.theme().muted_foreground).child(r.kind.clone()))
                     .child(
                         div()
                             .id(ElementId::Name(format!("rel-{ix}").into()))
@@ -476,9 +429,7 @@ impl EntitySheet {
                             .ghost()
                             .xsmall()
                             .icon(IconName::Close)
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.remove_relation(ix, cx)),
-                            ),
+                            .on_click(cx.listener(move |this, _, _, cx| this.remove_relation(ix, cx))),
                     ),
             );
         }
@@ -548,9 +499,7 @@ impl EntitySheet {
                             .text_color(cx.theme().primary)
                             .cursor_pointer()
                             .child(a.name.clone())
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.open_attachment(&rel, cx)),
-                            ),
+                            .on_click(cx.listener(move |this, _, _, cx| this.open_attachment(&rel, cx))),
                     )
                     .child(
                         div()
@@ -563,9 +512,7 @@ impl EntitySheet {
                             .ghost()
                             .xsmall()
                             .icon(IconName::Close)
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.remove_attachment(ix, cx)),
-                            ),
+                            .on_click(cx.listener(move |this, _, _, cx| this.remove_attachment(ix, cx))),
                     ),
             );
         }
@@ -574,10 +521,7 @@ impl EntitySheet {
 
     fn render_appears_in(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let backlinks = self.project.appears_in(self.id);
-        let mut section = v_flex()
-            .gap_0p5()
-            .w_full()
-            .child(Self::label("Appears in", cx));
+        let mut section = v_flex().gap_0p5().w_full().child(Self::label("Appears in", cx));
         if backlinks.is_empty() {
             section = section.child(
                 div()

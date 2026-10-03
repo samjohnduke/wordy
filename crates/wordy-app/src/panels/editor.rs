@@ -13,9 +13,7 @@ use wordy_doc::{storage, NodeKind, Status, TreeID, Version};
 use wordy_editor::{EditorEvent, LinkTarget, ProseEditor};
 use wordy_export::{SnippetOptions, SnippetSize};
 
-use crate::app::{
-    CloseFind, Find, FindNext, FindPrev, Replace, SharedProject, EDITOR_PANEL_CONTEXT,
-};
+use crate::app::{CloseFind, Find, FindNext, FindPrev, Replace, SharedProject, EDITOR_PANEL_CONTEXT};
 use crate::panels::sheet::{EntitySheet, SheetEvent};
 
 pub enum EditorPanelEvent {
@@ -100,19 +98,15 @@ impl EditorPanel {
             e.set_self_id(Some(id));
             e.set_link_targets(project.link_targets(), cx);
         });
-        let mut subs = vec![
-            cx.subscribe(&editor, |_, _, ev: &EditorEvent, cx| match ev {
-                EditorEvent::Edited => cx.emit(EditorPanelEvent::Edited),
-                EditorEvent::OpenLink { id, navigate } => cx.emit(EditorPanelEvent::OpenLink {
-                    id: *id,
-                    navigate: *navigate,
-                }),
-                EditorEvent::DictionaryChanged(w) => {
-                    cx.emit(EditorPanelEvent::DictionaryChanged(w.clone()))
-                }
-                EditorEvent::SelectionChanged => {}
+        let mut subs = vec![cx.subscribe(&editor, |_, _, ev: &EditorEvent, cx| match ev {
+            EditorEvent::Edited => cx.emit(EditorPanelEvent::Edited),
+            EditorEvent::OpenLink { id, navigate } => cx.emit(EditorPanelEvent::OpenLink {
+                id: *id,
+                navigate: *navigate,
             }),
-        ];
+            EditorEvent::DictionaryChanged(w) => cx.emit(EditorPanelEvent::DictionaryChanged(w.clone())),
+            EditorEvent::SelectionChanged => {}
+        })];
         let is_entity = project
             .project
             .node(id)
@@ -141,20 +135,12 @@ impl EditorPanel {
                 .and_then(|n| n.word_goal())
                 .map(|g| g.to_string())
                 .unwrap_or_default();
-            let goal = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .default_value(goal_seed)
-                    .placeholder("goal")
-            });
+            let goal = cx.new(|cx| InputState::new(window, cx).default_value(goal_seed).placeholder("goal"));
             let tag = cx.new(|cx| InputState::new(window, cx).placeholder("+ tag"));
             let s1 = cx.subscribe_in(&goal, window, move |this, input, ev: &InputEvent, _, cx| {
                 if matches!(ev, InputEvent::Change) {
                     let v = input.read(cx).value().trim().to_string();
-                    let parsed = if v.is_empty() {
-                        None
-                    } else {
-                        v.parse::<i64>().ok()
-                    };
+                    let parsed = if v.is_empty() { None } else { v.parse::<i64>().ok() };
                     if !v.is_empty() && parsed.is_none() {
                         return;
                     }
@@ -168,29 +154,20 @@ impl EditorPanel {
                     }
                 }
             });
-            let s2 = cx.subscribe_in(
-                &tag,
-                window,
-                move |this, input, ev: &InputEvent, window, cx| {
-                    if let InputEvent::PressEnter { .. } = ev {
-                        let v = input
-                            .read(cx)
-                            .value()
-                            .trim()
-                            .trim_start_matches('#')
-                            .to_lowercase();
-                        if !v.is_empty() {
-                            if let Ok(node) = this.project.project.node(id) {
-                                if let Err(e) = node.add_tag(&v) {
-                                    tracing::error!("add tag: {e:#}");
-                                }
+            let s2 = cx.subscribe_in(&tag, window, move |this, input, ev: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } = ev {
+                    let v = input.read(cx).value().trim().trim_start_matches('#').to_lowercase();
+                    if !v.is_empty() {
+                        if let Ok(node) = this.project.project.node(id) {
+                            if let Err(e) = node.add_tag(&v) {
+                                tracing::error!("add tag: {e:#}");
                             }
-                            input.update(cx, |s, cx| s.set_value("", window, cx));
-                            this.meta_changed(cx);
                         }
+                        input.update(cx, |s, cx| s.set_value("", window, cx));
+                        this.meta_changed(cx);
                     }
-                },
-            );
+                }
+            });
             MetaBar {
                 goal,
                 tag,
@@ -221,13 +198,7 @@ impl EditorPanel {
     }
 
     /// Select `len` code points at `offset` and scroll them into view.
-    pub fn reveal(
-        &mut self,
-        offset: usize,
-        len: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn reveal(&mut self, offset: usize, len: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(editor) = &self.editor {
             editor.update(cx, |e, cx| e.select_range(offset..offset + len, cx));
         }
@@ -266,9 +237,7 @@ impl EditorPanel {
         self.notice = Some(text.into());
         cx.notify();
         self._notice_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_secs(5))
-                .await;
+            cx.background_executor().timer(std::time::Duration::from_secs(5)).await;
             this.update(cx, |t, cx| {
                 t.notice = None;
                 cx.notify();
@@ -303,9 +272,9 @@ impl EditorPanel {
         };
         let settings = self.project.project.settings_map();
         let get = |k: &str| match settings.get(k) {
-            Some(wordy_doc::loro::ValueOrContainer::Value(wordy_doc::loro::LoroValue::String(
-                s,
-            ))) if !s.is_empty() => Some(s.to_string()),
+            Some(wordy_doc::loro::ValueOrContainer::Value(wordy_doc::loro::LoroValue::String(s))) if !s.is_empty() => {
+                Some(s.to_string())
+            }
             _ => None,
         };
         let title = get("export.title").unwrap_or_else(|| self.project.project.name());
@@ -319,9 +288,7 @@ impl EditorPanel {
             attribution,
         };
         let out_dir = self.project.dir().map(|d| d.join("exports"));
-        let stamp = wordy_doc::chrono::Local::now()
-            .format("%Y%m%d-%H%M%S")
-            .to_string();
+        let stamp = wordy_doc::chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
         self.notify_user("Rendering snippet…", cx);
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -361,10 +328,7 @@ impl EditorPanel {
         let Some(meta) = self.meta.as_mut() else {
             return;
         };
-        let seed = format!(
-            "Version {}",
-            wordy_doc::chrono::Local::now().format("%b %-d %H:%M")
-        );
+        let seed = format!("Version {}", wordy_doc::chrono::Local::now().format("%b %-d %H:%M"));
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(seed)
@@ -474,15 +438,9 @@ impl EditorPanel {
                         let mut menu = menu;
                         for st in Status::ALL {
                             let w = w.clone();
-                            menu = menu.item(
-                                PopupMenuItem::new(st.label())
-                                    .checked(st == current)
-                                    .on_click(move |_, _, cx| {
-                                        w.update(cx, |p, cx| p.set_status(st, cx))
-                                            .ok()
-                                            .unwrap_or(())
-                                    }),
-                            );
+                            menu = menu.item(PopupMenuItem::new(st.label()).checked(st == current).on_click(
+                                move |_, _, cx| w.update(cx, |p, cx| p.set_status(st, cx)).ok().unwrap_or(()),
+                            ));
                         }
                         menu
                     }),
@@ -549,9 +507,7 @@ impl EditorPanel {
                     ] {
                         let w = ws.clone();
                         menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                            w.update(cx, |p, cx| p.make_snippet(size, dark, cx))
-                                .ok()
-                                .unwrap_or(())
+                            w.update(cx, |p, cx| p.make_snippet(size, dark, cx)).ok().unwrap_or(())
                         }));
                     }
                     menu
@@ -574,13 +530,11 @@ impl EditorPanel {
                 .tooltip("Saved versions of this body")
                 .dropdown_menu(move |menu, window, cx| {
                     let w0 = w.clone();
-                    let mut menu = menu.item(PopupMenuItem::new("Save version…").on_click(
-                        move |_, window, cx| {
-                            w0.update(cx, |p, cx| p.begin_save_version(window, cx))
-                                .ok()
-                                .unwrap_or(())
-                        },
-                    ));
+                    let mut menu = menu.item(PopupMenuItem::new("Save version…").on_click(move |_, window, cx| {
+                        w0.update(cx, |p, cx| p.begin_save_version(window, cx))
+                            .ok()
+                            .unwrap_or(())
+                    }));
                     if !versions.is_empty() {
                         menu = menu.separator();
                     }
@@ -598,25 +552,17 @@ impl EditorPanel {
                             let (v1, v2, v3) = (v.clone(), v.clone(), v.clone());
                             let (w1, w2, w3) = (w.clone(), w.clone(), w.clone());
                             menu.item(PopupMenuItem::new("View").on_click(move |_, _, cx| {
-                                w1.update(cx, |_, cx| {
-                                    cx.emit(EditorPanelEvent::ViewVersion(v1.clone()))
-                                })
-                                .ok()
-                                .unwrap_or(())
-                            }))
-                            .item(PopupMenuItem::new("Restore").on_click(move |_, _, cx| {
-                                w2.update(cx, |p, cx| p.restore_version(&v2, cx))
+                                w1.update(cx, |_, cx| cx.emit(EditorPanelEvent::ViewVersion(v1.clone())))
                                     .ok()
                                     .unwrap_or(())
                             }))
+                            .item(PopupMenuItem::new("Restore").on_click(move |_, _, cx| {
+                                w2.update(cx, |p, cx| p.restore_version(&v2, cx)).ok().unwrap_or(())
+                            }))
                             .separator()
-                            .item(
-                                PopupMenuItem::new("Delete").on_click(move |_, _, cx| {
-                                    w3.update(cx, |p, cx| p.delete_version(&v3.id, cx))
-                                        .ok()
-                                        .unwrap_or(())
-                                }),
-                            )
+                            .item(PopupMenuItem::new("Delete").on_click(move |_, _, cx| {
+                                w3.update(cx, |p, cx| p.delete_version(&v3.id, cx)).ok().unwrap_or(())
+                            }))
                         });
                     }
                     menu
@@ -682,10 +628,7 @@ impl EditorPanel {
     }
 
     pub fn word_count(&self, cx: &App) -> usize {
-        self.editor
-            .as_ref()
-            .map(|e| e.read(cx).word_count())
-            .unwrap_or(0)
+        self.editor.as_ref().map(|e| e.read(cx).word_count()).unwrap_or(0)
     }
 
     pub fn title(&self) -> SharedString {
@@ -756,15 +699,11 @@ impl EditorPanel {
                     _ => {}
                 },
             );
-            let s2 = cx.subscribe_in(
-                &replace,
-                window,
-                move |this, _, ev: &InputEvent, _window, cx| {
-                    if let InputEvent::PressEnter { .. } = ev {
-                        this.replace_current(cx);
-                    }
-                },
-            );
+            let s2 = cx.subscribe_in(&replace, window, move |this, _, ev: &InputEvent, _window, cx| {
+                if let InputEvent::PressEnter { .. } = ev {
+                    this.replace_current(cx);
+                }
+            });
             if !seed.is_empty() {
                 editor.update(cx, |e, cx| e.set_search(Some(seed), cx));
             }
@@ -949,17 +888,11 @@ impl Render for EditorPanel {
                 .key_context(EDITOR_PANEL_CONTEXT)
                 .size_full()
                 .bg(cx.theme().background)
-                .on_action(
-                    cx.listener(|this, _: &Find, window, cx| this.open_find(false, window, cx)),
-                )
-                .on_action(
-                    cx.listener(|this, _: &Replace, window, cx| this.open_find(true, window, cx)),
-                )
+                .on_action(cx.listener(|this, _: &Find, window, cx| this.open_find(false, window, cx)))
+                .on_action(cx.listener(|this, _: &Replace, window, cx| this.open_find(true, window, cx)))
                 .on_action(cx.listener(|this, _: &FindNext, _, cx| this.step(1, cx)))
                 .on_action(cx.listener(|this, _: &FindPrev, _, cx| this.step(-1, cx)))
-                .on_action(
-                    cx.listener(|this, _: &CloseFind, window, cx| this.close_find(window, cx)),
-                )
+                .on_action(cx.listener(|this, _: &CloseFind, window, cx| this.close_find(window, cx)))
                 .children(self.render_find_bar(cx))
                 .children(self.render_meta_bar(cx))
                 .children(self.sheet.clone())
@@ -1022,8 +955,5 @@ fn copy_png(png: Vec<u8>, cx: &mut App) {
         }
         tracing::warn!("no wl-copy or xclip found; image left in gpui clipboard only");
     }
-    cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
-        ImageFormat::Png,
-        png,
-    )));
+    cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, png)));
 }
