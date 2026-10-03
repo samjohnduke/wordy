@@ -659,3 +659,15 @@ entity's type is a dropdown next to its title at the top of the sheet, replacing
 of template buttons; the collapsible "Sheet" header is gone. `EditorPanel` lost its
 `sheet` field and the `NamesChanged`/`FilterMentions` events, which the workspace now
 takes straight from the panel.
+
+### Phase 20 — No tabs at all (2026-10-04)
+
+Done. Closing the last tab leaves the centre with no tab bar: the "Welcome" placeholder
+panel is gone (`EditorPanel::placeholder` removed, `ensure_placeholder` with it) and the
+centre dock layout is simply empty. `panels/empty.rs` holds `EmptyCenter`, a plain view
+(not a panel) with one line of text and a search box over every node, matched with the
+palette's `match_rank`, up/down/Enter or click opening the hit the way the palette does
+(`Workspace::jump_to`). `WordyDockRenderer` wraps gpui-component's `DockSkin`, delegates
+every hook, and in `center_frame` overlays the view while `EmptyCenter::shown` is set;
+the workspace sets that flag from `layout_changed` (no editors and no Home) and focuses
+the box whenever the last tab closes or there is nothing else to focus.

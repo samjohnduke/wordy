@@ -13,6 +13,7 @@ use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _, TitleBar};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use std::rc::Rc;
 use wordy_doc::momentum::today;
 use wordy_doc::{storage, NodeKind, Space, TreeID, Version, BULK_ORIGIN};
 use wordy_editor::SpellState;
@@ -25,6 +26,7 @@ use crate::app::{
 };
 use crate::layout::Layout;
 use crate::panels::editor::{EditorPanel, EditorPanelEvent};
+use crate::panels::empty::{EmptyCenter, EmptyCenterEvent, WordyDockRenderer};
 use crate::panels::home::{HomeEvent, HomePanel};
 use crate::panels::reference::{ReferenceEvent, ReferencePanel};
 use crate::panels::sheet::{SheetEvent, SheetPanel};
@@ -68,7 +70,7 @@ enum QuickOpenHit {
 }
 
 /// How well a title matches the palette query; higher sorts first.
-fn match_rank(title: &str, query: &str, terms: &[&str]) -> Option<u8> {
+pub(crate) fn match_rank(title: &str, query: &str, terms: &[&str]) -> Option<u8> {
     if terms.is_empty() {
         return Some(1);
     }
@@ -194,7 +196,8 @@ pub struct Workspace {
     reference: Entity<ReferencePanel>,
     /// Right-dock tab: the sheet of the entity in the active editor.
     sheet: Entity<SheetPanel>,
-    placeholder: Option<Entity<EditorPanel>>,
+    /// Overlaid on the centre while no tab is open.
+    empty: Entity<EmptyCenter>,
     home: Option<Entity<HomePanel>>,
     sync: Entity<SyncManager>,
     editors: HashMap<TreeID, Entity<EditorPanel>>,
@@ -229,12 +232,19 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(project: SharedProject, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (dock, skin) = DockSkin::dock_area("wordy-main", Some(1), window, cx);
+        let empty = cx.new(|cx| EmptyCenter::new(project.clone(), window, cx));
+        let mut skin = None;
+        let dock = cx.new(|cx| {
+            let this = DockSkin::new(cx);
+            skin = Some(this.clone());
+            DockArea::new("wordy-main", Some(1), window, cx)
+                .with_renderer(Rc::new(WordyDockRenderer::new(this, empty.clone())))
+        });
+        let skin = skin.expect("DockSkin::new ran inside the constructor");
         skin.set_panel_style(PanelStyle::TabBar, cx);
         skin.set_close_button_visible(true, cx);
 
         let sidebar = cx.new(|cx| SidebarPanel::new(project.clone(), Space::Manuscript, window, cx));
-        let placeholder = cx.new(|cx| EditorPanel::placeholder(project.clone(), cx));
         let reference = cx.new(|cx| ReferencePanel::new(project.clone(), cx));
         let sheet = cx.new(|cx| SheetPanel::new(project.clone(), cx));
 
@@ -246,11 +256,7 @@ impl Workspace {
                 cx,
             );
             dock.set_dock_size(DockPlacement::Left, px(260.), window, cx);
-            dock.set_center(
-                DockLayout::tabs().panel_view(panel_handle(placeholder.clone()), cx),
-                window,
-                cx,
-            );
+            dock.set_center(DockLayout::tabs(), window, cx);
             dock.set_dock(
                 DockPlacement::Right,
                 DockLayout::tabs()
@@ -295,6 +301,9 @@ impl Workspace {
                 ReferenceEvent::RestoreVersion(v) => this.restore_version(v.clone(), window, cx),
             },
         );
+        let empty_sub = cx.subscribe_in(&empty, window, |this, _, ev: &EmptyCenterEvent, window, cx| match ev {
+            EmptyCenterEvent::Open { id, space, has_body } => this.jump_to(*id, *space, *has_body, window, cx),
+        });
         let sheet_sub = cx.subscribe_in(&sheet, window, |this, sheet, ev: &SheetEvent, window, cx| match ev {
             SheetEvent::Changed => {
                 if let Some(id) = this.active {
@@ -337,7 +346,7 @@ impl Workspace {
             sidebar,
             reference,
             sheet,
-            placeholder: Some(placeholder),
+            empty,
             home: None,
             sync,
             editors: HashMap::new(),
@@ -358,10 +367,12 @@ impl Workspace {
             layout_task: None,
             restoring: true,
             focus,
-            _subs: vec![sub, ref_sub, sheet_sub, sync_sub, dock_sub, quit_sub],
+            _subs: vec![sub, ref_sub, sheet_sub, empty_sub, sync_sub, dock_sub, quit_sub],
         };
         this.restore_layout(window, cx);
         this.restoring = false;
+        // A fresh or tab-less layout starts on the empty centre.
+        this.layout_changed(cx);
         this
     }
 
@@ -389,9 +400,12 @@ impl Workspace {
 
     /// Something layout-ish changed: write `layout.json` after a short pause.
     fn layout_changed(&mut self, cx: &mut Context<Self>) {
-        // Every change of the active tab lands here; the Sheet tab follows it.
+        // Every change of the active tab lands here; the Sheet tab follows it,
+        // and the empty-centre view appears once the last tab is gone.
         let active = self.active;
         self.sheet.update(cx, |s, cx| s.show(active, cx));
+        let none_open = self.editors.is_empty() && self.home.is_none();
+        self.empty.update(cx, |e, cx| e.set_shown(none_open, cx));
         if self.restoring {
             return;
         }
@@ -639,13 +653,9 @@ impl Workspace {
             }
         });
         self._subs.push(sub);
-        let placeholder = self.placeholder.take();
         let pid = PanelId::from(home.entity_id());
         self.dock.update(cx, |dock, cx| {
             dock.add_panel_view(panel_handle(home.clone()), DockPlacement::Center, None, window, cx);
-            if let Some(ph) = placeholder {
-                dock.remove_panel(ph, window, cx);
-            }
             dock.select_panel(pid, window, cx);
         });
         self.home = Some(home);
@@ -856,6 +866,9 @@ impl Workspace {
                         this.active = None;
                     }
                     this.layout_changed(cx);
+                    if this.tab_items().is_empty() {
+                        this.empty.update(cx, |e, cx| e.focus(window, cx));
+                    }
                     cx.notify();
                 }
             },
@@ -869,13 +882,9 @@ impl Workspace {
             p.set_typewriter(typewriter, cx);
         });
 
-        let placeholder = self.placeholder.take();
         let pid = PanelId::from(panel.entity_id());
         self.dock.update(cx, |dock, cx| {
             dock.add_panel_view(panel_handle(panel.clone()), DockPlacement::Center, None, window, cx);
-            if let Some(ph) = placeholder {
-                dock.remove_panel(ph, window, cx);
-            }
             dock.select_panel(pid, window, cx);
         });
         panel.update(cx, |p, cx| p.focus_editor(window, cx));
@@ -970,7 +979,7 @@ impl Workspace {
             let f = home.read(cx).focus_handle(cx);
             window.focus(&f, cx);
         } else {
-            window.focus(&self.focus, cx);
+            self.empty.update(cx, |e, cx| e.focus(window, cx));
         }
     }
 
@@ -1044,31 +1053,13 @@ impl Workspace {
         }
         let items = self.tab_items();
         if items.is_empty() {
-            self.ensure_placeholder(window, cx);
+            self.layout_changed(cx);
+            self.empty.update(cx, |e, cx| e.focus(window, cx));
         } else {
             let next = items[ix.min(items.len() - 1)];
             self.show_tab(next, window, cx);
         }
         cx.notify();
-    }
-
-    /// With no tabs left, show the "open a scene" placeholder again.
-    fn ensure_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.placeholder.is_some() || !self.editors.is_empty() || self.home.is_some() {
-            return;
-        }
-        let placeholder = cx.new(|cx| EditorPanel::placeholder(self.project.clone(), cx));
-        self.dock.update(cx, |dock, cx| {
-            dock.add_panel_view(
-                panel_handle(placeholder.clone()),
-                DockPlacement::Center,
-                None,
-                window,
-                cx,
-            );
-        });
-        self.placeholder = Some(placeholder);
-        window.focus(&self.focus, cx);
     }
 
     /// Open the next (or previous) document with a body in the active
@@ -1259,6 +1250,12 @@ impl Workspace {
             } => (id, space, has_body),
         };
         self.quick_open = None;
+        self.jump_to(id, space, has_body, window, cx);
+    }
+
+    /// Go to a node chosen by title: open its body, or for a container show
+    /// it in the sidebar.
+    fn jump_to(&mut self, id: TreeID, space: Space, has_body: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.set_space(space, cx);
         self.sidebar.update(cx, |s, cx| s.select(Some(id), cx));
         if has_body {

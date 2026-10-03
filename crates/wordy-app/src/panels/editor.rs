@@ -69,21 +69,6 @@ pub struct EditorPanel {
 }
 
 impl EditorPanel {
-    pub fn placeholder(project: SharedProject, cx: &mut Context<Self>) -> Self {
-        Self {
-            project,
-            node: None,
-            editor: None,
-            meta: None,
-            find: None,
-            notice: None,
-            _notice_task: None,
-            focus_mode: false,
-            focus: cx.focus_handle(),
-            _subs: Vec::new(),
-        }
-    }
-
     pub fn open(
         project: SharedProject,
         id: TreeID,
@@ -807,7 +792,7 @@ impl EditorPanel {
     pub fn title(&self) -> SharedString {
         match self.node.and_then(|id| self.project.project.node(id).ok()) {
             Some(n) => n.title().into(),
-            None => "Welcome".into(),
+            None => "Untitled".into(),
         }
     }
 
