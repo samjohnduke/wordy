@@ -226,8 +226,9 @@ gpui-component dock layout, persisted per project.
 - **Sidebar**: tree for current space (gpui-component Tree), drag-reorder → `LoroTree::mov`.
   Context menu: new, rename, duplicate, status color, delete (to trash folder, not hard delete).
 - **Center**: tabbed editor panes; split horizontally/vertically; drag tabs between panes.
-- **Right (Reference pane)**: pinned entity sheet / note / previous version, toggled with ⌘⇧R.
-  Read-only; double-click opens the node in an editor tab.
+- **Right dock**: two tabs, toggled with ⌘⇧R. *Reference*: pinned entity sheet / note /
+  previous version, read-only; double-click opens the node in an editor tab. *Sheet*: the
+  editable sheet of the entity in the active editor (Phase 19).
 - **Home space**: Dashboard (today's words, streak, goal progress, deadline pace),
   Reports (words per day chart, per-chapter table), Tasks (checklist), Placeholders
   (list of `[TODO ...]` / `[[?]]` markers found in text), Export.
@@ -644,3 +645,17 @@ cloud code shared with it (`hex`, `sha256_hex`, `safe_relative`) live in
 `peer_name` key too), `cloud_server` and `cloud`; `SyncManager` owns only the account
 and the room. The Home tab's "Sync" page is now "Account": the card alone, with the
 machine's name next to the server field before linking.
+
+### Phase 19 — Sheet moves to the right dock (2026-10-04)
+
+Done. The entity sheet no longer sits above the description editor: `SheetPanel`
+(`panels/sheet.rs`) is a second tab in the right dock next to Reference, and shows the
+sheet of whichever entity is in the active editor (the hint otherwise). The workspace
+points it at `active` from `layout_changed`, so every tab switch, open and close keeps
+it in step; the sheet itself is built on the panel's next render, the first place a
+window is at hand. Opening an entity brings the tab forward and opens the dock if it is
+hidden (not during layout restore); pinning to Reference selects that tab instead. The
+entity's type is a dropdown next to its title at the top of the sheet, replacing the row
+of template buttons; the collapsible "Sheet" header is gone. `EditorPanel` lost its
+`sheet` field and the `NamesChanged`/`FilterMentions` events, which the workspace now
+takes straight from the panel.

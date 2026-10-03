@@ -1,24 +1,28 @@
-//! Entity sheet: template, aliases, template-driven fields, relations,
-//! attachments, and "Appears in", in three tabs above an entity's
-//! description editor. Image attachments show inline at the top; the first
-//! one is the portrait.
+//! Entity sheet: type, aliases, type-driven fields, relations, attachments
+//! and "Appears in", in three tabs. `SheetPanel` is the right-dock tab that
+//! shows the sheet of whichever entity is open in the active editor. Image
+//! attachments show inline at the top; the first one is the portrait.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
+use gpui_kit::base::StyledExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::dock::Panel;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use wordy_doc::templates::{self, FieldSpec, Template};
-use wordy_doc::{storage, TreeID};
+use wordy_doc::{storage, NodeKind, TreeID};
 use wordy_index::LinkKind;
 
 use crate::app::SharedProject;
 
+#[derive(Clone)]
 pub enum SheetEvent {
     /// Metadata changed (fields, template, relations, attachments).
     Changed,
@@ -79,7 +83,6 @@ struct RelationForm {
 pub struct EntitySheet {
     project: SharedProject,
     id: TreeID,
-    collapsed: bool,
     tab: SheetTab,
     aliases: Entity<InputState>,
     fields: Vec<Field>,
@@ -108,7 +111,6 @@ impl EntitySheet {
         let mut this = Self {
             project,
             id,
-            collapsed: false,
             tab: SheetTab::Fields,
             aliases,
             fields: Vec::new(),
@@ -379,17 +381,31 @@ impl EntitySheet {
             .child(text.into())
     }
 
-    fn render_templates(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The entity's type, as a dropdown: picking another one swaps the
+    /// field set below.
+    fn render_type_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.template().id;
-        h_flex().flex_wrap().gap_1().children(templates::ALL.iter().map(|t| {
-            let id = t.id;
-            Button::new(ElementId::Name(format!("tpl-{id}").into()))
-                .ghost()
-                .xsmall()
-                .label(t.label)
-                .toggled(current == id)
-                .on_click(cx.listener(move |this, _, window, cx| this.set_template(id, window, cx)))
-        }))
+        let this = cx.entity().downgrade();
+        Button::new("sheet-type")
+            .ghost()
+            .xsmall()
+            .label(self.template().label)
+            .dropdown_caret(true)
+            .tooltip("Entity type")
+            .dropdown_menu(move |mut menu, _, _| {
+                for t in templates::ALL.iter() {
+                    let id = t.id;
+                    let this = this.clone();
+                    menu = menu.item(PopupMenuItem::new(t.label).checked(current == id).on_click(
+                        move |_, window, cx| {
+                            if let Some(this) = this.upgrade() {
+                                this.update(cx, |sheet, cx| sheet.set_template(id, window, cx));
+                            }
+                        },
+                    ));
+                }
+                menu
+            })
     }
 
     fn render_fields(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -711,52 +727,157 @@ impl EventEmitter<SheetEvent> for EntitySheet {}
 
 impl Render for EntitySheet {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let collapsed = self.collapsed;
+        let title = self
+            .project
+            .project
+            .node(self.id)
+            .map(|n| n.title())
+            .unwrap_or_default();
         let header = h_flex()
-            .id("sheet-toggle")
             .w_full()
             .items_center()
-            .gap_1()
-            .text_xs()
-            .text_color(cx.theme().muted_foreground)
-            .cursor_pointer()
-            .child(if collapsed { "▸" } else { "▾" })
-            .child(super::heading("Sheet", cx))
-            .child(div().flex_1())
-            .child(self.template().label)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.collapsed = !this.collapsed;
-                cx.notify();
-            }));
+            .gap_2()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_sm()
+                    .font_semibold()
+                    .child(title),
+            )
+            .child(self.render_type_menu(cx));
 
-        let mut sheet = v_flex()
+        let sheet = v_flex()
             .w_full()
-            .max_w(px(760.))
-            .mx_auto()
-            .px_4()
+            .px_3()
             .pt_2()
             .pb_3()
             .gap_2()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(header);
-        if !collapsed {
-            sheet = sheet.children(self.render_images(cx)).child(self.render_tabs(cx));
-            sheet = match self.tab {
-                SheetTab::Fields => sheet
-                    .child(self.render_templates(cx))
-                    .child(
-                        v_flex()
-                            .gap_0p5()
-                            .child(Self::label("Aliases", cx))
-                            .child(Input::new(&self.aliases).small()),
-                    )
-                    .children(self.render_fields(cx))
-                    .child(self.render_attachments(cx)),
-                SheetTab::Relations => sheet.child(self.render_relations(cx)),
-                SheetTab::AppearsIn => sheet.child(self.render_appears_in(cx)),
-            };
+            .child(header)
+            .children(self.render_images(cx))
+            .child(self.render_tabs(cx));
+        match self.tab {
+            SheetTab::Fields => sheet
+                .child(
+                    v_flex()
+                        .gap_0p5()
+                        .child(Self::label("Aliases", cx))
+                        .child(Input::new(&self.aliases).small()),
+                )
+                .children(self.render_fields(cx))
+                .child(self.render_attachments(cx)),
+            SheetTab::Relations => sheet.child(self.render_relations(cx)),
+            SheetTab::AppearsIn => sheet.child(self.render_appears_in(cx)),
         }
-        sheet
+    }
+}
+
+// ----- the dock tab ----------------------------------------------------------
+
+/// Right-dock tab showing the sheet of the entity in the active editor.
+pub struct SheetPanel {
+    project: SharedProject,
+    /// The node the workspace wants shown; the sheet is built on the next
+    /// render, which is the first place a `Window` is at hand.
+    wanted: Option<TreeID>,
+    shown: Option<(TreeID, Entity<EntitySheet>)>,
+    _sub: Option<Subscription>,
+    pub focus: FocusHandle,
+}
+
+impl SheetPanel {
+    pub fn new(project: SharedProject, cx: &mut Context<Self>) -> Self {
+        Self {
+            project,
+            wanted: None,
+            shown: None,
+            _sub: None,
+            focus: cx.focus_handle(),
+        }
+    }
+
+    /// Follow the active editor: show `id`'s sheet when it is an entity,
+    /// else the hint.
+    pub fn show(&mut self, id: Option<TreeID>, cx: &mut Context<Self>) {
+        let id = id.filter(|id| {
+            self.project
+                .project
+                .node(*id)
+                .map(|n| n.kind() == NodeKind::Entity)
+                .unwrap_or(false)
+        });
+        if id != self.wanted {
+            self.wanted = id;
+            cx.notify();
+        }
+    }
+
+    /// Redraw the sheet when it shows `id` (its body or metadata changed
+    /// elsewhere).
+    pub fn refresh_if(&mut self, id: TreeID, cx: &mut Context<Self>) {
+        if let Some((shown, sheet)) = &self.shown {
+            if *shown == id {
+                sheet.update(cx, |_, cx| cx.notify());
+            }
+        }
+    }
+
+    fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shown.as_ref().map(|(id, _)| *id) == self.wanted {
+            return;
+        }
+        let Some(id) = self.wanted else {
+            self.shown = None;
+            self._sub = None;
+            return;
+        };
+        let sheet = cx.new(|cx| EntitySheet::new(self.project.clone(), id, window, cx));
+        self._sub = Some(cx.subscribe(&sheet, |_, _, ev: &SheetEvent, cx| cx.emit(ev.clone())));
+        self.shown = Some((id, sheet));
+    }
+}
+
+super::impl_panel_boilerplate!(SheetPanel, "Sheet", closable = false);
+
+impl Panel for SheetPanel {
+    fn tab_name(&self, _: &App) -> Option<SharedString> {
+        Some("Sheet".into())
+    }
+
+    /// The panel draws its own header, so the extra gap the tab group adds
+    /// under the tab bar once a second tab opens would only shift the layout.
+    fn inner_padding(&self, _: &App) -> bool {
+        false
+    }
+}
+
+impl EventEmitter<SheetEvent> for SheetPanel {}
+
+impl Render for SheetPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync(window, cx);
+        match &self.shown {
+            Some((_, sheet)) => div().size_full().track_focus(&self.focus).child(
+                div()
+                    .id("sheet-scroll")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .child(sheet.clone()),
+            ),
+            None => div().size_full().track_focus(&self.focus).child(
+                v_flex()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .px_4()
+                    .text_sm()
+                    .text_align(TextAlign::Center)
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Open a character, place or other World entry to edit its sheet here."),
+            ),
+        }
     }
 }

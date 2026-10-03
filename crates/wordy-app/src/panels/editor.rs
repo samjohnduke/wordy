@@ -19,7 +19,6 @@ use wordy_editor::{
 use wordy_export::{SnippetOptions, SnippetSize};
 
 use crate::app::{CloseFind, Find, FindNext, FindPrev, Replace, SharedProject, EDITOR_PANEL_CONTEXT};
-use crate::panels::sheet::{EntitySheet, SheetEvent};
 
 pub enum EditorPanelEvent {
     /// The body changed.
@@ -28,8 +27,6 @@ pub enum EditorPanelEvent {
     Activated,
     /// The tab was closed.
     Closed,
-    /// Entity names changed (aliases); the matcher and index must refresh.
-    NamesChanged,
     /// Follow a link: show `id` in the reference pane, or open it when `navigate`.
     OpenLink { id: TreeID, navigate: bool },
     /// A word was added to the custom dictionary.
@@ -38,8 +35,6 @@ pub enum EditorPanelEvent {
     MetaChanged,
     /// Show a saved version read-only in the reference pane.
     ViewVersion(Version),
-    /// Filter the Manuscript sidebar to scenes mentioning an entity.
-    FilterMentions(TreeID),
 }
 
 struct FindBar {
@@ -62,7 +57,6 @@ pub struct EditorPanel {
     project: SharedProject,
     node: Option<TreeID>,
     editor: Option<Entity<ProseEditor>>,
-    sheet: Option<Entity<EntitySheet>>,
     meta: Option<MetaBar>,
     find: Option<FindBar>,
     /// Transient message in the meta bar (e.g. "Snippet copied").
@@ -80,7 +74,6 @@ impl EditorPanel {
             project,
             node: None,
             editor: None,
-            sheet: None,
             meta: None,
             find: None,
             notice: None,
@@ -106,7 +99,7 @@ impl EditorPanel {
             e.set_self_id(Some(id));
             e.set_link_targets(project.link_targets(), cx);
         });
-        let mut subs = vec![cx.subscribe(&editor, |_, _, ev: &EditorEvent, cx| match ev {
+        let subs = vec![cx.subscribe(&editor, |_, _, ev: &EditorEvent, cx| match ev {
             EditorEvent::Edited => cx.emit(EditorPanelEvent::Edited),
             EditorEvent::OpenLink { id, navigate } => cx.emit(EditorPanelEvent::OpenLink {
                 id: *id,
@@ -121,23 +114,6 @@ impl EditorPanel {
             .node(id)
             .map(|n| n.kind() == NodeKind::Entity)
             .unwrap_or(false);
-        let sheet = is_entity.then(|| {
-            let sheet = cx.new(|cx| EntitySheet::new(project.clone(), id, window, cx));
-            subs.push(cx.subscribe(&sheet, |_, _, ev: &SheetEvent, cx| match ev {
-                SheetEvent::Changed => cx.emit(EditorPanelEvent::Edited),
-                SheetEvent::NamesChanged => cx.emit(EditorPanelEvent::NamesChanged),
-                SheetEvent::Open(id) => cx.emit(EditorPanelEvent::OpenLink {
-                    id: *id,
-                    navigate: true,
-                }),
-                SheetEvent::Pin(id) => cx.emit(EditorPanelEvent::OpenLink {
-                    id: *id,
-                    navigate: false,
-                }),
-                SheetEvent::FilterMentions(id) => cx.emit(EditorPanelEvent::FilterMentions(*id)),
-            }));
-            sheet
-        });
         let meta = (!is_entity).then(|| {
             let node = project.project.node(id).ok();
             let goal_seed = node
@@ -189,7 +165,6 @@ impl EditorPanel {
             project,
             node: Some(id),
             editor: Some(editor),
-            sheet,
             meta,
             find: None,
             notice: None,
@@ -402,9 +377,6 @@ impl EditorPanel {
                 Some(m) => e.reload_keeping(m, cx),
                 None => e.reload(cx),
             });
-        }
-        if let Some(sheet) = &self.sheet {
-            sheet.update(cx, |_, cx| cx.notify());
         }
         cx.notify();
     }
@@ -1103,7 +1075,6 @@ impl Render for EditorPanel {
                 .children(self.render_find_bar(cx))
                 .children(self.render_toolbar(cx))
                 .children(self.render_meta_bar(cx))
-                .children(self.sheet.clone())
                 .child(div().flex_1().min_h_0().w_full().child(editor))
                 .into_any_element(),
             None => div()

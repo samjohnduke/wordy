@@ -27,6 +27,7 @@ use crate::layout::Layout;
 use crate::panels::editor::{EditorPanel, EditorPanelEvent};
 use crate::panels::home::{HomeEvent, HomePanel};
 use crate::panels::reference::{ReferenceEvent, ReferencePanel};
+use crate::panels::sheet::{SheetEvent, SheetPanel};
 use crate::panels::sidebar::{SidebarEvent, SidebarPanel};
 use crate::sync::{SyncEvent, SyncManager};
 
@@ -191,6 +192,8 @@ pub struct Workspace {
     dock: Entity<DockArea>,
     sidebar: Entity<SidebarPanel>,
     reference: Entity<ReferencePanel>,
+    /// Right-dock tab: the sheet of the entity in the active editor.
+    sheet: Entity<SheetPanel>,
     placeholder: Option<Entity<EditorPanel>>,
     home: Option<Entity<HomePanel>>,
     sync: Entity<SyncManager>,
@@ -233,6 +236,7 @@ impl Workspace {
         let sidebar = cx.new(|cx| SidebarPanel::new(project.clone(), Space::Manuscript, window, cx));
         let placeholder = cx.new(|cx| EditorPanel::placeholder(project.clone(), cx));
         let reference = cx.new(|cx| ReferencePanel::new(project.clone(), cx));
+        let sheet = cx.new(|cx| SheetPanel::new(project.clone(), cx));
 
         dock.update(cx, |dock, cx| {
             dock.set_dock(
@@ -249,7 +253,9 @@ impl Workspace {
             );
             dock.set_dock(
                 DockPlacement::Right,
-                DockLayout::tabs().panel_view(panel_handle(reference.clone()), cx),
+                DockLayout::tabs()
+                    .panel_view(panel_handle(reference.clone()), cx)
+                    .panel_view(panel_handle(sheet.clone()), cx),
                 window,
                 cx,
             );
@@ -289,6 +295,20 @@ impl Workspace {
                 ReferenceEvent::RestoreVersion(v) => this.restore_version(v.clone(), window, cx),
             },
         );
+        let sheet_sub = cx.subscribe_in(&sheet, window, |this, sheet, ev: &SheetEvent, window, cx| match ev {
+            SheetEvent::Changed => {
+                if let Some(id) = this.active {
+                    this.dirty_nodes.insert(id);
+                    this.reference.update(cx, |r, cx| r.refresh_if(id, cx));
+                }
+                let _ = sheet;
+                this.on_edited(cx);
+            }
+            SheetEvent::NamesChanged => this.on_tree_changed(cx),
+            SheetEvent::Open(id) => this.follow_link(*id, true, window, cx),
+            SheetEvent::Pin(id) => this.follow_link(*id, false, window, cx),
+            SheetEvent::FilterMentions(id) => this.filter_mentions(*id, cx),
+        });
 
         let sync = cx.new(|cx| SyncManager::new(project.clone(), cx));
         let sync_sub = cx.subscribe(&sync, |this, _, ev: &SyncEvent, cx| match ev {
@@ -316,6 +336,7 @@ impl Workspace {
             dock,
             sidebar,
             reference,
+            sheet,
             placeholder: Some(placeholder),
             home: None,
             sync,
@@ -337,7 +358,7 @@ impl Workspace {
             layout_task: None,
             restoring: true,
             focus,
-            _subs: vec![sub, ref_sub, sync_sub, dock_sub, quit_sub],
+            _subs: vec![sub, ref_sub, sheet_sub, sync_sub, dock_sub, quit_sub],
         };
         this.restore_layout(window, cx);
         this.restoring = false;
@@ -368,6 +389,9 @@ impl Workspace {
 
     /// Something layout-ish changed: write `layout.json` after a short pause.
     fn layout_changed(&mut self, cx: &mut Context<Self>) {
+        // Every change of the active tab lands here; the Sheet tab follows it.
+        let active = self.active;
+        self.sheet.update(cx, |s, cx| s.show(active, cx));
         if self.restoring {
             return;
         }
@@ -447,16 +471,20 @@ impl Workspace {
             self.set_focus_mode(true, window, cx);
         }
         self.sidebar.update(cx, |s, cx| s.select(self.active, cx));
+        let active = self.active;
+        self.sheet.update(cx, |s, cx| s.show(active, cx));
         cx.notify();
     }
 
     /// Show `id` in the reference pane, opening the pane if it is hidden.
     fn pin_reference(&mut self, id: TreeID, window: &mut Window, cx: &mut Context<Self>) {
         self.reference.update(cx, |r, cx| r.pin(id, cx));
+        let pid = PanelId::from(self.reference.entity_id());
         self.dock.update(cx, |dock, cx| {
             if !dock.is_dock_open(DockPlacement::Right) {
                 dock.toggle_dock(DockPlacement::Right, window, cx);
             }
+            dock.select_panel(pid, window, cx);
         });
         self.layout_changed(cx);
         cx.notify();
@@ -662,6 +690,7 @@ impl Workspace {
                     p.rescan_spelling(cx);
                 });
             }
+            self.sheet.update(cx, |s, cx| s.refresh_if(id, cx));
         }
         self.reference.update(cx, |r, cx| {
             r.set_link_targets(targets, cx);
@@ -728,6 +757,27 @@ impl Workspace {
         self.sidebar.update(cx, |s, cx| s.reveal(id, cx));
     }
 
+    /// Bring the Sheet tab forward in the right dock, opening the dock if
+    /// it is hidden. Layout restore skips this so a closed dock stays closed.
+    fn reveal_sheet(&mut self, id: TreeID, window: &mut Window, cx: &mut Context<Self>) {
+        let is_entity = self
+            .project
+            .project
+            .node(id)
+            .map(|n| n.kind() == NodeKind::Entity)
+            .unwrap_or(false);
+        if self.restoring || !is_entity {
+            return;
+        }
+        let pid = PanelId::from(self.sheet.entity_id());
+        self.dock.update(cx, |dock, cx| {
+            if !dock.is_dock_open(DockPlacement::Right) {
+                dock.toggle_dock(DockPlacement::Right, window, cx);
+            }
+            dock.select_panel(pid, window, cx);
+        });
+    }
+
     /// Show the editor tab for `id`, creating it on first open.
     fn open_node(&mut self, id: TreeID, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(panel) = self.editors.get(&id).cloned() {
@@ -736,6 +786,7 @@ impl Workspace {
             panel.update(cx, |p, cx| p.focus_editor(window, cx));
             self.active = Some(id);
             self.layout_changed(cx);
+            self.reveal_sheet(id, window, cx);
             cx.notify();
             return;
         }
@@ -784,7 +835,6 @@ impl Workspace {
                     this.reference.update(cx, |r, cx| r.refresh_if(id, cx));
                     this.on_edited(cx);
                 }
-                EditorPanelEvent::NamesChanged => this.on_tree_changed(cx),
                 EditorPanelEvent::OpenLink { id, navigate } => this.follow_link(*id, *navigate, window, cx),
                 EditorPanelEvent::DictionaryChanged(w) => this.on_dictionary_changed(w, cx),
                 EditorPanelEvent::MetaChanged => {
@@ -793,7 +843,6 @@ impl Workspace {
                     this.on_edited(cx);
                 }
                 EditorPanelEvent::ViewVersion(v) => this.view_version(v.clone(), window, cx),
-                EditorPanelEvent::FilterMentions(id) => this.filter_mentions(*id, cx),
                 EditorPanelEvent::Activated => {
                     this.active = Some(id);
                     this.sidebar.update(cx, |s, cx| s.select(Some(id), cx));
@@ -832,6 +881,7 @@ impl Workspace {
         panel.update(cx, |p, cx| p.focus_editor(window, cx));
         self.active = Some(id);
         self.layout_changed(cx);
+        self.reveal_sheet(id, window, cx);
         cx.notify();
     }
 
@@ -843,6 +893,7 @@ impl Workspace {
         if self.active == Some(id) {
             self.active = None;
         }
+        self.layout_changed(cx);
         self.on_edited(cx);
     }
 
