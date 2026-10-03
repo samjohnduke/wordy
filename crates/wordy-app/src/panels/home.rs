@@ -21,7 +21,7 @@ use wordy_doc::{storage, Goals, NodeKind, Space, Status, TreeID};
 use wordy_export::{CompileOptions, Format};
 
 use crate::app::SharedProject;
-use crate::sync::{CloudStatus, SyncManager, SyncStatus};
+use crate::sync::{CloudStatus, CloudSyncStatus, SyncManager, SyncStatus};
 
 pub enum HomeEvent {
     /// Open a node in an editor tab.
@@ -684,6 +684,9 @@ impl HomePanel {
         let devices = m.cloud_devices.clone();
         let busy = m.cloud_busy();
         let server = m.config.cloud_server();
+        let syncable = m.cloud_syncable();
+        let project_on = m.cloud_enabled();
+        let project_status = m.cloud_sync_status();
 
         let mut card = Self::section("Account", cx);
         match account {
@@ -824,6 +827,53 @@ impl HomePanel {
                                 })),
                         ),
                 );
+                if syncable {
+                    card = card.child(div().mt_2().text_sm().font_semibold().child("This project"));
+                    let (line, danger) = match &project_status {
+                        CloudSyncStatus::Off if project_on => ("Cloud sync is on; starting…".to_string(), false),
+                        CloudSyncStatus::Off => (
+                            "Kept on this machine only. Turn cloud sync on to keep a live copy on the server and on every linked machine; edits travel as you type."
+                                .to_string(),
+                            false,
+                        ),
+                        CloudSyncStatus::Connecting => ("Connecting to the server…".to_string(), false),
+                        CloudSyncStatus::Live { devices, pending } => (
+                            format!(
+                                "Live: {} {} here{}.",
+                                devices,
+                                if *devices == 1 { "machine" } else { "machines" },
+                                if *pending { ", changes on their way" } else { "" }
+                            ),
+                            false,
+                        ),
+                        CloudSyncStatus::Offline(r) => (
+                            format!("Offline ({r}). Edits stay here and go up when the server is back."),
+                            false,
+                        ),
+                        CloudSyncStatus::Failed(r) => (format!("Stopped: {r}"), true),
+                    };
+                    card = card.child(
+                        div()
+                            .text_xs()
+                            .text_color(if danger { theme.danger } else { muted })
+                            .child(line),
+                    );
+                    let on = project_on;
+                    let mut toggle = Button::new("cloud-project")
+                        .small()
+                        .label(if on {
+                            "Stop syncing this project"
+                        } else {
+                            "Sync this project"
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.sync.update(cx, |m, cx| m.set_cloud_enabled(!on, cx));
+                        }));
+                    if !on {
+                        toggle = toggle.primary();
+                    }
+                    card = card.child(h_flex().gap_2().child(toggle));
+                }
             }
         }
         match status {

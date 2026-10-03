@@ -523,21 +523,54 @@ local server. *(Done: `pnpm test:e2e` and `crates/wordy-sync/tests/cloud.rs`, th
 skipping without a local server; its `full_link_flow` test has the browser script approve
 the code with a virtual authenticator, so the app's client is covered end to end.)*
 
-### Phase 16 — Project rooms and live sync (planned)
+### Phase 16 — Project rooms and live sync (2026-10-04)
 
-- One Durable Object per project (`ProjectRoom`, partyserver with hibernation). SQLite
-  storage holds the ordered update log, head and base sequence numbers, the merged version
-  vector as a JSON map, the asset manifest, the dictionary and per-device last-seen
-  sequence numbers. R2 (`PROJECTS`) holds full snapshots and content-addressed assets.
-  The server never runs Loro.
-- The Worker authenticates the websocket upgrade with the device's bearer token, checks
-  membership in D1 and forwards an identity header to the room.
-- Websocket protocol: JSON control frames (`hello`, `welcome`, `update`, `snapshot`,
-  `base_moved`, `dictionary`, `presence`) with binary Loro payloads; assets over HTTP.
-- App: a cloud thread per open project keeps the socket, pushes updates after each
-  autosave, and applies remote updates after a short idle gap using Loro cursors to keep
-  the caret stable. Compaction uploads a shallow snapshot as the new base; devices behind
-  it back up and replace their copy.
+One room per project on the server; the app keeps a socket to it while the project is
+open and edits flow both ways as you type.
+
+- One Durable Object per project (`ProjectRoom`, partyserver with hibernation, in
+  `site/src/server/rooms/`). Its SQLite holds the ordered update log (small updates
+  inline, big ones as R2 keys), head and base sequence numbers, the dictionary, the asset
+  manifest and per-device last-seen numbers. R2 (`PROJECTS`, bucket `wordy-projects`)
+  holds updates over 512 KiB, snapshots and content-addressed assets. The server never
+  runs Loro: it only orders and stores bytes. D1 gains `project` and `membership`
+  (migration `0002`); the first device to open a project id claims it as owner.
+- `site/src/worker.ts` wraps the Astro handler: `/parties/project-room/<id>` upgrades are
+  authenticated with the device's bearer token, checked against membership, and handed
+  to the room with an identity header. HTTP: `GET /api/projects`, `PUT|GET
+  /api/projects/<id>/updates[/<seq>]` (large updates, with `x-wordy-snapshot-at` for
+  compaction), `PUT|GET /api/projects/<id>/assets/<sha256>`.
+- Protocol (`rooms/protocol.ts`, mirrored in `wordy-sync::cloud::protocol`): JSON text
+  frames (`hello`, `welcome`, `synced`, `ack`, `blob`, `base_moved`, `dictionary`,
+  `asset`, `presence`, `ping`/`pong`, `error`) and binary frames of an 8-byte sequence
+  number plus Loro bytes. A device says which sequence it has; the room replays from
+  there, or from the base when the device is behind a compaction, or tells it to reset
+  when it claims more than the room has. Readers cannot push (Phase 17).
+- App: `wordy-sync::cloud::room::RoomHandle` runs one thread per open project (connect
+  with backoff, keepalive, replay, live fan-out, HTTP for big blobs, asset reconcile
+  with the server winning on a clash). `SyncManager` pushes the ops since the last ack
+  after every save (a full snapshot the first time), queues remote updates and applies
+  them after a 1.2 s pause in typing; the workspace notes every caret as Loro cursors
+  first and reloads each editor at the same text afterwards. `cloud.json` in the project
+  folder remembers whether sync is on, the last sequence seen and the pushed version
+  vector. Past 500 updates or 4 MiB of log the app uploads a snapshot that becomes the
+  room's new base. The Account card has a "Sync this project" switch and shows live,
+  offline, stopped and who else is in the room; the status bar shows "cloud live" and
+  friends.
+- Not done: the web never shows project content, there is no end-to-end encryption, and
+  a device that was told to reset re-sends its whole copy rather than restoring anything
+  from the server.
+- *(manual)* Create the R2 bucket `wordy-projects` and apply migration `0002` remotely
+  before deploying (the Durable Object migration `v1` runs with the deploy).
+
+**Accept:** two copies of a project converge through the server, including a large edit,
+a snapshot that compacts the log and a reconnect after it. *(Done:
+`site/scripts/e2e-room.mjs` drives the room over raw websockets, and
+`crates/wordy-sync/tests/cloud.rs::room_syncs_two_copies` runs two `RoomHandle`s on two
+Loro docs against the local server: snapshot, live edits both ways, dictionary, an
+attachment, a 700 KiB update over HTTP, compaction, replay from the base, a reset and a
+stranger's refusal. The in-app behaviour was checked by building; the two-machine
+walk-through goes into `docs/sync-test.md` with the next release.)*
 
 ### Phase 17 — Sharing (planned)
 

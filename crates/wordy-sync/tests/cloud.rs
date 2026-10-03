@@ -8,7 +8,10 @@
 
 use std::time::Duration;
 
-use wordy_sync::cloud::{self, Client, Poll};
+use std::sync::mpsc;
+
+use wordy_sync::cloud::{self, Client, Poll, RoomEvent, RoomHandle, RoomOptions};
+use wordy_sync::loro::{ExportMode, LoroDoc};
 use wordy_sync::SyncConfig;
 
 fn server() -> Option<String> {
@@ -107,9 +110,9 @@ fn config_roundtrip_is_private() {
 
 /// The app's whole flow: code, approval in a (headless) browser,
 /// registration, account listing, unlink.
-#[test]
-fn full_link_flow() {
-    let Some(url) = server() else { return };
+/// Link a fresh account through the browser script, or None when `node`
+/// or Chromium is missing.
+fn link_with_browser(url: &str, device_name: &str) -> Option<cloud::CloudAccount> {
     let site = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../site");
     let chrome = std::env::var("CHROME").unwrap_or_else(|_| "chromium".into());
     let have = |bin: &str| {
@@ -122,13 +125,13 @@ fn full_link_flow() {
     };
     if !have("node") || !have(&chrome) {
         eprintln!("node or {chrome} missing; skipping the browser approval");
-        return;
+        return None;
     }
-    let client = Client::new(&url);
-    let base = url.clone();
+    let client = Client::new(url);
+    let base = url.to_string();
     let acct = client
         .link(
-            "Test box",
+            device_name,
             "0.0.0-test",
             move |link| {
                 assert!(link.verify_url.contains(&link.user_code));
@@ -148,6 +151,45 @@ fn full_link_flow() {
             || true,
         )
         .unwrap();
+    Some(acct)
+}
+
+/// Link a second device to the same account: an already-linked device's
+/// bearer session may approve a code (what the website does with cookies).
+fn link_sibling(url: &str, first: &cloud::CloudAccount, device_name: &str) -> cloud::CloudAccount {
+    let client = Client::new(url);
+    let agent = ureq::Agent::new_with_config(ureq::Agent::config_builder().http_status_as_error(false).build());
+    let auth = format!("Bearer {}", first.token);
+    client
+        .link(
+            device_name,
+            "0.0.0-test",
+            |link| {
+                let r = agent
+                    .get(format!("{url}/api/auth/device?user_code={}", link.user_code))
+                    .header("Authorization", &auth)
+                    .call()
+                    .unwrap();
+                assert_eq!(r.status().as_u16(), 200, "device verify");
+                let r = agent
+                    .post(format!("{url}/api/auth/device/approve"))
+                    .header("Authorization", &auth)
+                    .send_json(serde_json::json!({ "userCode": link.user_code }))
+                    .unwrap();
+                assert_eq!(r.status().as_u16(), 200, "device approve");
+            },
+            || true,
+        )
+        .unwrap()
+}
+
+#[test]
+fn full_link_flow() {
+    let Some(url) = server() else { return };
+    let Some(acct) = link_with_browser(&url, "Test box") else {
+        return;
+    };
+    let client = Client::new(&url);
     assert!(!acct.token.is_empty());
     assert!(acct.email.ends_with("@example.test"), "{}", acct.email);
     assert_eq!(acct.device_name, "Test box");
@@ -168,4 +210,238 @@ fn full_link_flow() {
 
     client.unlink(&acct.token).unwrap();
     assert!(cloud::is_unauthorized(&client.account(&acct.token).unwrap_err()));
+}
+
+/// Events from one room, with a helper that waits for a matching one
+/// (anything else in between is dropped).
+struct Events(mpsc::Receiver<RoomEvent>);
+
+impl Events {
+    fn wait<T>(&self, what: &str, mut pick: impl FnMut(RoomEvent) -> Option<T>) -> T {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let ev = self
+                .0
+                .recv_timeout(left)
+                .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+            eprintln!("  event: {}", describe(&ev));
+            if let RoomEvent::Disconnected { reason, .. } = &ev {
+                panic!("disconnected while waiting for {what}: {reason}");
+            }
+            if let Some(t) = pick(ev) {
+                return t;
+            }
+        }
+    }
+
+    fn wait_updates(&self) -> Vec<(u64, Vec<u8>)> {
+        self.wait("updates", |ev| match ev {
+            RoomEvent::Updates(u) => Some(u),
+            _ => None,
+        })
+    }
+
+    fn wait_pushed(&self) -> u64 {
+        self.wait("pushed", |ev| match ev {
+            RoomEvent::Pushed(seq) => Some(seq),
+            _ => None,
+        })
+    }
+
+    fn wait_synced(&self) -> (u64, bool) {
+        self.wait("synced", |ev| match ev {
+            RoomEvent::Synced { head, reset, .. } => Some((head, reset)),
+            _ => None,
+        })
+    }
+
+    /// Nothing arrives for a while (except presence chatter).
+    fn quiet(&self, for_: Duration) {
+        let deadline = std::time::Instant::now() + for_;
+        while let Ok(ev) = self
+            .0
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+        {
+            match ev {
+                RoomEvent::Presence(_) => {}
+                other => panic!("unexpected event: {}", describe(&other)),
+            }
+        }
+    }
+}
+
+fn describe(ev: &RoomEvent) -> String {
+    match ev {
+        RoomEvent::Updates(u) => format!(
+            "Updates({:?})",
+            u.iter().map(|(s, b)| (*s, b.len())).collect::<Vec<_>>()
+        ),
+        other => format!("{other:?}"),
+    }
+}
+
+fn room(
+    url: &str,
+    acct: &cloud::CloudAccount,
+    project_id: &str,
+    dir: &std::path::Path,
+    since: u64,
+    words: &[&str],
+) -> (RoomHandle, Events) {
+    let (tx, rx) = mpsc::channel();
+    let handle = RoomHandle::start(
+        RoomOptions {
+            server: url.to_string(),
+            token: acct.token.clone(),
+            project_id: project_id.to_string(),
+            project_name: "Room test".into(),
+            assets_dir: dir.join("assets"),
+            since,
+            dictionary: words.iter().map(|w| w.to_string()).collect(),
+        },
+        move |ev| {
+            let _ = tx.send(ev);
+        },
+    );
+    (handle, Events(rx))
+}
+
+fn text(doc: &LoroDoc) -> String {
+    doc.get_text("body").to_string()
+}
+
+/// Two devices of one account share a project room: snapshot, live
+/// updates both ways, dictionary, assets, a large blob over HTTP,
+/// compaction and replay after a reconnect.
+#[test]
+fn room_syncs_two_copies() {
+    let Some(url) = server() else { return };
+    let Some(a) = link_with_browser(&url, "Room A") else {
+        return;
+    };
+    let b = link_sibling(&url, &a, "Room B");
+    let project_id = ulid::Ulid::new().to_string();
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+
+    // A starts with some text and claims the room.
+    let doc_a = LoroDoc::new();
+    doc_a.get_text("body").insert(0, "Hello").unwrap();
+    doc_a.commit();
+    let (room_a, ev_a) = room(&url, &a, &project_id, dir_a.path(), 0, &["Gondor"]);
+    let role = ev_a.wait("connected", |ev| match ev {
+        RoomEvent::Connected { role } => Some(role),
+        _ => None,
+    });
+    assert_eq!(role, "owner");
+    assert_eq!(ev_a.wait_synced(), (0, false));
+    room_a.push(doc_a.export(ExportMode::Snapshot).unwrap());
+    assert_eq!(ev_a.wait_pushed(), 1);
+    let mut vv_a = doc_a.oplog_vv();
+
+    // A has an attachment; a rescan uploads it.
+    std::fs::create_dir_all(dir_a.path().join("assets/img")).unwrap();
+    std::fs::write(dir_a.path().join("assets/img/pic.png"), b"not really a png").unwrap();
+    room_a.rescan_assets();
+    ev_a.wait("asset upload", |ev| match ev {
+        RoomEvent::Assets { uploaded, .. } if uploaded == ["img/pic.png"] => Some(()),
+        _ => None,
+    });
+
+    // B joins empty: gets the snapshot, the dictionary and the file.
+    let doc_b = LoroDoc::new();
+    let (room_b, ev_b) = room(&url, &b, &project_id, dir_b.path(), 0, &[]);
+    ev_b.wait("dictionary", |ev| match ev {
+        RoomEvent::Dictionary(w) if w == ["Gondor"] => Some(()),
+        _ => None,
+    });
+    let batch = ev_b.wait_updates();
+    assert_eq!(batch.len(), 1);
+    assert_eq!(batch[0].0, 1);
+    doc_b.import(&batch[0].1).unwrap();
+    assert_eq!(text(&doc_b), "Hello");
+    assert_eq!(ev_b.wait_synced(), (1, false));
+    ev_b.wait("asset download", |ev| match ev {
+        RoomEvent::Assets { downloaded, .. } if downloaded == ["img/pic.png"] => Some(()),
+        _ => None,
+    });
+    assert_eq!(
+        std::fs::read(dir_b.path().join("assets/img/pic.png")).unwrap(),
+        b"not really a png"
+    );
+    ev_a.wait("presence with both", |ev| match ev {
+        RoomEvent::Presence(names) if names.len() == 2 => Some(()),
+        _ => None,
+    });
+
+    // B edits; A sees it live and its own echo is skipped.
+    let vv_b = doc_b.oplog_vv();
+    doc_b.get_text("body").insert(5, " world").unwrap();
+    doc_b.commit();
+    room_b.push(doc_b.export(ExportMode::updates(&vv_b)).unwrap());
+    assert_eq!(ev_b.wait_pushed(), 2);
+    let live = ev_a.wait_updates();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].0, 2);
+    doc_a.import(&live[0].1).unwrap();
+    assert_eq!(text(&doc_a), "Hello world");
+    ev_b.quiet(Duration::from_millis(500));
+
+    // Words travel too.
+    room_b.add_words(vec!["Rohan".into()]);
+    ev_a.wait("word", |ev| match ev {
+        RoomEvent::Dictionary(w) if w == ["Rohan"] => Some(()),
+        _ => None,
+    });
+
+    // A big edit goes over HTTP; B fetches it the same way.
+    let big = "lorem ipsum ".repeat(60_000);
+    doc_a.get_text("body").insert(0, &big).unwrap();
+    doc_a.commit();
+    let blob = doc_a.export(ExportMode::updates(&vv_a)).unwrap();
+    assert!(blob.len() > 512 * 1024, "{} bytes", blob.len());
+    vv_a = doc_a.oplog_vv();
+    room_a.push(blob);
+    assert_eq!(ev_a.wait_pushed(), 3);
+    let fetched = ev_b.wait_updates();
+    assert_eq!(fetched[0].0, 3);
+    doc_b.import(&fetched[0].1).unwrap();
+    assert_eq!(text(&doc_b), text(&doc_a));
+
+    // A compacts: its snapshot becomes the base. B is told and imports it
+    // (a no-op for it).
+    room_a.upload_snapshot(doc_a.export(ExportMode::Snapshot).unwrap(), 3);
+    assert_eq!(ev_a.wait_pushed(), 4);
+    let snap = ev_b.wait_updates();
+    assert_eq!(snap[0].0, 4);
+    doc_b.import(&snap[0].1).unwrap();
+    assert_eq!(text(&doc_b), text(&doc_a));
+    assert_eq!(doc_b.oplog_vv(), vv_a);
+
+    // B reconnects from before the base: the replay starts at the snapshot.
+    drop(room_b);
+    let (room_b2, ev_b2) = room(&url, &b, &project_id, dir_b.path(), 1, &[]);
+    let replay = ev_b2.wait_updates();
+    assert_eq!(replay.iter().map(|(s, _)| *s).collect::<Vec<_>>(), vec![4]);
+    assert_eq!(ev_b2.wait_synced(), (4, false));
+    drop(room_b2);
+
+    // Up to date: nothing replayed. Ahead of the room: a reset.
+    let (_room_b3, ev_b3) = room(&url, &b, &project_id, dir_b.path(), 4, &[]);
+    assert_eq!(ev_b3.wait_synced(), (4, false));
+    let (_room_b4, ev_b4) = room(&url, &b, &project_id, dir_b.path(), 40, &[]);
+    assert_eq!(ev_b4.wait_synced(), (4, true));
+
+    // A stranger's token is refused for good.
+    let Some(stranger) = link_with_browser(&url, "Stranger") else {
+        return;
+    };
+    let (_room_s, ev_s) = room(&url, &stranger, &project_id, dir_b.path(), 0, &[]);
+    let fatal = ev_s.0.recv_timeout(Duration::from_secs(30)).expect("stranger event");
+    assert!(
+        matches!(&fatal, RoomEvent::Disconnected { fatal: true, .. }),
+        "{}",
+        describe(&fatal)
+    );
 }

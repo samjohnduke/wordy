@@ -317,6 +317,14 @@ impl Project {
         Ok(())
     }
 
+    /// Import several updates in one go (a cloud replay).
+    pub fn import_many(&self, updates: &[Vec<u8>]) -> Result<()> {
+        self.doc.import_batch(updates).map_err(|e| anyhow!("import: {e}"))?;
+        self.ensure_roots()?;
+        self.commit_meta();
+        Ok(())
+    }
+
     fn init_schema(&self, name: &str) -> Result<()> {
         let project = self.project_map();
         project.insert(schema::project::NAME, name)?;

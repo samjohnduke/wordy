@@ -106,3 +106,11 @@ function toDevice(r: Row, currentSessionId: string): Device {
     current: r.sessionId === currentSessionId,
   };
 }
+
+/** The device row behind a bearer session, for the room's identity header. */
+export async function deviceForSession(sessionId: string): Promise<{ id: string; name: string } | null> {
+  const row = await env.DB.prepare(`SELECT id, name FROM device WHERE sessionId = ?`)
+    .bind(sessionId)
+    .first<{ id: string; name: string }>();
+  return row ?? null;
+}

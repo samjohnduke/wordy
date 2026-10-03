@@ -26,6 +26,8 @@ pub use client::sync_with;
 pub use cloud::CloudAccount;
 pub use config::SyncConfig;
 pub use discovery::{Advertiser, Discovery, Peer};
+/// The CRDT crate, re-exported so room users share one version.
+pub use loro;
 pub use server::{Server, ServerEvent};
 
 /// The protocol version both sides must agree on.

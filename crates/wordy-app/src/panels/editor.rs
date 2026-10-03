@@ -10,6 +10,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use wordy_doc::loro::LoroText;
 use wordy_doc::{storage, Block, Highlight, NodeKind, Status, TreeID, Version};
+use wordy_editor::CursorMarks;
 use wordy_editor::{
     AddComment, ClearFormatting, EditorEvent, InsertLink, InsertSceneBreak, LinkTarget, ProseEditor, SetHeading1,
     SetHeading2, SetHeading3, SetParagraph, SetQuote, ToggleBold, ToggleHighlight, ToggleItalic, ToggleSmallCaps,
@@ -391,8 +392,22 @@ impl EditorPanel {
     /// The document changed underneath us (a sync imported edits): re-read
     /// the body and the sheet.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
+        self.reload_keeping(None, cx);
+    }
+
+    /// The selection as Loro cursors, for `reload_keeping`.
+    pub fn cursor_marks(&self, cx: &App) -> Option<CursorMarks> {
+        self.editor.as_ref().map(|e| e.read(cx).cursor_marks())
+    }
+
+    /// Reload the body; with `marks`, the caret stays on the same text even
+    /// when the change inserted or deleted before it.
+    pub fn reload_keeping(&mut self, marks: Option<&CursorMarks>, cx: &mut Context<Self>) {
         if let Some(editor) = &self.editor {
-            editor.update(cx, |e, cx| e.reload(cx));
+            editor.update(cx, |e, cx| match marks {
+                Some(m) => e.reload_keeping(m, cx),
+                None => e.reload(cx),
+            });
         }
         if let Some(sheet) = &self.sheet {
             sheet.update(cx, |_, cx| cx.notify());

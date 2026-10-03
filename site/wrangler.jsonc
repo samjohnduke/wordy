@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "wordy-site",
-  "main": "@astrojs/cloudflare/entrypoints/server",
+  "main": "./src/worker.ts",
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "assets": {
@@ -28,6 +28,11 @@
   ],
   // Cloudflare Email Sending. The sender domain must be verified in the dashboard.
   "send_email": [{ "name": "EMAIL" }],
+  // Project data: large Loro blobs and attachments.
+  "r2_buckets": [{ "binding": "PROJECTS", "bucket_name": "wordy-projects" }],
+  // One ProjectRoom per project (see src/server/rooms/project-room.ts).
+  "durable_objects": { "bindings": [{ "name": "ProjectRoom", "class_name": "ProjectRoom" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ProjectRoom"] }],
   // Uncomment to serve from a custom domain on the Cloudflare zone (DNS is created on deploy),
   // then set `site` in astro.config.mjs and SITE_URL to match.
   // "routes": [{ "pattern": "wordy.samduke.dev", "custom_domain": true }]

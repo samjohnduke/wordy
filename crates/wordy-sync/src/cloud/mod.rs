@@ -13,6 +13,13 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+pub mod protocol;
+pub mod room;
+pub mod state;
+
+pub use room::{RoomEvent, RoomHandle, RoomOptions};
+pub use state::CloudState;
+
 /// Where accounts live unless `sync.json` says otherwise.
 pub const DEFAULT_SERVER: &str = "https://wordy.samduke.dev";
 /// The client id the server accepts for the device flow.
@@ -112,10 +119,15 @@ impl Client {
     /// `server` is an origin like `https://wordy.example`; a trailing slash
     /// is fine.
     pub fn new(server: &str) -> Self {
+        Self::with_timeout(server, HTTP_TIMEOUT)
+    }
+
+    /// A client whose requests may take up to `timeout` (blob transfers).
+    pub fn with_timeout(server: &str, timeout: Duration) -> Self {
         let server = server.trim().trim_end_matches('/').to_string();
         let config = ureq::Agent::config_builder()
             .http_status_as_error(false)
-            .timeout_global(Some(HTTP_TIMEOUT))
+            .timeout_global(Some(timeout))
             .user_agent(format!("wordy/{}", env!("CARGO_PKG_VERSION")))
             .build();
         Self {
@@ -324,6 +336,115 @@ impl Client {
         match status {
             200 | 401 => Ok(()),
             _ => bail!("sign-out failed: {}", describe(status, &text)),
+        }
+    }
+
+    /// Raw GET: status and body bytes.
+    fn get_bytes(&self, path: &str, token: &str) -> Result<(u16, Vec<u8>)> {
+        let mut resp = self
+            .agent
+            .get(self.url(path))
+            .header("Authorization", format!("Bearer {token}"))
+            .call()
+            .with_context(|| format!("GET {path}"))?;
+        let status = resp.status().as_u16();
+        let bytes = resp
+            .body_mut()
+            .with_config()
+            .limit(protocol::MAX_BLOB)
+            .read_to_vec()
+            .with_context(|| format!("reading GET {path}"))?;
+        Ok((status, bytes))
+    }
+
+    /// Raw PUT of a byte body.
+    fn put_bytes(&self, path: &str, token: &str, bytes: &[u8], extra: &[(&str, String)]) -> Result<(u16, String)> {
+        let mut req = self
+            .agent
+            .put(self.url(path))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/octet-stream");
+        for (k, v) in extra {
+            req = req.header(*k, v);
+        }
+        let mut resp = req.send(bytes).with_context(|| format!("PUT {path}"))?;
+        let status = resp.status().as_u16();
+        let text = resp
+            .body_mut()
+            .read_to_string()
+            .with_context(|| format!("reading PUT {path}"))?;
+        Ok((status, text))
+    }
+
+    /// One stored update of a project room by sequence number.
+    pub fn fetch_update(&self, token: &str, project_id: &str, seq: u64) -> Result<Vec<u8>> {
+        let (status, bytes) = self.get_bytes(&format!("/api/projects/{project_id}/updates/{seq}"), token)?;
+        match status {
+            200 => Ok(bytes),
+            401 => Err(Unauthorized.into()),
+            s => bail!(
+                "fetching update {seq} failed: {}",
+                describe(s, &String::from_utf8_lossy(&bytes))
+            ),
+        }
+    }
+
+    /// Store a blob too big for the socket. With `snapshot_at`, the blob is
+    /// a full snapshot taken after applying that sequence number and becomes
+    /// the room's base if nothing landed since. Returns the new sequence
+    /// number and the room's base.
+    pub fn put_update(
+        &self,
+        token: &str,
+        project_id: &str,
+        bytes: &[u8],
+        snapshot_at: Option<u64>,
+    ) -> Result<(u64, u64)> {
+        let mut extra = Vec::new();
+        if let Some(at) = snapshot_at {
+            extra.push(("x-wordy-snapshot-at", at.to_string()));
+        }
+        let (status, text) = self.put_bytes(&format!("/api/projects/{project_id}/updates"), token, bytes, &extra)?;
+        #[derive(Deserialize)]
+        struct Put {
+            seq: u64,
+            base: u64,
+        }
+        match status {
+            200 => {
+                let p: Put = serde_json::from_str(&text).context("put update response")?;
+                Ok((p.seq, p.base))
+            }
+            401 => Err(Unauthorized.into()),
+            s => bail!("uploading the update failed: {}", describe(s, &text)),
+        }
+    }
+
+    /// Download a project asset by content hash.
+    pub fn fetch_asset(&self, token: &str, project_id: &str, sha256: &str) -> Result<Vec<u8>> {
+        let (status, bytes) = self.get_bytes(&format!("/api/projects/{project_id}/assets/{sha256}"), token)?;
+        match status {
+            200 => Ok(bytes),
+            401 => Err(Unauthorized.into()),
+            s => bail!(
+                "fetching asset {sha256} failed: {}",
+                describe(s, &String::from_utf8_lossy(&bytes))
+            ),
+        }
+    }
+
+    /// Upload a project asset (idempotent by content hash).
+    pub fn put_asset(&self, token: &str, project_id: &str, sha256: &str, bytes: &[u8]) -> Result<()> {
+        let (status, text) = self.put_bytes(
+            &format!("/api/projects/{project_id}/assets/{sha256}"),
+            token,
+            bytes,
+            &[],
+        )?;
+        match status {
+            200 => Ok(()),
+            401 => Err(Unauthorized.into()),
+            s => bail!("uploading asset {sha256} failed: {}", describe(s, &text)),
         }
     }
 

@@ -293,6 +293,9 @@ impl Workspace {
         let sync = cx.new(|cx| SyncManager::new(project.clone(), cx));
         let sync_sub = cx.subscribe(&sync, |this, _, ev: &SyncEvent, cx| match ev {
             SyncEvent::Applied(outcome) => this.after_sync(outcome, cx),
+            SyncEvent::RemoteReady => this.apply_cloud(cx),
+            SyncEvent::CloudWords => this.on_cloud_words(cx),
+            SyncEvent::CloudAssets => this.on_cloud_assets(cx),
         });
 
         let focus = cx.focus_handle();
@@ -665,6 +668,64 @@ impl Workspace {
         for panel in self.editors.values() {
             panel.update(cx, |p, cx| p.rescan_spelling(cx));
         }
+        self.sync.update(cx, |m, _| m.cloud_add_words(vec![word.to_string()]));
+    }
+
+    /// Edits from the cloud are waiting and typing has paused: note where
+    /// every caret is, import, then reload each editor at the same text.
+    fn apply_cloud(&mut self, cx: &mut Context<Self>) {
+        let marks: Vec<_> = self
+            .editors
+            .iter()
+            .map(|(id, p)| (*id, p.read(cx).cursor_marks(cx)))
+            .collect();
+        if self.sync.update(cx, |m, _| m.apply_cloud()).is_none() {
+            return;
+        }
+        self.project.refresh_matcher();
+        self.project.rebuild_index();
+        let targets = self.project.link_targets();
+        for (id, marks) in marks {
+            if let Some(panel) = self.editors.get(&id) {
+                panel.update(cx, |p, cx| {
+                    p.reload_keeping(marks.as_ref(), cx);
+                    p.set_link_targets(targets.clone(), cx);
+                    p.rescan_spelling(cx);
+                });
+            }
+        }
+        self.reference.update(cx, |r, cx| {
+            r.set_link_targets(targets, cx);
+            cx.notify();
+        });
+        self.sidebar.update(cx, |s, cx| {
+            s.refresh_filter();
+            cx.notify();
+        });
+        self.dock.update(cx, |_, cx| cx.notify());
+        self.dirty = false;
+        self.dirty_nodes.clear();
+        self.last_saved = Some(chrono_time());
+        if let Some(home) = &self.home {
+            home.update(cx, |_, cx| cx.notify());
+        }
+        cx.notify();
+    }
+
+    /// Words from other machines landed in the dictionary file.
+    fn on_cloud_words(&mut self, cx: &mut Context<Self>) {
+        SpellState::set_custom_words(cx, self.project.load_dictionary());
+        for panel in self.editors.values() {
+            panel.update(cx, |p, cx| p.rescan_spelling(cx));
+        }
+    }
+
+    /// Attachments came down from the cloud: images may now resolve.
+    fn on_cloud_assets(&mut self, cx: &mut Context<Self>) {
+        for panel in self.editors.values() {
+            panel.update(cx, |_, cx| cx.notify());
+        }
+        self.reference.update(cx, |_, cx| cx.notify());
     }
 
     fn toggle_reference(&mut self, _: &ToggleReference, window: &mut Window, cx: &mut Context<Self>) {
@@ -1349,6 +1410,7 @@ impl Workspace {
             }
         }
         self.last_edit = Some(now);
+        self.sync.update(cx, |m, _| m.note_edit());
         self.save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(AUTOSAVE_DELAY).await;
             this.update(cx, |ws, cx| ws.save_now(cx)).ok();
@@ -1389,6 +1451,10 @@ impl Workspace {
                     panel.update(cx, |_, cx| cx.notify());
                 }
                 tracing::info!("saved");
+                self.sync.update(cx, |m, _| {
+                    m.push_cloud();
+                    m.cloud_rescan_assets();
+                });
                 if self.last_backup.map(|t| t.elapsed() >= BACKUP_INTERVAL).unwrap_or(true) {
                     self.backup_now();
                 }
@@ -1562,6 +1628,9 @@ impl Workspace {
         }
         if self.typewriter {
             parts.push("typewriter".to_string());
+        }
+        if let Some(cloud) = self.sync.read(cx).cloud_sync_short() {
+            parts.push(cloud.to_string());
         }
         parts.join("  ·  ")
     }

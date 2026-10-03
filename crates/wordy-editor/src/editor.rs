@@ -14,6 +14,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use unicode_segmentation::UnicodeSegmentation;
+use wordy_doc::loro::cursor::{Cursor, Side};
 use wordy_doc::loro::{CommitOptions, ContainerTrait as _, LoroDoc, LoroText, LoroValue, UndoItemMeta, UndoManager};
 use wordy_doc::{Block, Comments, Highlight, Marks, Paragraphs, Run, BULK_ORIGIN, META_ORIGIN};
 use wordy_doc::{EntityNames, Matcher, TreeID};
@@ -30,6 +31,14 @@ use crate::*;
 pub struct Selection {
     pub anchor: usize,
     pub head: usize,
+}
+
+/// The selection as Loro cursors: they follow the text through edits made
+/// elsewhere, so a remote change can land without moving the caret.
+#[derive(Clone)]
+pub struct CursorMarks {
+    anchor: Option<Cursor>,
+    head: Option<Cursor>,
 }
 
 impl Selection {
@@ -361,6 +370,30 @@ impl ProseEditor {
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         self.refresh(cx);
         self.scroll_to_cursor = false;
+    }
+
+    pub fn cursor_marks(&self) -> CursorMarks {
+        CursorMarks {
+            anchor: self.text.get_cursor(self.sel.anchor, Side::Left),
+            head: self.text.get_cursor(self.sel.head, Side::Left),
+        }
+    }
+
+    /// Reload after the document changed underneath (an edit from another
+    /// machine) and put the selection back where `marks` now point.
+    pub fn reload_keeping(&mut self, marks: &CursorMarks, cx: &mut Context<Self>) {
+        let resolve = |c: &Option<Cursor>, fallback: usize| {
+            c.as_ref()
+                .and_then(|c| self.doc.get_cursor_pos(c).ok())
+                .map(|r| r.current.pos)
+                .unwrap_or(fallback)
+        };
+        let sel = Selection {
+            anchor: resolve(&marks.anchor, self.sel.anchor),
+            head: resolve(&marks.head, self.sel.head),
+        };
+        self.sel = sel;
+        self.reload(cx);
     }
 
     /// Byte offset → code point index for the whole text (one past the end included).
