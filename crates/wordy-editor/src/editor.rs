@@ -15,7 +15,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use unicode_segmentation::UnicodeSegmentation;
 use wordy_doc::loro::{CommitOptions, ContainerTrait as _, LoroDoc, LoroText, LoroValue, UndoItemMeta, UndoManager};
-use wordy_doc::{Block, Comments, Marks, Paragraphs, Run, META_ORIGIN};
+use wordy_doc::{Block, Comments, Highlight, Marks, Paragraphs, Run, META_ORIGIN};
 use wordy_doc::{EntityNames, Matcher, TreeID};
 
 use crate::element::{FrameLayout, ProseElement};
@@ -906,6 +906,19 @@ impl ProseEditor {
         }
     }
 
+    fn set_highlight_mark(&self, r: Range<usize>, h: Option<Highlight>) {
+        if r.is_empty() {
+            return;
+        }
+        let res = match h {
+            Some(h) => self.text.mark(r, "highlight", h.as_str()),
+            None => self.text.unmark(r, "highlight"),
+        };
+        if let Err(e) = res {
+            tracing::warn!("highlight mark failed: {e}");
+        }
+    }
+
     /// Make the inline marks over `r` exactly `want` (links included, comments
     /// left alone), by diffing against what the text currently carries.
     fn apply_marks_in(&self, r: Range<usize>, want: &Marks) {
@@ -926,18 +939,20 @@ impl ProseEditor {
             }
         }
         for (seg, have) in segments {
-            let bools: [(&str, bool, bool); 6] = [
+            let bools: [(&str, bool, bool); 5] = [
                 ("bold", want.bold, have.bold),
                 ("italic", want.italic, have.italic),
                 ("underline", want.underline, have.underline),
                 ("strike", want.strike, have.strike),
                 ("smallcaps", want.smallcaps, have.smallcaps),
-                ("highlight", want.highlight, have.highlight),
             ];
             for (key, w, h) in bools {
                 if w != h {
                     self.set_mark(seg.clone(), key, w);
                 }
+            }
+            if want.highlight != have.highlight {
+                self.set_highlight_mark(seg.clone(), want.highlight);
             }
             if want.link != have.link {
                 let res = match &want.link {
@@ -1193,7 +1208,6 @@ impl ProseEditor {
                 "underline" => m.underline = !m.underline,
                 "strike" => m.strike = !m.strike,
                 "smallcaps" => m.smallcaps = !m.smallcaps,
-                "highlight" => m.highlight = !m.highlight,
                 _ => return,
             }
             self.pending = Some(m);
@@ -1228,7 +1242,7 @@ impl ProseEditor {
                     "underline" => run.marks.underline,
                     "strike" => run.marks.strike,
                     "smallcaps" => run.marks.smallcaps,
-                    "highlight" => run.marks.highlight,
+                    "highlight" => run.marks.highlight.is_some(),
                     _ => false,
                 };
                 if !on {
@@ -1237,6 +1251,108 @@ impl ProseEditor {
             }
         }
         any
+    }
+
+    /// The highlight colour at the caret, or the colour shared by the whole
+    /// selection (`None` if unhighlighted or mixed).
+    pub fn current_highlight(&self) -> Option<Highlight> {
+        let r = self.sel.range();
+        if r.is_empty() {
+            return self.current_marks().highlight;
+        }
+        let mut found: Option<Highlight> = None;
+        for p in self.paras.iter() {
+            if p.end_cp() <= r.start || p.start_cp >= r.end {
+                continue;
+            }
+            let mut cp = p.start_cp;
+            for run in &p.runs {
+                let n = run.text.chars().count();
+                let run_r = cp..cp + n;
+                cp += n;
+                if run_r.end <= r.start || run_r.start >= r.end {
+                    continue;
+                }
+                match (found, run.marks.highlight) {
+                    (_, None) => return None,
+                    (None, Some(h)) => found = Some(h),
+                    (Some(a), Some(b)) if a != b => return None,
+                    _ => {}
+                }
+            }
+        }
+        found
+    }
+
+    /// Highlight the selection in `h` (or clear it with `None`). With a
+    /// collapsed caret the colour applies to the next typed text.
+    pub fn set_highlight(&mut self, h: Option<Highlight>, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        let r = self.sel.range();
+        if r.is_empty() {
+            let mut m = self.current_marks();
+            m.highlight = h;
+            self.pending = Some(m);
+            cx.emit(EditorEvent::SelectionChanged);
+            cx.notify();
+            return;
+        }
+        self.begin_edit();
+        self.set_highlight_mark(r, h);
+        self.commit(cx);
+    }
+
+    /// Step the highlight through the palette: none → yellow → … → grey → none.
+    pub fn cycle_highlight(&mut self, cx: &mut Context<Self>) {
+        let next = match self.current_highlight() {
+            None => Some(Highlight::Yellow),
+            Some(h) => h.next(),
+        };
+        self.set_highlight(next, cx);
+    }
+
+    /// Remove every inline mark (links included, comments kept) from the
+    /// selection; with a collapsed caret, the next typed text is plain.
+    pub fn clear_formatting(&mut self, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        let r = self.sel.range();
+        if r.is_empty() {
+            let mut m = Marks::default();
+            m.comment = self.current_marks().comment;
+            self.pending = Some(m);
+            cx.emit(EditorEvent::SelectionChanged);
+            cx.notify();
+            return;
+        }
+        self.begin_edit();
+        for key in [
+            "bold",
+            "italic",
+            "underline",
+            "strike",
+            "smallcaps",
+            "highlight",
+            "link",
+        ] {
+            if let Err(e) = self.text.unmark(r.clone(), key) {
+                tracing::warn!("unmark {key} failed: {e}");
+            }
+        }
+        self.commit(cx);
+    }
+
+    /// Turn spellchecking on or off and rescan.
+    pub fn set_spellcheck(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.spellcheck == on {
+            return;
+        }
+        self.spellcheck = on;
+        self.rescan_spelling(cx);
+        cx.notify();
     }
 
     /// Insert a scene break after the current paragraph and start a new one.
@@ -2497,7 +2613,8 @@ impl Render for ProseEditor {
             .on_action(cx.listener(|e, _: &ToggleUnderline, _, cx| e.toggle_mark("underline", cx)))
             .on_action(cx.listener(|e, _: &ToggleStrike, _, cx| e.toggle_mark("strike", cx)))
             .on_action(cx.listener(|e, _: &ToggleSmallCaps, _, cx| e.toggle_mark("smallcaps", cx)))
-            .on_action(cx.listener(|e, _: &ToggleHighlight, _, cx| e.toggle_mark("highlight", cx)))
+            .on_action(cx.listener(|e, _: &ToggleHighlight, _, cx| e.cycle_highlight(cx)))
+            .on_action(cx.listener(|e, _: &ClearFormatting, _, cx| e.clear_formatting(cx)))
             .on_action(cx.listener(|e, _: &AddComment, window, cx| e.add_comment(window, cx)))
             .on_action(cx.listener(|e, _: &ToggleResolvedComments, _, cx| e.toggle_show_resolved(cx)))
             .on_action(cx.listener(|e, _: &Cancel, window, cx| {

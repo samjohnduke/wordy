@@ -18,9 +18,10 @@ use wordy_doc::{storage, Space, TreeID, Version};
 use wordy_editor::SpellState;
 
 use crate::app::{
-    self, CloseQuickOpen, CloseTab, FocusSidebar, NewItem, NextDocument, NextTab, PrevDocument, PrevTab, QuickOpen,
-    QuickOpenDown, QuickOpenUp, Quit, Save, SearchProject, SharedProject, ShowHome, SpaceManuscript, SpaceNotes,
-    SpaceWorld, ToggleFocusMode, ToggleReference, ToggleTheme, ToggleTypewriter, QUICK_OPEN_CONTEXT,
+    self, CloseQuickOpen, CloseTab, Find, FindNext, FindPrev, FocusSidebar, NewItem, NextDocument, NextTab,
+    PrevDocument, PrevTab, QuickOpen, QuickOpenDown, QuickOpenUp, Quit, Replace, Save, SearchProject, SharedProject,
+    ShowHome, SpaceManuscript, SpaceNotes, SpaceWorld, ToggleFocusMode, ToggleReference, ToggleSpellcheck, ToggleTheme,
+    ToggleTypewriter, QUICK_OPEN_CONTEXT,
 };
 use crate::layout::Layout;
 use crate::panels::editor::{EditorPanel, EditorPanelEvent};
@@ -39,21 +40,149 @@ const SESSION_IDLE: Duration = Duration::from_secs(60);
 const BACKUP_INTERVAL: Duration = Duration::from_secs(30 * 60);
 /// Rows shown in the quick-open palette.
 const QUICK_OPEN_LIMIT: usize = 12;
+/// Commands mixed into a node search (a `>` prefix shows commands only).
+const QUICK_OPEN_MIXED_ACTIONS: usize = 3;
 
-/// The quick-open palette (Ctrl-P): a filter box over every node.
+/// The palette (Ctrl-P): a filter box over every node and every command.
 struct QuickOpenState {
     input: Entity<InputState>,
     selected: usize,
     _sub: Subscription,
 }
 
-/// One quick-open row.
-struct QuickOpenHit {
-    id: TreeID,
-    title: String,
-    kind: &'static str,
-    space: Space,
-    has_body: bool,
+/// One palette row.
+enum QuickOpenHit {
+    Node {
+        id: TreeID,
+        title: String,
+        kind: &'static str,
+        space: Space,
+        has_body: bool,
+    },
+    Action {
+        group: &'static str,
+        label: &'static str,
+        action: Box<dyn Action>,
+    },
+}
+
+/// How well a title matches the palette query; higher sorts first.
+fn match_rank(title: &str, query: &str, terms: &[&str]) -> Option<u8> {
+    if terms.is_empty() {
+        return Some(1);
+    }
+    let lower = title.to_lowercase();
+    if lower.starts_with(terms[0]) && terms.iter().all(|t| lower.contains(t)) {
+        return Some(3);
+    }
+    if terms.iter().all(|t| lower.contains(t)) {
+        return Some(2);
+    }
+    // Fuzzy: the query's letters appear in order ("chp1" finds "Chapter 1").
+    let mut chars = query.chars().filter(|c| !c.is_whitespace());
+    let mut want = chars.next()?;
+    for c in lower.chars() {
+        if c == want {
+            match chars.next() {
+                Some(n) => want = n,
+                None => return Some(1),
+            }
+        }
+    }
+    None
+}
+
+/// Every command the palette offers. Editor commands only when a document is open.
+fn palette_actions(has_editor: bool) -> Vec<(&'static str, &'static str, Box<dyn Action>)> {
+    let mut v: Vec<(&'static str, &'static str, Box<dyn Action>)> = vec![
+        ("Go", "Home", Box::new(ShowHome)),
+        ("Go", "Manuscript", Box::new(SpaceManuscript)),
+        ("Go", "World", Box::new(SpaceWorld)),
+        ("Go", "Notes", Box::new(SpaceNotes)),
+        ("Go", "Next tab", Box::new(NextTab)),
+        ("Go", "Previous tab", Box::new(PrevTab)),
+        ("Go", "Close tab", Box::new(CloseTab)),
+        ("Go", "Next document", Box::new(NextDocument)),
+        ("Go", "Previous document", Box::new(PrevDocument)),
+        ("Go", "Focus the sidebar", Box::new(FocusSidebar)),
+        ("View", "Toggle reference pane", Box::new(ToggleReference)),
+        ("View", "Toggle focus mode", Box::new(ToggleFocusMode)),
+        ("View", "Toggle typewriter scrolling", Box::new(ToggleTypewriter)),
+        ("View", "Toggle light / dark theme", Box::new(ToggleTheme)),
+        ("Project", "Search the project", Box::new(SearchProject)),
+        ("Project", "New scene / entity / note", Box::new(NewItem)),
+        ("Project", "Save now", Box::new(Save)),
+        ("Project", "Toggle spellcheck", Box::new(ToggleSpellcheck)),
+    ];
+    if has_editor {
+        use wordy_editor::*;
+        v.extend([
+            ("Edit", "Find", Box::new(Find) as Box<dyn Action>),
+            ("Edit", "Find and replace", Box::new(Replace)),
+            ("Edit", "Next match", Box::new(FindNext)),
+            ("Edit", "Previous match", Box::new(FindPrev)),
+            ("Edit", "Undo", Box::new(Undo)),
+            ("Edit", "Redo", Box::new(Redo)),
+            ("Edit", "Select all", Box::new(SelectAll)),
+            ("Format", "Bold", Box::new(ToggleBold)),
+            ("Format", "Italic", Box::new(ToggleItalic)),
+            ("Format", "Underline", Box::new(ToggleUnderline)),
+            ("Format", "Strikethrough", Box::new(ToggleStrike)),
+            ("Format", "Small caps", Box::new(ToggleSmallCaps)),
+            ("Format", "Cycle highlight colour", Box::new(ToggleHighlight)),
+            ("Format", "Clear formatting", Box::new(ClearFormatting)),
+            ("Format", "Paragraph", Box::new(SetParagraph)),
+            ("Format", "Heading 1", Box::new(SetHeading1)),
+            ("Format", "Heading 2", Box::new(SetHeading2)),
+            ("Format", "Heading 3", Box::new(SetHeading3)),
+            ("Format", "Quote", Box::new(SetQuote)),
+            ("Format", "Scene break", Box::new(InsertSceneBreak)),
+            ("Notes", "Add comment", Box::new(AddComment)),
+            ("Notes", "Edit comment at caret", Box::new(EditCommentAtCaret)),
+            (
+                "Notes",
+                "Show / hide resolved comments",
+                Box::new(ToggleResolvedComments),
+            ),
+            ("Notes", "Insert link", Box::new(InsertLink)),
+            ("Notes", "Remove link", Box::new(RemoveLink)),
+        ]);
+    }
+    v
+}
+
+/// A keystroke the way the Home tab's shortcut list writes it.
+fn pretty_keystroke(k: &Keystroke) -> String {
+    let mac = cfg!(target_os = "macos");
+    let m = &k.modifiers;
+    let mut parts: Vec<String> = Vec::new();
+    if m.control {
+        parts.push(if mac { "⌃" } else { "Ctrl" }.into());
+    }
+    if m.alt {
+        parts.push(if mac { "⌥" } else { "Alt" }.into());
+    }
+    if m.shift {
+        parts.push(if mac { "⇧" } else { "Shift" }.into());
+    }
+    if m.platform {
+        parts.push(if mac { "⌘" } else { "Super" }.into());
+    }
+    parts.push(match k.key.as_str() {
+        "enter" => "Enter".into(),
+        "escape" => "Esc".into(),
+        "tab" => "Tab".into(),
+        "space" => "Space".into(),
+        "backspace" => "⌫".into(),
+        "delete" => "Del".into(),
+        "up" => "↑".into(),
+        "down" => "↓".into(),
+        "left" => "←".into(),
+        "right" => "→".into(),
+        key if key.chars().count() == 1 => key.to_uppercase(),
+        key => key.to_string(),
+    });
+    parts.join(if mac { "" } else { "+" })
 }
 
 pub struct Workspace {
@@ -598,6 +727,19 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Flip the project's spellcheck setting and apply it to every open editor.
+    fn toggle_spellcheck(&mut self, _: &ToggleSpellcheck, _: &mut Window, cx: &mut Context<Self>) {
+        let on = !self.project.project.spellcheck();
+        if let Err(e) = self.project.project.set_spellcheck(on) {
+            tracing::error!("spellcheck setting: {e:#}");
+        }
+        for panel in self.editors.values() {
+            panel.update(cx, |p, cx| p.set_spellcheck(on, cx));
+        }
+        self.on_edited(cx);
+        cx.notify();
+    }
+
     fn toggle_typewriter(&mut self, _: &ToggleTypewriter, _: &mut Window, cx: &mut Context<Self>) {
         self.typewriter = !self.typewriter;
         let on = self.typewriter;
@@ -815,45 +957,64 @@ impl Workspace {
         }
     }
 
-    /// Every live node whose title contains all the query words; titles that
-    /// start with the first word come first. Tree order otherwise.
+    /// Nodes and commands matching the query. Nodes whose title starts with
+    /// the first word come first, then other matches in tree order, then a
+    /// few matching commands. A `>` prefix lists commands only.
     fn quick_open_hits(&self, cx: &App) -> Vec<QuickOpenHit> {
-        let query = self
+        let raw = self
             .quick_open
             .as_ref()
             .map(|q| q.input.read(cx).value().trim().to_lowercase())
             .unwrap_or_default();
+        let (actions_only, query) = match raw.strip_prefix('>') {
+            Some(rest) => (true, rest.trim().to_string()),
+            None => (false, raw),
+        };
         let terms: Vec<&str> = query.split_whitespace().collect();
+
+        let has_editor = self.active.is_some_and(|id| self.editors.contains_key(&id));
+        let mut actions: Vec<(u8, QuickOpenHit)> = Vec::new();
+        if actions_only || !terms.is_empty() {
+            for (group, label, action) in palette_actions(has_editor) {
+                if let Some(rank) = match_rank(label, &query, &terms) {
+                    actions.push((rank, QuickOpenHit::Action { group, label, action }));
+                }
+            }
+            actions.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
+        }
+        if actions_only {
+            let mut out: Vec<QuickOpenHit> = actions.into_iter().map(|(_, h)| h).collect();
+            out.truncate(QUICK_OPEN_LIMIT);
+            return out;
+        }
+
         let p = &self.project.project;
-        let mut starts = Vec::new();
-        let mut rest = Vec::new();
-        for id in p.all_nodes() {
+        let mut ranked: Vec<(u8, usize, QuickOpenHit)> = Vec::new();
+        for (order, id) in p.all_nodes().into_iter().enumerate() {
             let Ok(n) = p.node(id) else { continue };
             let title = n.title();
-            let lower = title.to_lowercase();
-            if !terms.iter().all(|t| lower.contains(t)) {
+            let Some(rank) = match_rank(&title, &query, &terms) else {
                 continue;
-            }
-            let kind = n.kind();
-            let hit = QuickOpenHit {
-                id,
-                title,
-                kind: kind.as_str(),
-                space: n.space(),
-                has_body: kind.has_body(),
             };
-            if terms.first().map(|t| lower.starts_with(t)).unwrap_or(false) {
-                starts.push(hit);
-            } else {
-                rest.push(hit);
-            }
-            if starts.len() >= QUICK_OPEN_LIMIT {
-                break;
-            }
+            let kind = n.kind();
+            ranked.push((
+                rank,
+                order,
+                QuickOpenHit::Node {
+                    id,
+                    title,
+                    kind: kind.as_str(),
+                    space: n.space(),
+                    has_body: kind.has_body(),
+                },
+            ));
         }
-        starts.extend(rest);
-        starts.truncate(QUICK_OPEN_LIMIT);
-        starts
+        ranked.sort_by_key(|(rank, order, _)| (std::cmp::Reverse(*rank), *order));
+        let n_actions = actions.len().min(QUICK_OPEN_MIXED_ACTIONS);
+        let mut out: Vec<QuickOpenHit> = ranked.into_iter().map(|(_, _, h)| h).collect();
+        out.truncate(QUICK_OPEN_LIMIT - n_actions);
+        out.extend(actions.into_iter().take(n_actions).map(|(_, h)| h));
+        out
     }
 
     fn quick_open_move(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -870,9 +1031,22 @@ impl Workspace {
         let Some(sel) = self.quick_open.as_ref().map(|q| q.selected) else {
             return;
         };
-        let hits = self.quick_open_hits(cx);
-        let Some(hit) = hits.get(sel) else { return };
-        let (id, space, has_body) = (hit.id, hit.space, hit.has_body);
+        let mut hits = self.quick_open_hits(cx);
+        if sel >= hits.len() {
+            return;
+        }
+        let (id, space, has_body) = match hits.swap_remove(sel) {
+            QuickOpenHit::Action { action, .. } => {
+                self.quick_open = None;
+                self.focus_active(window, cx);
+                window.dispatch_action(action, cx);
+                cx.notify();
+                return;
+            }
+            QuickOpenHit::Node {
+                id, space, has_body, ..
+            } => (id, space, has_body),
+        };
         self.quick_open = None;
         self.set_space(space, cx);
         self.sidebar.update(cx, |s, cx| s.select(Some(id), cx));
@@ -885,7 +1059,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn render_quick_open(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_quick_open(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let q = self.quick_open.as_ref()?;
         let hits = self.quick_open_hits(cx);
         let selected = q.selected.min(hits.len().saturating_sub(1));
@@ -893,11 +1067,35 @@ impl Workspace {
             let t = cx.theme();
             (t.accent, t.secondary, t.muted_foreground, t.border, t.popover)
         };
+        // Keybinding hints are resolved where the command would run.
+        let focus = self
+            .active
+            .and_then(|id| self.editors.get(&id))
+            .and_then(|p| p.read(cx).editor_focus(cx))
+            .unwrap_or_else(|| self.focus.clone());
         let empty = hits.is_empty();
         let rows: Vec<AnyElement> = hits
             .into_iter()
             .enumerate()
             .map(|(ix, hit)| {
+                let (title, detail) = match &hit {
+                    QuickOpenHit::Node { title, space, kind, .. } => {
+                        (title.clone(), format!("{} · {}", space.label(), kind))
+                    }
+                    QuickOpenHit::Action { group, label, action } => {
+                        let keys = window
+                            .highest_precedence_binding_for_action_in(action.as_ref(), &focus)
+                            .map(|b| {
+                                b.keystrokes()
+                                    .iter()
+                                    .map(|k| pretty_keystroke(k.inner()))
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                            })
+                            .unwrap_or_default();
+                        (format!("› {label}"), format!("{group}  {keys}").trim_end().to_string())
+                    }
+                };
                 h_flex()
                     .id(ElementId::Name(format!("qo-{ix}").into()))
                     .w_full()
@@ -918,13 +1116,9 @@ impl Workspace {
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .child(hit.title),
+                            .child(title),
                     )
-                    .child(div().text_xs().text_color(muted).flex_shrink_0().child(format!(
-                        "{} · {}",
-                        hit.space.label(),
-                        hit.kind
-                    )))
+                    .child(div().text_xs().text_color(muted).flex_shrink_0().child(detail))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if let Some(q) = &mut this.quick_open {
                             q.selected = ix;
@@ -982,7 +1176,15 @@ impl Workspace {
                         .children(rows)
                         .when(empty, |d| {
                             d.child(div().px_2().py_1().text_sm().text_color(muted).child("No matches."))
-                        }),
+                        })
+                        .child(
+                            div()
+                                .px_2()
+                                .pt_1()
+                                .text_xs()
+                                .text_color(muted)
+                                .child("Type a title to jump to it, or > for commands."),
+                        ),
                 )
                 .into_any_element(),
         )
@@ -1187,9 +1389,10 @@ impl Focusable for Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let name = self.project.project.name();
         let dir = self.project.dir().map(|d| d.display().to_string()).unwrap_or_default();
+        let spell_on = self.project.project.spellcheck();
         let save_state = if self.dirty {
             "unsaved".to_string()
         } else {
@@ -1223,6 +1426,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_show_home))
             .on_action(cx.listener(Self::toggle_focus_mode))
             .on_action(cx.listener(Self::toggle_typewriter))
+            .on_action(cx.listener(Self::toggle_spellcheck))
             .on_action(cx.listener(Self::quick_open))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::prev_tab))
@@ -1267,7 +1471,7 @@ impl Render for Workspace {
                             .min_w_0()
                             .h_full()
                             .child(self.dock.clone())
-                            .children(self.render_quick_open(cx)),
+                            .children(self.render_quick_open(window, cx)),
                     ),
             )
             .when(!focus_mode, |d| {
@@ -1295,6 +1499,18 @@ impl Render for Workspace {
                                     .child(save_state),
                             )
                             .children(recovered.map(|r| div().flex_shrink_0().text_color(cx.theme().danger).child(r)))
+                            .child(
+                                div()
+                                    .id("status-spell")
+                                    .flex_shrink_0()
+                                    .cursor_pointer()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .hover(|s| s.text_color(cx.theme().foreground))
+                                    .child(if spell_on { "spelling en-US" } else { "spelling off" })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.toggle_spellcheck(&ToggleSpellcheck, window, cx)
+                                    })),
+                            )
                             .child(div().flex_shrink_0().whitespace_nowrap().child(right)),
                     ),
                 )

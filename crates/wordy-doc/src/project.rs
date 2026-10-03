@@ -847,7 +847,7 @@ mod tests {
         assert_eq!(after.get(0).unwrap().block, crate::Block::H1);
         assert_eq!(after.get(2).unwrap().block, crate::Block::Break);
         let runs = &after.get(1).unwrap().runs;
-        assert!(runs.iter().any(|r| r.marks.bold && r.marks.highlight));
+        assert!(runs.iter().any(|r| r.marks.bold && r.marks.highlight.is_some()));
         assert!(runs.iter().any(|r| r.marks.comment.as_deref() == Some("01ABC")));
         std::fs::remove_dir_all(&dir).ok();
     }

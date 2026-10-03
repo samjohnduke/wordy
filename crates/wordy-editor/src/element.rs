@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
-use wordy_doc::{Block, Paragraph, Paragraphs};
+use wordy_doc::{Block, Highlight, Paragraph, Paragraphs};
 
 use crate::editor::ProseEditor;
 use crate::style::EditorStyle;
@@ -140,7 +140,6 @@ struct Palette {
     link: Hsla,
     selection: Hsla,
     caret: Hsla,
-    highlight: Hsla,
     comment: Hsla,
     comment_active: Hsla,
     search: Hsla,
@@ -155,6 +154,17 @@ struct Palette {
     dim: Hsla,
 }
 
+/// Translucent highlighter colour for a mark; reads on light and dark pages.
+pub fn highlight_color(h: Highlight) -> Hsla {
+    match h {
+        Highlight::Yellow => hsla(0.14, 0.9, 0.6, 0.45),
+        Highlight::Green => hsla(0.33, 0.7, 0.55, 0.4),
+        Highlight::Blue => hsla(0.58, 0.9, 0.65, 0.4),
+        Highlight::Pink => hsla(0.92, 0.9, 0.7, 0.45),
+        Highlight::Grey => hsla(0.0, 0.0, 0.6, 0.4),
+    }
+}
+
 impl Palette {
     fn from_theme(cx: &App) -> Self {
         let t = cx.theme();
@@ -164,7 +174,6 @@ impl Palette {
             link: t.link,
             selection: t.selection,
             caret: t.caret,
-            highlight: hsla(0.14, 0.9, 0.6, 0.45),
             comment: hsla(0.08, 0.9, 0.6, 0.22),
             comment_active: hsla(0.08, 0.9, 0.55, 0.5),
             search: hsla(0.14, 0.9, 0.55, 0.3),
@@ -305,8 +314,8 @@ impl ProseElement {
             } else {
                 FontFeatures::default()
             };
-            let background_color = if m.highlight {
-                Some(pal.highlight)
+            let background_color = if let Some(h) = m.highlight {
+                Some(highlight_color(h))
             } else {
                 match &m.comment {
                     Some(id) if active_comment == Some(id.as_str()) => Some(pal.comment_active),

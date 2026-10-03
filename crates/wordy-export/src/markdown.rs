@@ -57,7 +57,7 @@ fn styled(text: &str, m: &Marks) -> String {
     if m.strike {
         s = format!("~~{s}~~");
     }
-    if m.highlight {
+    if m.highlight.is_some() {
         s = format!("=={s}==");
     }
     if m.italic {

@@ -207,8 +207,8 @@ fn styled(text: &str, m: &Marks) -> String {
     if m.strike {
         expr = format!("strike({expr})");
     }
-    if m.highlight {
-        expr = format!("highlight({expr})");
+    if let Some(h) = m.highlight {
+        expr = format!("highlight(fill: rgb(\"#{}\"), {expr})", h.hex());
     }
     format!("#{expr}")
 }

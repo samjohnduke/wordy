@@ -117,8 +117,8 @@ fn styled(text: &str, m: &Marks) -> String {
     if m.strike {
         s = format!("<s>{s}</s>");
     }
-    if m.highlight {
-        s = format!("<mark>{s}</mark>");
+    if let Some(h) = m.highlight {
+        s = format!("<mark style=\"background:#{}\">{s}</mark>", h.hex());
     }
     if m.italic {
         s = format!("<em>{s}</em>");

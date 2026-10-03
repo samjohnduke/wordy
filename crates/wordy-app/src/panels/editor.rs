@@ -5,12 +5,16 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, Selectable as _, Sizable as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use wordy_doc::loro::LoroText;
-use wordy_doc::{storage, NodeKind, Status, TreeID, Version};
-use wordy_editor::{EditorEvent, LinkTarget, ProseEditor};
+use wordy_doc::{storage, Block, Highlight, NodeKind, Status, TreeID, Version};
+use wordy_editor::{
+    AddComment, ClearFormatting, EditorEvent, InsertLink, InsertSceneBreak, LinkTarget, ProseEditor, SetHeading1,
+    SetHeading2, SetHeading3, SetParagraph, SetQuote, ToggleBold, ToggleHighlight, ToggleItalic, ToggleSmallCaps,
+    ToggleStrike, ToggleUnderline,
+};
 use wordy_export::{SnippetOptions, SnippetSize};
 
 use crate::app::{CloseFind, Find, FindNext, FindPrev, Replace, SharedProject, EDITOR_PANEL_CONTEXT};
@@ -94,6 +98,7 @@ impl EditorPanel {
         let doc = project.project.doc.clone();
         let editor = cx.new(|cx| ProseEditor::new(doc, body, cx));
         editor.update(cx, |e, cx| {
+            e.spellcheck = project.project.spellcheck();
             e.set_comments(project.project.comments(), id.to_string());
             e.set_self_id(Some(id));
             e.set_link_targets(project.link_targets(), cx);
@@ -105,7 +110,8 @@ impl EditorPanel {
                 navigate: *navigate,
             }),
             EditorEvent::DictionaryChanged(w) => cx.emit(EditorPanelEvent::DictionaryChanged(w.clone())),
-            EditorEvent::SelectionChanged => {}
+            // The toolbar reflects the style at the caret.
+            EditorEvent::SelectionChanged => cx.notify(),
         })];
         let is_entity = project
             .project
@@ -188,6 +194,17 @@ impl EditorPanel {
             focus: cx.focus_handle(),
             _subs: subs,
         }
+    }
+
+    pub fn set_spellcheck(&mut self, on: bool, cx: &mut Context<Self>) {
+        if let Some(e) = &self.editor {
+            e.update(cx, |e, cx| e.set_spellcheck(on, cx));
+        }
+    }
+
+    /// The editor's focus handle, for keybinding lookups.
+    pub fn editor_focus(&self, cx: &App) -> Option<FocusHandle> {
+        self.editor.as_ref().map(|e| e.read(cx).focus.clone())
     }
 
     /// Re-run the spellchecker (the custom dictionary changed).
@@ -400,6 +417,178 @@ impl EditorPanel {
             tracing::error!("remove version: {e:#}");
         }
         self.meta_changed(cx);
+    }
+
+    /// Formatting toolbar: block style, inline marks, highlight colour,
+    /// comment, link, clear. Every button reflects the style at the caret.
+    fn render_toolbar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.focus_mode {
+            return None;
+        }
+        let editor = self.editor.as_ref()?;
+        let (block, marks, highlight) = {
+            let e = editor.read(cx);
+            (e.current_block(), e.current_marks(), e.current_highlight())
+        };
+        let theme = cx.theme();
+        let border = theme.border;
+        let weak = cx.weak_entity();
+        let ctx = Some(wordy_editor::KEY_CONTEXT);
+
+        let sep = || div().w(px(1.)).h(px(14.)).mx_1().bg(border);
+        let mark_button = |id: &'static str,
+                           label: &'static str,
+                           tip: &'static str,
+                           action: &dyn Action,
+                           on: bool,
+                           key: &'static str| {
+            Button::new(id)
+                .ghost()
+                .xsmall()
+                .compact()
+                .label(label)
+                .selected(on)
+                .tooltip_with_action(tip, action, ctx)
+                .on_click(run(&weak, move |e, _, cx| e.toggle_mark(key, cx)))
+        };
+
+        let block_weak = weak.clone();
+        let block_menu = Button::new("tb-block")
+            .ghost()
+            .xsmall()
+            .label(block.label())
+            .tooltip("Paragraph style")
+            .dropdown_menu(move |menu, _, _| {
+                let mut menu = menu;
+                for (b, action) in [
+                    (Block::Paragraph, &SetParagraph as &dyn Action),
+                    (Block::H1, &SetHeading1),
+                    (Block::H2, &SetHeading2),
+                    (Block::H3, &SetHeading3),
+                    (Block::Quote, &SetQuote),
+                ] {
+                    menu = menu.item(
+                        PopupMenuItem::new(b.label())
+                            .action(action.boxed_clone())
+                            .checked(b == block)
+                            .on_click(run(&block_weak, move |e, _, cx| {
+                                // `set_block` toggles a repeated style back to a
+                                // paragraph; picking the current one is a no-op.
+                                if e.current_block() != b || b == Block::Paragraph {
+                                    e.set_block(b, cx);
+                                }
+                            })),
+                    );
+                }
+                menu.separator().item(
+                    PopupMenuItem::new(Block::Break.label())
+                        .action(InsertSceneBreak.boxed_clone())
+                        .on_click(run(&block_weak, |e, _, cx| e.insert_scene_break(cx))),
+                )
+            });
+
+        let hl_weak = weak.clone();
+        let hl_label = match highlight {
+            Some(h) => format!("Highlight · {}", h.label()),
+            None => "Highlight".to_string(),
+        };
+        let highlight_menu = Button::new("tb-highlight")
+            .ghost()
+            .xsmall()
+            .label(hl_label)
+            .selected(highlight.is_some())
+            .tooltip_with_action("Highlight colour (shortcut cycles)", &ToggleHighlight, ctx)
+            .dropdown_menu(move |menu, _, _| {
+                let mut menu = menu;
+                for h in Highlight::ALL {
+                    menu = menu.item(
+                        PopupMenuItem::new(h.label())
+                            .checked(highlight == Some(h))
+                            .on_click(run(&hl_weak, move |e, _, cx| e.set_highlight(Some(h), cx))),
+                    );
+                }
+                menu.separator().item(
+                    PopupMenuItem::new("No highlight")
+                        .checked(highlight.is_none())
+                        .on_click(run(&hl_weak, |e, _, cx| e.set_highlight(None, cx))),
+                )
+            });
+
+        Some(
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_0p5()
+                .px_2()
+                .py_0p5()
+                .border_b_1()
+                .border_color(border)
+                .child(block_menu)
+                .child(sep())
+                .child(mark_button("tb-bold", "B", "Bold", &ToggleBold, marks.bold, "bold"))
+                .child(mark_button(
+                    "tb-italic",
+                    "I",
+                    "Italic",
+                    &ToggleItalic,
+                    marks.italic,
+                    "italic",
+                ))
+                .child(mark_button(
+                    "tb-underline",
+                    "U",
+                    "Underline",
+                    &ToggleUnderline,
+                    marks.underline,
+                    "underline",
+                ))
+                .child(mark_button(
+                    "tb-strike",
+                    "S",
+                    "Strikethrough",
+                    &ToggleStrike,
+                    marks.strike,
+                    "strike",
+                ))
+                .child(mark_button(
+                    "tb-smallcaps",
+                    "Aa",
+                    "Small caps",
+                    &ToggleSmallCaps,
+                    marks.smallcaps,
+                    "smallcaps",
+                ))
+                .child(sep())
+                .child(highlight_menu)
+                .child(sep())
+                .child(
+                    Button::new("tb-comment")
+                        .ghost()
+                        .xsmall()
+                        .label("Comment")
+                        .tooltip_with_action("Add a comment on the selection", &AddComment, ctx)
+                        .on_click(run(&weak, |e, window, cx| e.add_comment(window, cx))),
+                )
+                .child(
+                    Button::new("tb-link")
+                        .ghost()
+                        .xsmall()
+                        .label("Link")
+                        .selected(marks.link.is_some())
+                        .tooltip_with_action("Link to a scene, entity, or note", &InsertLink, ctx)
+                        .on_click(run(&weak, |e, window, cx| e.open_link_picker(window, cx))),
+                )
+                .child(div().flex_1())
+                .child(
+                    Button::new("tb-clear")
+                        .ghost()
+                        .xsmall()
+                        .label("Clear")
+                        .tooltip_with_action("Clear formatting", &ClearFormatting, ctx)
+                        .on_click(run(&weak, |e, _, cx| e.clear_formatting(cx))),
+                )
+                .into_any_element(),
+        )
     }
 
     fn render_meta_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -894,6 +1083,7 @@ impl Render for EditorPanel {
                 .on_action(cx.listener(|this, _: &FindPrev, _, cx| this.step(-1, cx)))
                 .on_action(cx.listener(|this, _: &CloseFind, window, cx| this.close_find(window, cx)))
                 .children(self.render_find_bar(cx))
+                .children(self.render_toolbar(cx))
                 .children(self.render_meta_bar(cx))
                 .children(self.sheet.clone())
                 .child(div().flex_1().min_h_0().w_full().child(editor))
@@ -911,6 +1101,24 @@ impl Render for EditorPanel {
                 )
                 .into_any_element(),
         }
+    }
+}
+
+/// A toolbar click handler: run `f` on the panel's editor, then hand focus
+/// back to it so typing continues where it left off.
+fn run(
+    weak: &WeakEntity<EditorPanel>,
+    f: impl Fn(&mut ProseEditor, &mut Window, &mut Context<ProseEditor>) + 'static,
+) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+    let weak = weak.clone();
+    move |_, window, cx| {
+        weak.update(cx, |p, cx| {
+            if let Some(e) = p.editor.clone() {
+                e.update(cx, |e, cx| f(e, window, cx));
+            }
+            p.focus_editor(window, cx);
+        })
+        .ok();
     }
 }
 

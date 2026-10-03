@@ -6,7 +6,7 @@ use std::io::Cursor;
 
 use anyhow::Result;
 use docx_rs::*;
-use wordy_doc::{Block, Marks, Paragraph as DocParagraph};
+use wordy_doc::{Block, Highlight, Marks, Paragraph as DocParagraph};
 
 use crate::compile::Compiled;
 
@@ -182,8 +182,14 @@ fn styled_run(text: &str, m: &Marks) -> Run {
     if m.strike {
         run = run.strike();
     }
-    if m.highlight {
-        run = run.highlight("yellow");
+    if let Some(h) = m.highlight {
+        run = run.highlight(match h {
+            Highlight::Yellow => "yellow",
+            Highlight::Green => "green",
+            Highlight::Blue => "cyan",
+            Highlight::Pink => "magenta",
+            Highlight::Grey => "lightGray",
+        });
     }
     if m.smallcaps {
         run.run_property = run.run_property.caps();

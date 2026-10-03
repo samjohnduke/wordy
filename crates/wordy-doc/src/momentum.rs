@@ -93,6 +93,7 @@ mod keys {
     pub const DAILY_GOAL: &str = "daily_goal";
     pub const MANUSCRIPT_GOAL: &str = "manuscript_goal";
     pub const DEADLINE: &str = "deadline";
+    pub const SPELLCHECK: &str = "spellcheck";
 
     pub const WORDS_START: &str = "words_start";
     pub const WORDS_END: &str = "words_end";
@@ -226,6 +227,22 @@ impl Project {
             manuscript: get_i64(&s, keys::MANUSCRIPT_GOAL).filter(|g| *g > 0),
             deadline: get_str(&s, keys::DEADLINE).and_then(|d| parse_date(&d)),
         }
+    }
+
+    /// Whether spelling is checked in this project (default on).
+    pub fn spellcheck(&self) -> bool {
+        get_bool(&self.settings_map(), keys::SPELLCHECK).unwrap_or(true)
+    }
+
+    pub fn set_spellcheck(&self, on: bool) -> Result<()> {
+        let s = self.settings_map();
+        if on {
+            s.delete(keys::SPELLCHECK)?;
+        } else {
+            s.insert(keys::SPELLCHECK, false)?;
+        }
+        self.commit_meta();
+        Ok(())
     }
 
     pub fn set_goals(&self, goals: &Goals) -> Result<()> {

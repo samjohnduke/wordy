@@ -20,6 +20,6 @@ pub use loro::TreeID;
 pub use mentions::{EntityNames, Matcher, Mention};
 pub use momentum::{Goals, Placeholder, Session, Task, Version};
 pub use node::{Attachment, Node, NodeKind, Relation, Space, Status};
-pub use paragraphs::{count_words, Block, Marks, Paragraph, Paragraphs, Run};
+pub use paragraphs::{count_words, Block, Highlight, Marks, Paragraph, Paragraphs, Run};
 pub use project::Project;
 pub use project::META_ORIGIN;

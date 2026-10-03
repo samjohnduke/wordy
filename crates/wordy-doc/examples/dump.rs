@@ -23,7 +23,7 @@ fn main() -> anyhow::Result<()> {
                     (m.underline, "u"),
                     (m.strike, "s"),
                     (m.smallcaps, "sc"),
-                    (m.highlight, "hl"),
+                    (m.highlight.is_some(), "hl"),
                 ] {
                     if on {
                         tags.push(t.to_string());

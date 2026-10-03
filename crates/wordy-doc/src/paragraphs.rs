@@ -55,6 +55,79 @@ impl Block {
     pub fn is_heading(self) -> bool {
         matches!(self, Block::H1 | Block::H2 | Block::H3)
     }
+
+    /// Menu label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Block::Paragraph => "Paragraph",
+            Block::H1 => "Heading 1",
+            Block::H2 => "Heading 2",
+            Block::H3 => "Heading 3",
+            Block::Quote => "Quote",
+            Block::Break => "Scene break",
+        }
+    }
+}
+
+/// Highlighter colour stored as the `highlight` mark's value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Highlight {
+    Yellow,
+    Green,
+    Blue,
+    Pink,
+    Grey,
+}
+
+impl Highlight {
+    pub const ALL: [Highlight; 5] = [
+        Highlight::Yellow,
+        Highlight::Green,
+        Highlight::Blue,
+        Highlight::Pink,
+        Highlight::Grey,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Highlight::Yellow => "yellow",
+            Highlight::Green => "green",
+            Highlight::Blue => "blue",
+            Highlight::Pink => "pink",
+            Highlight::Grey => "grey",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Highlight::Yellow => "Yellow",
+            Highlight::Green => "Green",
+            Highlight::Blue => "Blue",
+            Highlight::Pink => "Pink",
+            Highlight::Grey => "Grey",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Highlight> {
+        Highlight::ALL.into_iter().find(|h| h.as_str() == s)
+    }
+
+    /// The colour after this one when cycling; `None` after the last.
+    pub fn next(self) -> Option<Highlight> {
+        let i = Highlight::ALL.iter().position(|h| *h == self)?;
+        Highlight::ALL.get(i + 1).copied()
+    }
+
+    /// Hex colour (no `#`) used by the exporters.
+    pub fn hex(self) -> &'static str {
+        match self {
+            Highlight::Yellow => "fff2a8",
+            Highlight::Green => "c8f0c0",
+            Highlight::Blue => "c6e2ff",
+            Highlight::Pink => "ffcfe0",
+            Highlight::Grey => "dedede",
+        }
+    }
 }
 
 /// Inline formatting active on a run of text.
@@ -65,7 +138,7 @@ pub struct Marks {
     pub underline: bool,
     pub strike: bool,
     pub smallcaps: bool,
-    pub highlight: bool,
+    pub highlight: Option<Highlight>,
     /// Link target: a node id string or a title alias.
     pub link: Option<String>,
     /// Comment id (key into the project's `comments` map).
@@ -88,7 +161,14 @@ impl Marks {
                 "underline" => m.underline = truthy,
                 "strike" => m.strike = truthy,
                 "smallcaps" => m.smallcaps = truthy,
-                "highlight" => m.highlight = truthy,
+                "highlight" => {
+                    m.highlight = match v {
+                        // Pre-colour documents stored a bare `true`.
+                        LoroValue::Bool(true) => Some(Highlight::Yellow),
+                        LoroValue::String(s) => Highlight::parse(s),
+                        _ => None,
+                    }
+                }
                 "link" => m.link = v.as_string().map(|s| s.to_string()),
                 "comment" => m.comment = v.as_string().map(|s| s.to_string()),
                 _ => {}

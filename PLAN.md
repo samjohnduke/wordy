@@ -347,7 +347,7 @@ sidebar and editor) is **intentional** and stays.
 - **Accept:** restart the app and land exactly where you left off; drag a scene into another
   chapter and the Dashboard reflects it.
 
-### Phase 9 — Editor commands and discoverability
+### Phase 9 — Editor commands and discoverability (done 2026-10-03)
 - Formatting toolbar above the editor: block-type dropdown (Paragraph / H1 / H2 / H3 / Quote /
   Scene break), bold / italic / underline / strike / small caps, highlight colour menu, comment,
   link, clear formatting. Reflects the style at the caret.

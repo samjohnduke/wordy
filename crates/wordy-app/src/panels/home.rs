@@ -981,7 +981,10 @@ impl HomePanel {
             (
                 "Navigation",
                 vec![
-                    (j(&[m, "P"]), "Quick open: jump to any scene, entity, or note"),
+                    (
+                        j(&[m, "P"]),
+                        "Palette: jump to any scene, entity, or note; type > for commands",
+                    ),
                     (
                         j(&[m, "E"]),
                         "Focus the sidebar (arrows move, Enter opens, F2 renames, Delete trashes, Esc returns)",
@@ -993,7 +996,7 @@ impl HomePanel {
                         "Next / previous tab",
                     ),
                     (j(&[m, "W"]), "Close tab"),
-                    (j(&[m, shift, "H"]), "Home tab"),
+                    (j(&[m, "0"]), "Home tab"),
                     (j(&[m, shift, "F"]), "Search the project"),
                     (j(&[m, shift, "R"]), "Show / hide the reference pane"),
                 ],
@@ -1024,7 +1027,11 @@ impl HomePanel {
                     (j(&[m, "B"]) + " / I / U", "Bold / italic / underline"),
                     (j(&[m, shift, "X"]), "Strikethrough"),
                     (j(&[m, shift, "K"]), "Small caps"),
-                    (j(&[m, shift, "H"]) + " (in text)", "Highlight"),
+                    (
+                        j(&[m, shift, "H"]),
+                        "Highlight: cycles yellow, green, blue, pink, grey, off",
+                    ),
+                    (j(&[m, "\\"]), "Clear formatting"),
                     (j(&[m, alt, "0"]) + " / 1 / 2 / 3", "Paragraph / heading 1 / 2 / 3"),
                     (j(&[m, shift, "Q"]), "Quote"),
                     (j(&[m, shift, "Enter"]), "Scene break"),
