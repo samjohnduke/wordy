@@ -10,7 +10,7 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dock::Panel;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::progress::Progress;
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Disableable as _, Sizable as _};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Disableable as _, IconName, Sizable as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use wordy_doc::chrono::{Datelike as _, Duration, NaiveDate};
@@ -19,7 +19,7 @@ use wordy_doc::momentum::{date_str, parse_date, today};
 use wordy_doc::{storage, Goals, NodeKind, Space, Status, TreeID};
 use wordy_export::{CompileOptions, Format};
 
-use crate::app::SharedProject;
+use crate::app::{CloseTab, SharedProject};
 use crate::sync::{CloudStatus, CloudSyncStatus, SyncManager};
 
 pub enum HomeEvent {
@@ -116,6 +116,8 @@ pub struct HomePanel {
     _export_task: Option<Task<()>>,
     sync_name: Entity<InputState>,
     sync_server: Entity<InputState>,
+    /// The only tab in the centre, so the tab bar needs its own close button.
+    sole_tab: bool,
     pub focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -247,6 +249,7 @@ impl HomePanel {
             _export_task: None,
             sync_name,
             sync_server,
+            sole_tab: false,
             focus: cx.focus_handle(),
             _subs: subs,
         }
@@ -1602,9 +1605,34 @@ impl Focusable for HomePanel {
     }
 }
 
+impl HomePanel {
+    /// Told by the workspace: this is the only tab in the centre.
+    pub fn set_sole_tab(&mut self, sole: bool, cx: &mut Context<Self>) {
+        if self.sole_tab != sole {
+            self.sole_tab = sole;
+            cx.notify();
+        }
+    }
+}
+
 impl Panel for HomePanel {
     fn tab_name(&self, _: &App) -> Option<SharedString> {
         Some("Home".into())
+    }
+
+    /// The dock draws no close button on a lone tab, since it will not empty
+    /// itself through one. The app allows an empty centre, so the sole tab
+    /// offers its own close at the end of the tab bar.
+    fn title_suffix(&mut self, _: &mut Window, _: &mut Context<Self>) -> Option<impl IntoElement> {
+        self.sole_tab.then(|| {
+            Button::new("close-sole-tab")
+                .icon(IconName::Close)
+                .xsmall()
+                .ghost()
+                .tab_stop(false)
+                .tooltip("Close tab")
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(CloseTab), cx))
+        })
     }
 
     /// The panel draws its own header, so the extra gap the tab group adds

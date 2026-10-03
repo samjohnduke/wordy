@@ -670,4 +670,8 @@ palette's `match_rank`, up/down/Enter or click opening the hit the way the palet
 (`Workspace::jump_to`). `WordyDockRenderer` wraps gpui-component's `DockSkin`, delegates
 every hook, and in `center_frame` overlays the view while `EmptyCenter::shown` is set;
 the workspace sets that flag from `layout_changed` (no editors and no Home) and focuses
-the box whenever the last tab closes or there is nothing else to focus.
+the box whenever the last tab closes or there is nothing else to focus. The dock itself
+never draws a close button on a lone tab (gpui-base refuses to empty a group through
+its X), so `EditorPanel` and `HomePanel` carry a `sole_tab` flag the workspace sets from
+`layout_changed`, and while it is set their `title_suffix` puts a close button at the end
+of the tab bar that dispatches `CloseTab`.

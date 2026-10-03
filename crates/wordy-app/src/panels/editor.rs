@@ -18,7 +18,7 @@ use wordy_editor::{
 };
 use wordy_export::{SnippetOptions, SnippetSize};
 
-use crate::app::{CloseFind, Find, FindNext, FindPrev, Replace, SharedProject, EDITOR_PANEL_CONTEXT};
+use crate::app::{CloseFind, CloseTab, Find, FindNext, FindPrev, Replace, SharedProject, EDITOR_PANEL_CONTEXT};
 
 pub enum EditorPanelEvent {
     /// The body changed.
@@ -64,6 +64,8 @@ pub struct EditorPanel {
     _notice_task: Option<Task<()>>,
     /// Focus mode hides the meta bar and dims paragraphs away from the caret.
     focus_mode: bool,
+    /// The only tab in the centre, so the tab bar needs its own close button.
+    sole_tab: bool,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -155,6 +157,7 @@ impl EditorPanel {
             notice: None,
             _notice_task: None,
             focus_mode: false,
+            sole_tab: false,
             focus: cx.focus_handle(),
             _subs: subs,
         }
@@ -785,6 +788,14 @@ impl EditorPanel {
         self.editor.as_ref()
     }
 
+    /// Told by the workspace: this is the only tab in the centre.
+    pub fn set_sole_tab(&mut self, sole: bool, cx: &mut Context<Self>) {
+        if self.sole_tab != sole {
+            self.sole_tab = sole;
+            cx.notify();
+        }
+    }
+
     pub fn word_count(&self, cx: &App) -> usize {
         self.editor.as_ref().map(|e| e.read(cx).word_count()).unwrap_or(0)
     }
@@ -1035,6 +1046,21 @@ impl Focusable for EditorPanel {
 impl Panel for EditorPanel {
     fn tab_name(&self, _: &App) -> Option<SharedString> {
         Some(self.title())
+    }
+
+    /// The dock draws no close button on a lone tab, since it will not empty
+    /// itself through one. The app allows an empty centre, so the sole tab
+    /// offers its own close at the end of the tab bar.
+    fn title_suffix(&mut self, _: &mut Window, _: &mut Context<Self>) -> Option<impl IntoElement> {
+        self.sole_tab.then(|| {
+            Button::new("close-sole-tab")
+                .icon(IconName::Close)
+                .xsmall()
+                .ghost()
+                .tab_stop(false)
+                .tooltip("Close tab")
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(CloseTab), cx))
+        })
     }
 
     /// The panel draws its own header, so the extra gap the tab group adds

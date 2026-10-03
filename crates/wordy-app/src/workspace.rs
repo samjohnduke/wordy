@@ -406,6 +406,13 @@ impl Workspace {
         self.sheet.update(cx, |s, cx| s.show(active, cx));
         let none_open = self.editors.is_empty() && self.home.is_none();
         self.empty.update(cx, |e, cx| e.set_shown(none_open, cx));
+        let sole = self.tab_items().len() == 1;
+        for panel in self.editors.values() {
+            panel.update(cx, |p, cx| p.set_sole_tab(sole, cx));
+        }
+        if let Some(home) = &self.home {
+            home.update(cx, |h, cx| h.set_sole_tab(sole, cx));
+        }
         if self.restoring {
             return;
         }
