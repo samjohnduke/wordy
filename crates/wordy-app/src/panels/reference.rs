@@ -8,7 +8,7 @@ use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use wordy_doc::templates;
-use wordy_doc::{NodeKind, TreeID};
+use wordy_doc::{NodeKind, TreeID, Version};
 use wordy_editor::{EditorEvent, ProseEditor};
 
 use crate::app::SharedProject;
@@ -18,10 +18,14 @@ pub enum ReferenceEvent {
     Open(TreeID),
     /// Show another node here.
     Pin(TreeID),
+    /// Replace the node's body with this saved version.
+    RestoreVersion(Version),
 }
 
 struct Pinned {
     id: TreeID,
+    /// Set when showing a saved version of `id` instead of its live body.
+    version: Option<Version>,
     editor: Entity<ProseEditor>,
     _sub: Subscription,
 }
@@ -38,7 +42,35 @@ impl ReferencePanel {
     }
 
     pub fn pinned_id(&self) -> Option<TreeID> {
-        self.pinned.as_ref().map(|p| p.id)
+        self.pinned.as_ref().filter(|p| p.version.is_none()).map(|p| p.id)
+    }
+
+    /// Show a saved version of a body, read-only, with a Restore button.
+    pub fn pin_version(&mut self, v: Version, cx: &mut Context<Self>) {
+        let (doc, text) = match self.project.project.version_doc(&v) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::error!("version view: {e:#}");
+                return;
+            }
+        };
+        let editor = cx.new(|cx| ProseEditor::new(doc, text, cx));
+        editor.update(cx, |e, cx| {
+            e.spellcheck = false;
+            e.set_read_only(true);
+            e.set_link_targets(self.project.link_targets(), cx);
+        });
+        let sub = cx.subscribe(&editor, |_, _, ev: &EditorEvent, cx| {
+            if let EditorEvent::OpenLink { id, navigate } = ev {
+                if *navigate {
+                    cx.emit(ReferenceEvent::Open(*id));
+                } else {
+                    cx.emit(ReferenceEvent::Pin(*id));
+                }
+            }
+        });
+        self.pinned = Some(Pinned { id: v.node, version: Some(v), editor, _sub: sub });
+        cx.notify();
     }
 
     pub fn pin(&mut self, id: TreeID, cx: &mut Context<Self>) {
@@ -65,7 +97,7 @@ impl ReferencePanel {
                 }
             }
         });
-        self.pinned = Some(Pinned { id, editor, _sub: sub });
+        self.pinned = Some(Pinned { id, version: None, editor, _sub: sub });
         cx.notify();
     }
 
@@ -76,7 +108,7 @@ impl ReferencePanel {
 
     /// Re-read the pinned body and metadata (edited in another tab).
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        if let Some(p) = &self.pinned {
+        if let Some(p) = self.pinned.as_ref().filter(|p| p.version.is_none()) {
             p.editor.update(cx, |e, cx| e.reload(cx));
         }
         cx.notify();
@@ -102,6 +134,55 @@ impl ReferencePanel {
         let id = pinned.id;
         let muted = cx.theme().muted_foreground;
         let is_entity = node.kind() == NodeKind::Entity;
+
+        if let Some(v) = &pinned.version {
+            let when = wordy_doc::chrono::DateTime::from_timestamp_millis(v.created)
+                .map(|d| d.with_timezone(&wordy_doc::chrono::Local).format("%b %-d, %Y %H:%M").to_string())
+                .unwrap_or_default();
+            let words = pinned.editor.read(cx).word_count();
+            let restore = v.clone();
+            let header = v_flex()
+                .gap_1()
+                .px_3()
+                .pt_2()
+                .pb_2()
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .child(
+                    h_flex()
+                        .items_center()
+                        .justify_between()
+                        .child(div().font_semibold().text_base().child(node.title()))
+                        .child(
+                            h_flex()
+                                .gap_0p5()
+                                .child(
+                                    Button::new("ref-restore")
+                                        .primary()
+                                        .xsmall()
+                                        .label("Restore")
+                                        .tooltip("Replace the current body with this version (undoable)")
+                                        .on_click(cx.listener(move |_, _, _, cx| {
+                                            cx.emit(ReferenceEvent::RestoreVersion(restore.clone()))
+                                        })),
+                                )
+                                .child(
+                                    Button::new("ref-unpin")
+                                        .ghost()
+                                        .xsmall()
+                                        .label("×")
+                                        .tooltip("Close")
+                                        .on_click(cx.listener(|this, _, _, cx| this.unpin(cx))),
+                                ),
+                        ),
+                )
+                .child(div().text_xs().text_color(muted).child(format!("Version · {} · {when} · {words} words", v.label)));
+            return v_flex()
+                .size_full()
+                .child(header)
+                .child(div().flex_1().min_h_0().w_full().child(pinned.editor.clone()))
+                .into_any_element();
+        }
 
         let mut header = v_flex().gap_1().px_3().pt_2().pb_2().border_b_1().border_color(cx.theme().border).child(
             h_flex()

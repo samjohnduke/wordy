@@ -7,10 +7,12 @@
 
 mod editor;
 mod element;
+pub mod spell;
 mod style;
 mod typography;
 
 pub use editor::{CommentAnchor, EditorEvent, LinkTarget, MentionSpan, ProseEditor, RichClipboard, RichFragment, Selection};
+pub use spell::SpellState;
 pub use element::ProseElement;
 pub use style::EditorStyle;
 

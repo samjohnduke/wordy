@@ -4,11 +4,12 @@
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use wordy_doc::loro::LoroText;
-use wordy_doc::{NodeKind, TreeID};
+use wordy_doc::{NodeKind, Status, TreeID, Version};
 use wordy_editor::{EditorEvent, LinkTarget, ProseEditor};
 
 use crate::app::{CloseFind, Find, FindNext, FindPrev, Replace, SharedProject, EDITOR_PANEL_CONTEXT};
@@ -25,6 +26,12 @@ pub enum EditorPanelEvent {
     NamesChanged,
     /// Follow a link: show `id` in the reference pane, or open it when `navigate`.
     OpenLink { id: TreeID, navigate: bool },
+    /// A word was added to the custom dictionary.
+    DictionaryChanged(String),
+    /// Status, goal, tags, or versions changed (metadata, not the body).
+    MetaChanged,
+    /// Show a saved version read-only in the reference pane.
+    ViewVersion(Version),
 }
 
 struct FindBar {
@@ -34,11 +41,21 @@ struct FindBar {
     _subs: Vec<Subscription>,
 }
 
+/// The status / goal / tags / versions strip above a scene or note.
+struct MetaBar {
+    goal: Entity<InputState>,
+    tag: Entity<InputState>,
+    /// Inline label input while saving a version.
+    version_label: Option<(Entity<InputState>, Subscription)>,
+    _subs: Vec<Subscription>,
+}
+
 pub struct EditorPanel {
     project: SharedProject,
     node: Option<TreeID>,
     editor: Option<Entity<ProseEditor>>,
     sheet: Option<Entity<EntitySheet>>,
+    meta: Option<MetaBar>,
     find: Option<FindBar>,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
@@ -51,6 +68,7 @@ impl EditorPanel {
             node: None,
             editor: None,
             sheet: None,
+            meta: None,
             find: None,
             focus: cx.focus_handle(),
             _subs: Vec::new(),
@@ -70,6 +88,7 @@ impl EditorPanel {
             EditorEvent::OpenLink { id, navigate } => {
                 cx.emit(EditorPanelEvent::OpenLink { id: *id, navigate: *navigate })
             }
+            EditorEvent::DictionaryChanged(w) => cx.emit(EditorPanelEvent::DictionaryChanged(w.clone())),
             EditorEvent::SelectionChanged => {}
         })];
         let is_entity = project.project.node(id).map(|n| n.kind() == NodeKind::Entity).unwrap_or(false);
@@ -83,15 +102,314 @@ impl EditorPanel {
             }));
             sheet
         });
+        let meta = (!is_entity).then(|| {
+            let node = project.project.node(id).ok();
+            let goal_seed = node.as_ref().and_then(|n| n.word_goal()).map(|g| g.to_string()).unwrap_or_default();
+            let goal = cx.new(|cx| InputState::new(window, cx).default_value(goal_seed).placeholder("goal"));
+            let tag = cx.new(|cx| InputState::new(window, cx).placeholder("+ tag"));
+            let s1 = cx.subscribe_in(&goal, window, move |this, input, ev: &InputEvent, _, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    let v = input.read(cx).value().trim().to_string();
+                    let parsed = if v.is_empty() { None } else { v.parse::<i64>().ok() };
+                    if !v.is_empty() && parsed.is_none() {
+                        return;
+                    }
+                    if let Ok(node) = this.project.project.node(id) {
+                        if node.word_goal() != parsed {
+                            if let Err(e) = node.set_word_goal(parsed) {
+                                tracing::error!("word goal: {e:#}");
+                            }
+                            this.meta_changed(cx);
+                        }
+                    }
+                }
+            });
+            let s2 = cx.subscribe_in(&tag, window, move |this, input, ev: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } = ev {
+                    let v = input.read(cx).value().trim().trim_start_matches('#').to_lowercase();
+                    if !v.is_empty() {
+                        if let Ok(node) = this.project.project.node(id) {
+                            if let Err(e) = node.add_tag(&v) {
+                                tracing::error!("add tag: {e:#}");
+                            }
+                        }
+                        input.update(cx, |s, cx| s.set_value("", window, cx));
+                        this.meta_changed(cx);
+                    }
+                }
+            });
+            MetaBar { goal, tag, version_label: None, _subs: vec![s1, s2] }
+        });
         Self {
             project,
             node: Some(id),
             editor: Some(editor),
             sheet,
+            meta,
             find: None,
             focus: cx.focus_handle(),
             _subs: subs,
         }
+    }
+
+    /// Re-run the spellchecker (the custom dictionary changed).
+    pub fn rescan_spelling(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = &self.editor {
+            editor.update(cx, |e, cx| e.rescan_spelling(cx));
+        }
+    }
+
+    /// Select `len` code points at `offset` and scroll them into view.
+    pub fn reveal(&mut self, offset: usize, len: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = &self.editor {
+            editor.update(cx, |e, cx| e.select_range(offset..offset + len, cx));
+        }
+        self.focus_editor(window, cx);
+        cx.notify();
+    }
+
+    // ----- meta bar --------------------------------------------------------
+
+    fn meta_changed(&mut self, cx: &mut Context<Self>) {
+        self.project.project.commit_meta();
+        cx.emit(EditorPanelEvent::MetaChanged);
+        cx.notify();
+    }
+
+    fn set_status(&mut self, status: Status, cx: &mut Context<Self>) {
+        if let Some(node) = self.node.and_then(|id| self.project.project.node(id).ok()) {
+            if let Err(e) = node.set_status(status) {
+                tracing::error!("status: {e:#}");
+            }
+        }
+        self.meta_changed(cx);
+    }
+
+    fn remove_tag(&mut self, tag: &str, cx: &mut Context<Self>) {
+        if let Some(node) = self.node.and_then(|id| self.project.project.node(id).ok()) {
+            if let Err(e) = node.remove_tag(tag) {
+                tracing::error!("remove tag: {e:#}");
+            }
+        }
+        self.meta_changed(cx);
+    }
+
+    fn begin_save_version(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(meta) = self.meta.as_mut() else { return };
+        let seed = format!("Version {}", wordy_doc::chrono::Local::now().format("%b %-d %H:%M"));
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(seed).placeholder("Version label"));
+        let sub = cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, _, cx| {
+            if let InputEvent::PressEnter { .. } = ev {
+                let label = input.read(cx).value().trim().to_string();
+                this.save_version(&label, cx);
+            }
+        });
+        input.update(cx, |s, cx| {
+            s.focus(window, cx);
+            s.select_all(window, cx);
+        });
+        meta.version_label = Some((input, sub));
+        cx.notify();
+    }
+
+    fn save_version(&mut self, label: &str, cx: &mut Context<Self>) {
+        let Some(id) = self.node else { return };
+        let label = if label.is_empty() { "Version" } else { label };
+        match self.project.project.save_version(id, label) {
+            Ok(v) => tracing::info!("saved version {} ({})", v.label, v.id),
+            Err(e) => tracing::error!("save version: {e:#}"),
+        }
+        if let Some(meta) = self.meta.as_mut() {
+            meta.version_label = None;
+        }
+        self.meta_changed(cx);
+    }
+
+    fn cancel_save_version(&mut self, cx: &mut Context<Self>) {
+        if let Some(meta) = self.meta.as_mut() {
+            meta.version_label = None;
+        }
+        cx.notify();
+    }
+
+    /// Replace the body with a saved version, as an undoable edit of this editor.
+    pub fn restore_version(&mut self, v: &Version, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.clone() else { return };
+        let origin = editor.read(cx).origin().to_string();
+        if let Err(e) = self.project.project.restore_version(v, &origin) {
+            tracing::error!("restore version: {e:#}");
+            return;
+        }
+        editor.update(cx, |e, cx| e.reload(cx));
+        cx.emit(EditorPanelEvent::Edited);
+        cx.notify();
+    }
+
+    fn delete_version(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Err(e) = self.project.project.remove_version(id) {
+            tracing::error!("remove version: {e:#}");
+        }
+        self.meta_changed(cx);
+    }
+
+    fn render_meta_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let meta = self.meta.as_ref()?;
+        let id = self.node?;
+        let node = self.project.project.node(id).ok()?;
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let is_scene = node.kind() == NodeKind::Scene;
+        let weak = cx.weak_entity();
+
+        let mut bar = h_flex()
+            .w_full()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_1()
+            .text_xs()
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(theme.secondary.opacity(0.4));
+
+        if is_scene {
+            let current = node.status();
+            let w = weak.clone();
+            bar = bar.child(
+                Button::new("meta-status")
+                    .ghost()
+                    .xsmall()
+                    .label(current.label())
+                    .tooltip("Scene status")
+                    .dropdown_menu(move |menu, _, _| {
+                        let mut menu = menu;
+                        for st in Status::ALL {
+                            let w = w.clone();
+                            menu = menu.item(PopupMenuItem::new(st.label()).checked(st == current).on_click(
+                                move |_, _, cx| w.update(cx, |p, cx| p.set_status(st, cx)).ok().unwrap_or(()),
+                            ));
+                        }
+                        menu
+                    }),
+            );
+        }
+
+        // Word goal
+        let words = self.word_count(cx);
+        let goal_txt = match node.word_goal() {
+            Some(g) if g > 0 => format!("{words} / {g} · {}%", (words as i64 * 100 / g).min(999)),
+            _ => format!("{words} words"),
+        };
+        bar = bar
+            .child(div().text_color(muted).child(goal_txt))
+            .child(div().w(px(64.)).child(Input::new(&meta.goal).xsmall()));
+
+        // Tags
+        let mut tags = h_flex().gap_1().items_center().flex_wrap();
+        for (ix, tag) in node.tags().into_iter().enumerate() {
+            let t = tag.clone();
+            tags = tags.child(
+                h_flex()
+                    .id(ElementId::Name(format!("tag-{ix}").into()))
+                    .items_center()
+                    .gap_0p5()
+                    .px_1p5()
+                    .rounded_full()
+                    .bg(theme.accent)
+                    .text_color(theme.accent_foreground)
+                    .child(format!("#{tag}"))
+                    .child(
+                        div()
+                            .text_color(muted)
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(theme.foreground))
+                            .child("×"),
+                    )
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| this.remove_tag(&t, cx))),
+            );
+        }
+        tags = tags.child(div().w(px(80.)).child(Input::new(&meta.tag).xsmall()));
+        bar = bar.child(tags).child(div().flex_1());
+
+        // Versions
+        let versions = self.project.project.versions_for(id);
+        let count = versions.len();
+        let w = weak.clone();
+        bar = bar.child(
+            Button::new("meta-versions")
+                .ghost()
+                .xsmall()
+                .label(if count == 0 { "Versions".to_string() } else { format!("Versions ({count})") })
+                .tooltip("Saved versions of this body")
+                .dropdown_menu(move |menu, window, cx| {
+                    let w0 = w.clone();
+                    let mut menu = menu.item(PopupMenuItem::new("Save version…").on_click(move |_, window, cx| {
+                        w0.update(cx, |p, cx| p.begin_save_version(window, cx)).ok().unwrap_or(())
+                    }));
+                    if !versions.is_empty() {
+                        menu = menu.separator();
+                    }
+                    for v in versions.iter().cloned() {
+                        let when = wordy_doc::chrono::DateTime::from_timestamp_millis(v.created)
+                            .map(|d| d.with_timezone(&wordy_doc::chrono::Local).format("%b %-d, %H:%M").to_string())
+                            .unwrap_or_default();
+                        let label = format!("{} · {when}", v.label);
+                        let w = w.clone();
+                        menu = menu.submenu(label, window, cx, move |menu, _, _| {
+                            let (v1, v2, v3) = (v.clone(), v.clone(), v.clone());
+                            let (w1, w2, w3) = (w.clone(), w.clone(), w.clone());
+                            menu.item(PopupMenuItem::new("View").on_click(move |_, _, cx| {
+                                w1.update(cx, |_, cx| cx.emit(EditorPanelEvent::ViewVersion(v1.clone()))).ok().unwrap_or(())
+                            }))
+                            .item(PopupMenuItem::new("Restore").on_click(move |_, _, cx| {
+                                w2.update(cx, |p, cx| p.restore_version(&v2, cx)).ok().unwrap_or(())
+                            }))
+                            .separator()
+                            .item(PopupMenuItem::new("Delete").on_click(move |_, _, cx| {
+                                w3.update(cx, |p, cx| p.delete_version(&v3.id, cx)).ok().unwrap_or(())
+                            }))
+                        });
+                    }
+                    menu
+                }),
+        );
+
+        let mut out = v_flex().w_full().child(bar);
+        if let Some((input, _)) = &meta.version_label {
+            out = out.child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(div().text_color(muted).child("Save version as"))
+                    .child(div().w(px(260.)).child(Input::new(input).small()))
+                    .child(Button::new("ver-save").primary().xsmall().label("Save").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            let label = this
+                                .meta
+                                .as_ref()
+                                .and_then(|m| m.version_label.as_ref())
+                                .map(|(i, _)| i.read(cx).value().trim().to_string())
+                                .unwrap_or_default();
+                            this.save_version(&label, cx);
+                        },
+                    )))
+                    .child(
+                        Button::new("ver-cancel")
+                            .ghost()
+                            .xsmall()
+                            .label("Cancel")
+                            .on_click(cx.listener(|this, _, _, cx| this.cancel_save_version(cx))),
+                    ),
+            );
+        }
+        Some(out.into_any_element())
     }
 
     /// Push the current entity list into the editor (names changed somewhere).
@@ -330,6 +648,7 @@ impl Render for EditorPanel {
                 .on_action(cx.listener(|this, _: &FindPrev, _, cx| this.step(-1, cx)))
                 .on_action(cx.listener(|this, _: &CloseFind, window, cx| this.close_find(window, cx)))
                 .children(self.render_find_bar(cx))
+                .children(self.render_meta_bar(cx))
                 .children(self.sheet.clone())
                 .child(div().flex_1().min_h_0().w_full().child(editor))
                 .into_any_element(),

@@ -46,7 +46,7 @@ pub struct SidebarPanel {
 
 impl SidebarPanel {
     pub fn new(project: SharedProject, space: Space, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search project…"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search project… (#tag)"));
         let sub = cx.subscribe_in(&search, window, |this, input, ev: &InputEvent, _window, cx| {
             if matches!(ev, InputEvent::Change) {
                 this.query = input.read(cx).value().trim().to_string();
@@ -76,7 +76,40 @@ impl SidebarPanel {
         });
     }
 
+    /// `#tag` queries list every node carrying that tag.
+    fn render_tag_results(&self, tag: &str, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let muted = cx.theme().muted_foreground;
+        let ids = self.project.nodes_with_tag(tag);
+        if ids.is_empty() {
+            return vec![div().p_2().text_sm().text_color(muted).child(format!("Nothing tagged #{tag}.")).into_any_element()];
+        }
+        ids.into_iter()
+            .filter_map(|id| self.project.project.node(id).ok())
+            .enumerate()
+            .map(|(ix, node)| {
+                let id = node.id;
+                let tags = node.tags().iter().map(|t| format!("#{t}")).collect::<Vec<_>>().join(" ");
+                v_flex()
+                    .id(ElementId::Name(format!("tag-hit-{ix}").into()))
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .gap_0()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(cx.theme().secondary))
+                    .child(div().text_sm().font_semibold().child(node.title()))
+                    .child(div().text_xs().text_color(muted).child(tags))
+                    .on_click(cx.listener(move |this, _, _, cx| this.activate(id, cx)))
+                    .into_any_element()
+            })
+            .collect()
+    }
+
     fn render_search_results(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        if let Some(tag) = self.query.strip_prefix('#') {
+            return self.render_tag_results(&tag.trim().to_lowercase(), cx);
+        }
         let hits = self.project.search(&self.query, 50);
         let muted = cx.theme().muted_foreground;
         if hits.is_empty() {

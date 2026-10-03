@@ -1,0 +1,566 @@
+//! Home tab: dashboard (goals, streak, pace), reports (words per day),
+//! tasks, and the placeholder scan.
+
+use gpui_kit::base::StyledExt as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::chart::BarChart;
+use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::dock::Panel;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::progress::Progress;
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::*;
+use gpui_kit::*;
+use wordy_doc::chrono::{Duration, NaiveDate};
+use wordy_doc::momentum::{date_str, parse_date, today};
+use wordy_doc::{Goals, NodeKind, Space, Status, TreeID};
+
+use crate::app::SharedProject;
+
+pub enum HomeEvent {
+    /// Open a node in an editor tab.
+    Open(TreeID),
+    /// Open a node and select `len` code points at `offset`.
+    Reveal { id: TreeID, offset: usize, len: usize },
+    /// Goals or tasks changed; persist.
+    Changed,
+    /// The tab became the displayed one.
+    Activated,
+    /// The tab was closed.
+    Closed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Page {
+    Dashboard,
+    Reports,
+    Tasks,
+    Placeholders,
+}
+
+impl Page {
+    const ALL: [Page; 4] = [Page::Dashboard, Page::Reports, Page::Tasks, Page::Placeholders];
+    fn label(self) -> &'static str {
+        match self {
+            Page::Dashboard => "Dashboard",
+            Page::Reports => "Reports",
+            Page::Tasks => "Tasks",
+            Page::Placeholders => "Placeholders",
+        }
+    }
+    fn id(self) -> &'static str {
+        match self {
+            Page::Dashboard => "home-dashboard",
+            Page::Reports => "home-reports",
+            Page::Tasks => "home-tasks",
+            Page::Placeholders => "home-placeholders",
+        }
+    }
+}
+
+struct Day {
+    label: String,
+    words: f64,
+}
+
+pub struct HomePanel {
+    project: SharedProject,
+    page: Page,
+    daily: Entity<InputState>,
+    manuscript: Entity<InputState>,
+    deadline: Entity<InputState>,
+    task: Entity<InputState>,
+    pub focus: FocusHandle,
+    _subs: Vec<Subscription>,
+}
+
+impl HomePanel {
+    pub fn new(project: SharedProject, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let goals = project.project.goals();
+        let opt = |v: Option<i64>| v.map(|x| x.to_string()).unwrap_or_default();
+        let daily = cx.new(|cx| InputState::new(window, cx).default_value(opt(goals.daily)).placeholder("words / day"));
+        let manuscript =
+            cx.new(|cx| InputState::new(window, cx).default_value(opt(goals.manuscript)).placeholder("total words"));
+        let deadline = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(goals.deadline.map(date_str).unwrap_or_default())
+                .placeholder("YYYY-MM-DD")
+        });
+        let task = cx.new(|cx| InputState::new(window, cx).placeholder("Add a task and press Enter"));
+
+        let mut subs = Vec::new();
+        for input in [&daily, &manuscript, &deadline] {
+            subs.push(cx.subscribe_in(input, window, |this, _, ev: &InputEvent, _, cx| {
+                if matches!(ev, InputEvent::Change | InputEvent::PressEnter { .. }) {
+                    this.apply_goals(cx);
+                }
+            }));
+        }
+        subs.push(cx.subscribe_in(&task, window, |this, input, ev: &InputEvent, window, cx| {
+            if let InputEvent::PressEnter { .. } = ev {
+                let text = input.read(cx).value().trim().to_string();
+                if !text.is_empty() {
+                    if let Err(e) = this.project.project.add_task(&text, None) {
+                        tracing::error!("add task: {e:#}");
+                    }
+                    input.update(cx, |s, cx| s.set_value("", window, cx));
+                    this.changed(cx);
+                }
+            }
+        }));
+
+        Self { project, page: Page::Dashboard, daily, manuscript, deadline, task, focus: cx.focus_handle(), _subs: subs }
+    }
+
+    fn changed(&mut self, cx: &mut Context<Self>) {
+        self.project.project.commit_meta();
+        cx.emit(HomeEvent::Changed);
+        cx.notify();
+    }
+
+    /// Read the three goal inputs; ignore fields that do not parse yet.
+    fn apply_goals(&mut self, cx: &mut Context<Self>) {
+        let num = |s: &Entity<InputState>, cx: &App| -> Result<Option<i64>, ()> {
+            let v = s.read(cx).value().trim().to_string();
+            if v.is_empty() {
+                Ok(None)
+            } else {
+                v.parse::<i64>().map(|n| Some(n).filter(|n| *n > 0)).map_err(|_| ())
+            }
+        };
+        let current = self.project.project.goals();
+        let daily = num(&self.daily, cx).unwrap_or(current.daily);
+        let manuscript = num(&self.manuscript, cx).unwrap_or(current.manuscript);
+        let dl = self.deadline.read(cx).value().trim().to_string();
+        let deadline = if dl.is_empty() {
+            None
+        } else {
+            match parse_date(&dl) {
+                Some(d) => Some(d),
+                None => current.deadline,
+            }
+        };
+        let goals = Goals { daily, manuscript, deadline };
+        if goals != current {
+            if let Err(e) = self.project.project.set_goals(&goals) {
+                tracing::error!("set goals: {e:#}");
+            }
+            self.changed(cx);
+        }
+    }
+
+    fn set_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        self.page = page;
+        cx.notify();
+    }
+
+    fn section(title: &str, cx: &App) -> Div {
+        v_flex()
+            .w_full()
+            .gap_2()
+            .p_3()
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary.opacity(0.35))
+            .child(div().text_xs().font_semibold().text_color(cx.theme().muted_foreground).child(title.to_uppercase()))
+    }
+
+    fn render_dashboard(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = &self.project.project;
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let today = today();
+        let goals = p.goals();
+        let words_today = p.words_on(today);
+        let streak = p.streak(today);
+        let manuscript = p.manuscript_word_count();
+
+        let big = |n: String, label: &str| {
+            v_flex()
+                .gap_0()
+                .child(div().text_2xl().font_semibold().child(n))
+                .child(div().text_xs().text_color(muted).child(label.to_string()))
+        };
+
+        // ---- today ----
+        let mut today_box = Self::section("Today", cx).child(
+            h_flex()
+                .gap_6()
+                .child(big(format!("{words_today:+}"), "words today"))
+                .child(big(format!("{streak}"), if streak == 1 { "day streak" } else { "days streak" }))
+                .child(big(format!("{manuscript}"), "manuscript words")),
+        );
+        if let Some(d) = goals.daily {
+            let pct = ((words_today.max(0) as f32 / d as f32) * 100.).min(100.);
+            today_box = today_box.child(
+                v_flex()
+                    .gap_1()
+                    .child(div().text_xs().text_color(muted).child(format!("Daily goal: {words_today} / {d}")))
+                    .child(Progress::new("daily-progress").value(pct).color(theme.primary)),
+            );
+        }
+
+        // ---- manuscript goal ----
+        let mut goal_box = Self::section("Goals", cx);
+        if let Some(m) = goals.manuscript {
+            let pct = ((manuscript as f32 / m as f32) * 100.).min(100.);
+            goal_box = goal_box.child(
+                v_flex()
+                    .gap_1()
+                    .child(div().text_xs().text_color(muted).child(format!("Manuscript: {manuscript} / {m}")))
+                    .child(Progress::new("ms-progress").value(pct).color(theme.primary)),
+            );
+            if let Some(dl) = goals.deadline {
+                let days = (dl - today).num_days();
+                let line = match goals.required_pace(manuscript, today) {
+                    Some(pace) if days >= 0 => {
+                        format!("Deadline {} · {} days left · {pace} words/day needed", date_str(dl), days + 1)
+                    }
+                    _ if days < 0 => format!("Deadline {} passed", date_str(dl)),
+                    _ => format!("Deadline {} · goal reached", date_str(dl)),
+                };
+                goal_box = goal_box.child(div().text_sm().child(line));
+            }
+        }
+        let field = |label: &str, input: &Entity<InputState>, w: f32| {
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(div().w(px(90.)).text_xs().text_color(muted).child(label.to_string()))
+                .child(div().w(px(w)).child(Input::new(input).small()))
+        };
+        goal_box = goal_box
+            .child(field("Daily goal", &self.daily, 120.))
+            .child(field("Manuscript", &self.manuscript, 120.))
+            .child(field("Deadline", &self.deadline, 140.));
+
+        // ---- structure ----
+        let root = p.root(Space::Manuscript);
+        let mut rows = v_flex().gap_0().w_full();
+        let mut by_status = [0usize; 4];
+        for chapter in p.children(root) {
+            let Ok(node) = p.node(chapter) else { continue };
+            let mut words = 0usize;
+            let mut scenes = 0usize;
+            p.walk(chapter, &mut |_, n| {
+                if n.kind() == NodeKind::Scene {
+                    scenes += 1;
+                    if n.include_in_compile() {
+                        words += n.word_count();
+                    }
+                    let ix = Status::ALL.iter().position(|s| *s == n.status()).unwrap_or(1);
+                    by_status[ix] += 1;
+                }
+            });
+            if node.kind() == NodeKind::Scene {
+                // A top-level scene: walk() visits only descendants.
+                scenes = 1;
+                if node.include_in_compile() {
+                    words = node.word_count();
+                }
+                let ix = Status::ALL.iter().position(|s| *s == node.status()).unwrap_or(1);
+                by_status[ix] += 1;
+            }
+            let id = chapter;
+            rows = rows.child(
+                h_flex()
+                    .id(ElementId::Name(format!("dash-ch-{chapter}").into()))
+                    .w_full()
+                    .px_1()
+                    .py_0p5()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.secondary))
+                    .text_sm()
+                    .child(div().flex_1().child(node.title()))
+                    .child(div().w(px(70.)).text_color(muted).child(format!("{scenes} sc")))
+                    .child(div().w(px(80.)).text_right().child(format!("{words}")))
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(HomeEvent::Open(id)))),
+            );
+        }
+        let status_line = Status::ALL
+            .iter()
+            .zip(by_status)
+            .filter(|(_, n)| *n > 0)
+            .map(|(s, n)| format!("{n} {}", s.label().to_lowercase()))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let structure = Self::section("Manuscript", cx)
+            .child(div().text_xs().text_color(muted).child(if status_line.is_empty() {
+                "No scenes yet.".to_string()
+            } else {
+                status_line
+            }))
+            .child(rows);
+
+        v_flex().gap_3().w_full().child(today_box).child(goal_box).child(structure).into_any_element()
+    }
+
+    fn render_reports(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = &self.project.project;
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let today = today();
+        let sessions = p.sessions();
+        let mut days: Vec<Day> = Vec::new();
+        let mut total = 0i64;
+        let mut active = 0usize;
+        let mut seconds = 0i64;
+        for i in (0..30).rev() {
+            let d: NaiveDate = today - Duration::days(i);
+            let s = sessions.iter().find(|s| s.date == d);
+            let words = s.map(|s| s.words().max(0)).unwrap_or(0);
+            if let Some(s) = s {
+                seconds += s.seconds;
+            }
+            if words > 0 {
+                active += 1;
+            }
+            total += words;
+            days.push(Day { label: d.format("%-d").to_string(), words: words as f64 });
+        }
+        let avg = if active > 0 { total / active as i64 } else { 0 };
+        let best = sessions.iter().map(|s| s.words()).max().unwrap_or(0);
+
+        let chart = BarChart::new(days)
+            .id("words-per-day")
+            .band(|d: &Day| d.label.clone())
+            .value(|d: &Day| d.words)
+            .label_axis(true)
+            .value_axis(true)
+            .grid(true)
+            .tooltip_title(|d: &Day| format!("Day {}", d.label).into())
+            .tooltip_value(|_, v| format!("{v:.0} words").into());
+
+        let summary = h_flex()
+            .gap_6()
+            .text_sm()
+            .child(div().child(format!("{total} words in the last 30 days")))
+            .child(div().text_color(muted).child(format!("{active} active days · avg {avg} · best {best}")))
+            .child(div().text_color(muted).child(format!("{} h written", seconds / 3600)));
+
+        let mut table = v_flex().gap_0().w_full().text_sm();
+        for s in sessions.iter().rev().take(14) {
+            table = table.child(
+                h_flex()
+                    .w_full()
+                    .px_1()
+                    .py_0p5()
+                    .child(div().w(px(110.)).child(date_str(s.date)))
+                    .child(div().w(px(90.)).text_right().child(format!("{:+}", s.words())))
+                    .child(div().w(px(90.)).text_right().text_color(muted).child(format!("{} min", s.seconds / 60)))
+                    .child(div().flex_1().text_right().text_color(muted).child(format!("{}", s.words_end))),
+            );
+        }
+
+        v_flex()
+            .gap_3()
+            .w_full()
+            .child(
+                Self::section("Words per day (last 30 days)", cx)
+                    .child(summary)
+                    .child(div().w_full().h(px(220.)).child(chart)),
+            )
+            .child(
+                Self::section("Sessions", cx)
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .px_1()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(div().w(px(110.)).child("Date"))
+                            .child(div().w(px(90.)).text_right().child("Words"))
+                            .child(div().w(px(90.)).text_right().child("Time"))
+                            .child(div().flex_1().text_right().child("Manuscript")),
+                    )
+                    .child(table),
+            )
+            .into_any_element()
+    }
+
+    fn render_tasks(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = &self.project.project;
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let tasks = p.task_list();
+        let open = tasks.iter().filter(|t| !t.done).count();
+        let mut list = v_flex().gap_0p5().w_full();
+        for t in &tasks {
+            let id = t.id.clone();
+            let id2 = t.id.clone();
+            let done = t.done;
+            let node_title = t.node.and_then(|n| p.node(n).ok()).map(|n| n.title());
+            let node_id = t.node;
+            let weak = cx.weak_entity();
+            list = list.child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap_2()
+                    .px_1()
+                    .py_0p5()
+                    .rounded_sm()
+                    .hover(|s| s.bg(theme.secondary))
+                    .child(
+                        Checkbox::new(ElementId::Name(format!("task-{}", t.id).into()))
+                            .checked(done)
+                            .label(t.text.clone())
+                            .on_click(move |checked: &bool, _, cx| {
+                                let id = id.clone();
+                                let checked = *checked;
+                                weak.update(cx, move |this, cx| {
+                                    if let Err(e) = this.project.project.set_task_done(&id, checked) {
+                                        tracing::error!("task: {e:#}");
+                                    }
+                                    this.changed(cx);
+                                })
+                                .ok();
+                            }),
+                    )
+                    .children(node_title.map(|title| {
+                        div()
+                            .id(ElementId::Name(format!("task-node-{}", t.id).into()))
+                            .text_xs()
+                            .text_color(theme.primary)
+                            .cursor_pointer()
+                            .child(title)
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                if let Some(n) = node_id {
+                                    cx.emit(HomeEvent::Open(n));
+                                }
+                            }))
+                    }))
+                    .child(div().flex_1())
+                    .child(
+                        Button::new(ElementId::Name(format!("task-rm-{}", t.id).into()))
+                            .ghost()
+                            .xsmall()
+                            .label("×")
+                            .tooltip("Remove task")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Err(e) = this.project.project.remove_task(&id2) {
+                                    tracing::error!("remove task: {e:#}");
+                                }
+                                this.changed(cx);
+                            })),
+                    ),
+            );
+        }
+        if tasks.is_empty() {
+            list = list.child(div().text_sm().text_color(muted).child("No tasks yet."));
+        }
+        Self::section(&format!("Tasks · {open} open"), cx)
+            .child(div().w(px(360.)).child(Input::new(&self.task).small()))
+            .child(list)
+            .into_any_element()
+    }
+
+    fn render_placeholders(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = &self.project.project;
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let hits = p.placeholders();
+        let mut list = v_flex().gap_0p5().w_full();
+        let mut last: Option<TreeID> = None;
+        for (ix, h) in hits.iter().enumerate() {
+            if last != Some(h.node) {
+                list = list.child(div().mt_2().text_xs().font_semibold().text_color(muted).child(h.title.clone()));
+                last = Some(h.node);
+            }
+            let (id, offset, len) = (h.node, h.offset, h.marker.chars().count());
+            list = list.child(
+                h_flex()
+                    .id(ElementId::Name(format!("ph-{ix}").into()))
+                    .w_full()
+                    .items_center()
+                    .gap_2()
+                    .px_1()
+                    .py_0p5()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.secondary))
+                    .text_sm()
+                    .child(div().w(px(160.)).flex_shrink_0().font_semibold().child(h.marker.clone()))
+                    .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_color(muted).child(h.snippet.clone()))
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(HomeEvent::Reveal { id, offset, len }))),
+            );
+        }
+        if hits.is_empty() {
+            list = list.child(div().text_sm().text_color(muted).child(
+                "Nothing to fill in. Markers like [TODO], [TK], [FIX], [CHECK], [?] and TK / TBD / XXX are listed here.",
+            ));
+        }
+        Self::section(&format!("Placeholders · {}", hits.len()), cx).child(list).into_any_element()
+    }
+}
+
+impl gpui_kit::component::dock::BasePanel for HomePanel {
+    fn panel_name(&self) -> &'static str {
+        "Home"
+    }
+    fn closable(&self, _: &App) -> bool {
+        true
+    }
+    fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
+        if active {
+            cx.emit(HomeEvent::Activated);
+            cx.notify();
+        }
+    }
+    fn on_removed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(HomeEvent::Closed);
+    }
+}
+
+impl EventEmitter<gpui_kit::component::dock::PanelEvent> for HomePanel {}
+
+impl Focusable for HomePanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl Panel for HomePanel {
+    fn tab_name(&self, _: &App) -> Option<SharedString> {
+        Some("Home".into())
+    }
+}
+
+impl EventEmitter<HomeEvent> for HomePanel {}
+
+impl Render for HomePanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let page = self.page;
+        let tabs = h_flex().gap_1().px_3().py_2().border_b_1().border_color(cx.theme().border).children(
+            Page::ALL.into_iter().map(|p| {
+                Button::new(p.id())
+                    .ghost()
+                    .small()
+                    .label(p.label())
+                    .toggled(p == page)
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_page(p, cx)))
+            }),
+        );
+        let body = match page {
+            Page::Dashboard => self.render_dashboard(cx),
+            Page::Reports => self.render_reports(cx),
+            Page::Tasks => self.render_tasks(cx),
+            Page::Placeholders => self.render_placeholders(cx),
+        };
+        v_flex()
+            .size_full()
+            .track_focus(&self.focus)
+            .bg(cx.theme().background)
+            .child(tabs)
+            .child(
+                div()
+                    .id("home-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(div().max_w(px(820.)).w_full().mx_auto().p_4().child(body)),
+            )
+    }
+}

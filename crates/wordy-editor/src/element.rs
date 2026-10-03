@@ -127,6 +127,14 @@ impl FrameLayout {
     }
 }
 
+/// Why a span gets an extra underline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Underline {
+    Mention,
+    Ambiguous,
+    Spelling,
+}
+
 struct Palette {
     fg: Hsla,
     muted: Hsla,
@@ -143,6 +151,7 @@ struct Palette {
     accent: Hsla,
     mention: Hsla,
     ambiguous: Hsla,
+    spelling: Hsla,
 }
 
 impl Palette {
@@ -164,6 +173,7 @@ impl Palette {
             accent: t.primary,
             mention: t.primary.opacity(0.75),
             ambiguous: hsla(0.08, 0.9, 0.5, 0.95),
+            spelling: hsla(0.0, 0.85, 0.55, 0.95),
         }
     }
 }
@@ -242,7 +252,7 @@ impl ProseElement {
         pal: &Palette,
         active_comment: Option<&str>,
         show_resolved_comments: &dyn Fn(&str) -> bool,
-        mentions: &[(Range<usize>, bool)],
+        mentions: &[(Range<usize>, Underline)],
     ) -> (SharedString, Vec<TextRun>) {
         let family = style.font_family.clone();
         let base_weight = if para.block.is_heading() { FontWeight::BOLD } else { FontWeight::NORMAL };
@@ -306,8 +316,8 @@ impl ProseElement {
         (SharedString::from(para.text.clone()), runs)
     }
 
-    /// Split runs at mention boundaries and underline the mentioned spans.
-    fn decorate_mentions(runs: Vec<TextRun>, mentions: &[(Range<usize>, bool)], pal: &Palette) -> Vec<TextRun> {
+    /// Split runs at decoration boundaries and underline the decorated spans.
+    fn decorate_mentions(runs: Vec<TextRun>, mentions: &[(Range<usize>, Underline)], pal: &Palette) -> Vec<TextRun> {
         let mut cuts: Vec<usize> = mentions.iter().flat_map(|(r, _)| [r.start, r.end]).collect();
         cuts.sort_unstable();
         cuts.dedup();
@@ -330,13 +340,14 @@ impl ProseElement {
         let mut pos = 0usize;
         for run in &mut out {
             let r = pos..pos + run.len;
-            if let Some((_, ambiguous)) = mentions.iter().find(|(m, _)| m.start <= r.start && r.end <= m.end) {
+            if let Some((_, kind)) = mentions.iter().find(|(m, _)| m.start <= r.start && r.end <= m.end) {
                 if run.underline.is_none() {
-                    run.underline = Some(UnderlineStyle {
-                        thickness: px(1.),
-                        color: Some(if *ambiguous { pal.ambiguous } else { pal.mention }),
-                        wavy: *ambiguous,
-                    });
+                    let (color, wavy) = match kind {
+                        Underline::Mention => (pal.mention, false),
+                        Underline::Ambiguous => (pal.ambiguous, true),
+                        Underline::Spelling => (pal.spelling, true),
+                    };
+                    run.underline = Some(UnderlineStyle { thickness: px(1.), color: Some(color), wavy });
                 }
             }
             pos = r.end;
@@ -407,16 +418,31 @@ impl Element for ProseElement {
         };
         let paras = self.editor.read(cx).paragraphs().clone();
         let visible_comment = |id: &str| anchors.iter().any(|a| a.id == id);
-        // Mentions as byte ranges within their paragraph.
-        let mut para_mentions: Vec<Vec<(Range<usize>, bool)>> = vec![Vec::new(); paras.len()];
-        for m in self.editor.read(cx).mentions() {
-            let pos = paras.locate(m.range.start);
-            if let Some(p) = paras.get(pos.para) {
-                let end_cp = m.range.end.min(p.end_cp()).max(m.range.start);
-                let a = p.cp_to_byte(m.range.start - p.start_cp);
-                let b = p.cp_to_byte(end_cp - p.start_cp);
-                if b > a {
-                    para_mentions[pos.para].push((a..b, m.is_ambiguous()));
+        // Mentions and misspellings as byte ranges within their paragraph.
+        let mut para_mentions: Vec<Vec<(Range<usize>, Underline)>> = vec![Vec::new(); paras.len()];
+        {
+            let e = self.editor.read(cx);
+            let focused = e.focus.is_focused(window);
+            let spans = e
+                .mentions()
+                .iter()
+                .map(|m| (m.range.clone(), if m.is_ambiguous() { Underline::Ambiguous } else { Underline::Mention }))
+                .chain(
+                    e.misspellings
+                        .iter()
+                        // The word being typed is not flagged until the caret leaves it.
+                        .filter(|r| !(focused && r.start < head && head <= r.end))
+                        .map(|r| (r.clone(), Underline::Spelling)),
+                );
+            for (range, kind) in spans {
+                let pos = paras.locate(range.start);
+                if let Some(p) = paras.get(pos.para) {
+                    let end_cp = range.end.min(p.end_cp()).max(range.start);
+                    let a = p.cp_to_byte(range.start - p.start_cp);
+                    let b = p.cp_to_byte(end_cp - p.start_cp);
+                    if b > a {
+                        para_mentions[pos.para].push((a..b, kind));
+                    }
                 }
             }
         }
@@ -640,7 +666,16 @@ impl Element for ProseElement {
         let focus_for_down = focus.clone();
         let frame_for_down = frame_cell.clone();
         window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {
-            if !phase.bubble() || ev.button != MouseButton::Left || !hitbox.is_hovered(window) {
+            if !phase.bubble() || !hitbox.is_hovered(window) {
+                return;
+            }
+            if ev.button == MouseButton::Right {
+                window.focus(&focus_for_down, cx);
+                editor.update(cx, |e, cx| e.on_secondary_click(ev, cx));
+                cx.stop_propagation();
+                return;
+            }
+            if ev.button != MouseButton::Left {
                 return;
             }
             let card = frame_for_down

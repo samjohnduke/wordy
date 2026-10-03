@@ -15,7 +15,20 @@ use crate::workspace::Workspace;
 
 gpui_kit::actions!(
     wordy,
-    [Quit, ToggleTheme, Save, NewItem, Find, FindNext, FindPrev, Replace, CloseFind, ToggleReference, SearchProject]
+    [
+        Quit,
+        ToggleTheme,
+        Save,
+        NewItem,
+        Find,
+        FindNext,
+        FindPrev,
+        Replace,
+        CloseFind,
+        ToggleReference,
+        SearchProject,
+        ShowHome
+    ]
 );
 
 pub const EDITOR_PANEL_CONTEXT: &str = "EditorPanel";
@@ -100,6 +113,45 @@ impl ProjectHandle {
             Vec::new()
         })
     }
+
+    pub fn nodes_with_tag(&self, tag: &str) -> Vec<TreeID> {
+        self.index.borrow().nodes_with_tag(tag).unwrap_or_else(|e| {
+            tracing::error!("nodes_with_tag: {e:#}");
+            Vec::new()
+        })
+    }
+
+    /// The project's custom spelling dictionary, one word per line.
+    pub fn dictionary_path(&self) -> Option<PathBuf> {
+        self.dir().map(|d| d.join("dictionary.txt"))
+    }
+
+    pub fn load_dictionary(&self) -> Vec<String> {
+        let Some(path) = self.dictionary_path() else { return Vec::new() };
+        match std::fs::read_to_string(&path) {
+            Ok(s) => s.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => {
+                tracing::error!("read dictionary: {e:#}");
+                Vec::new()
+            }
+        }
+    }
+
+    pub fn append_dictionary_word(&self, word: &str) {
+        let Some(path) = self.dictionary_path() else { return };
+        let mut words = self.load_dictionary();
+        if words.iter().any(|w| w == word) {
+            return;
+        }
+        words.push(word.to_string());
+        words.sort_unstable_by_key(|w| w.to_lowercase());
+        let mut body = words.join("\n");
+        body.push('\n');
+        if let Err(e) = storage::write_atomic(&path, body.as_bytes()) {
+            tracing::error!("write dictionary: {e:#}");
+        }
+    }
 }
 
 pub type SharedProject = Rc<ProjectHandle>;
@@ -121,6 +173,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("escape", CloseFind, Some(EDITOR_PANEL_CONTEXT)),
         KeyBinding::new("secondary-shift-r", ToggleReference, None),
         KeyBinding::new("secondary-shift-f", SearchProject, None),
+        KeyBinding::new("secondary-shift-h", ShowHome, None),
     ]);
     Theme::sync_system_appearance(None, cx);
 }
@@ -149,6 +202,7 @@ pub fn open_main_window(cx: &mut App) {
         }
     };
     let shared: SharedProject = Rc::new(ProjectHandle::new(project));
+    wordy_editor::SpellState::set_custom_words(cx, shared.load_dictionary());
 
     let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
     let options = WindowOptions {

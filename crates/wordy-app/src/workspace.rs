@@ -2,7 +2,7 @@
 //! Owns the open editor tabs and the autosave timer.
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::base::dock::PanelId;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -11,14 +11,19 @@ use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, TitleBar, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use wordy_doc::{storage, Space, TreeID};
+use wordy_doc::momentum::today;
+use wordy_doc::{storage, Space, TreeID, Version};
+use wordy_editor::SpellState;
 
-use crate::app::{self, NewItem, Quit, Save, SearchProject, SharedProject, ToggleReference, ToggleTheme};
+use crate::app::{self, NewItem, Quit, Save, SearchProject, SharedProject, ShowHome, ToggleReference, ToggleTheme};
 use crate::panels::editor::{EditorPanel, EditorPanelEvent};
+use crate::panels::home::{HomeEvent, HomePanel};
 use crate::panels::reference::{ReferenceEvent, ReferencePanel};
 use crate::panels::sidebar::{SidebarEvent, SidebarPanel};
 
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(1500);
+/// Gaps between edits longer than this do not count as writing time.
+const SESSION_IDLE: Duration = Duration::from_secs(60);
 
 pub struct Workspace {
     project: SharedProject,
@@ -27,9 +32,13 @@ pub struct Workspace {
     sidebar: Entity<SidebarPanel>,
     reference: Entity<ReferencePanel>,
     placeholder: Option<Entity<EditorPanel>>,
+    home: Option<Entity<HomePanel>>,
     editors: HashMap<TreeID, Entity<EditorPanel>>,
     active: Option<TreeID>,
     dirty: bool,
+    /// Writing time since the last save, and when the last edit happened.
+    session_seconds: f64,
+    last_edit: Option<Instant>,
     /// Nodes edited since the last save; re-indexed on save.
     dirty_nodes: HashSet<TreeID>,
     last_saved: Option<String>,
@@ -79,10 +88,16 @@ impl Workspace {
         let ref_sub = cx.subscribe_in(&reference, window, |this, _, ev: &ReferenceEvent, window, cx| match ev {
             ReferenceEvent::Open(id) => this.open_node(*id, window, cx),
             ReferenceEvent::Pin(id) => this.pin_reference(*id, window, cx),
+            ReferenceEvent::RestoreVersion(v) => this.restore_version(v.clone(), window, cx),
         });
 
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+
+        // Today's writing session starts from the current manuscript count.
+        if let Err(e) = project.project.begin_session(today(), project.project.manuscript_word_count()) {
+            tracing::error!("begin session: {e:#}");
+        }
 
         Self {
             project,
@@ -91,9 +106,12 @@ impl Workspace {
             sidebar,
             reference,
             placeholder: Some(placeholder),
+            home: None,
             editors: HashMap::new(),
             active: None,
             dirty: false,
+            session_seconds: 0.,
+            last_edit: None,
             dirty_nodes: HashSet::new(),
             last_saved: None,
             save_task: None,
@@ -118,6 +136,82 @@ impl Workspace {
             self.open_node(id, window, cx);
         } else {
             self.pin_reference(id, window, cx);
+        }
+    }
+
+    /// Show a saved version in the reference pane.
+    fn view_version(&mut self, v: Version, window: &mut Window, cx: &mut Context<Self>) {
+        self.reference.update(cx, |r, cx| r.pin_version(v, cx));
+        self.dock.update(cx, |dock, cx| {
+            if !dock.is_dock_open(DockPlacement::Right) {
+                dock.toggle_dock(DockPlacement::Right, window, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    /// Restore a version into its node, opening the node's tab first so the
+    /// restore lands on that editor's undo stack.
+    fn restore_version(&mut self, v: Version, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_node(v.node, window, cx);
+        if let Some(panel) = self.editors.get(&v.node).cloned() {
+            panel.update(cx, |p, cx| p.restore_version(&v, cx));
+        }
+        self.reference.update(cx, |r, cx| r.unpin(cx));
+    }
+
+    /// Open (or focus) the Home tab.
+    fn show_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(home) = self.home.clone() {
+            let pid = PanelId::from(home.entity_id());
+            self.dock.update(cx, |dock, cx| dock.select_panel(pid, window, cx));
+            home.update(cx, |_, cx| cx.notify());
+            return;
+        }
+        let home = cx.new(|cx| HomePanel::new(self.project.clone(), window, cx));
+        let sub = cx.subscribe_in(&home, window, |this, _, ev: &HomeEvent, window, cx| match ev {
+            HomeEvent::Open(id) => this.open_node(*id, window, cx),
+            HomeEvent::Reveal { id, offset, len } => {
+                this.open_node(*id, window, cx);
+                if let Some(panel) = this.editors.get(id).cloned() {
+                    panel.update(cx, |p, cx| p.reveal(*offset, *len, window, cx));
+                }
+            }
+            HomeEvent::Changed => this.on_edited(cx),
+            HomeEvent::Activated => {
+                this.active = None;
+                cx.notify();
+            }
+            HomeEvent::Closed => {
+                this.home = None;
+                cx.notify();
+            }
+        });
+        self._subs.push(sub);
+        let placeholder = self.placeholder.take();
+        let pid = PanelId::from(home.entity_id());
+        self.dock.update(cx, |dock, cx| {
+            dock.add_panel_view(panel_handle(home.clone()), DockPlacement::Center, None, window, cx);
+            if let Some(ph) = placeholder {
+                dock.remove_panel(ph, window, cx);
+            }
+            dock.select_panel(pid, window, cx);
+        });
+        self.home = Some(home);
+        cx.notify();
+    }
+
+    fn on_show_home(&mut self, _: &ShowHome, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_home(window, cx);
+    }
+
+    /// A word was added to the custom dictionary: persist it and re-check
+    /// every open editor.
+    fn on_dictionary_changed(&mut self, word: &str, cx: &mut Context<Self>) {
+        self.project.append_dictionary_word(word);
+        let _ = SpellState::custom_words(cx);
+        for panel in self.editors.values() {
+            panel.update(cx, |p, cx| p.rescan_spelling(cx));
         }
     }
 
@@ -181,6 +275,13 @@ impl Workspace {
             }
             EditorPanelEvent::NamesChanged => this.on_tree_changed(cx),
             EditorPanelEvent::OpenLink { id, navigate } => this.follow_link(*id, *navigate, window, cx),
+            EditorPanelEvent::DictionaryChanged(w) => this.on_dictionary_changed(w, cx),
+            EditorPanelEvent::MetaChanged => {
+                this.dirty_nodes.insert(id);
+                this.sidebar.update(cx, |_, cx| cx.notify());
+                this.on_edited(cx);
+            }
+            EditorPanelEvent::ViewVersion(v) => this.view_version(v.clone(), window, cx),
             EditorPanelEvent::Activated => {
                 this.active = Some(id);
                 this.sidebar.update(cx, |s, cx| s.select(Some(id), cx));
@@ -238,6 +339,14 @@ impl Workspace {
     /// Mark dirty and (re)start the autosave timer.
     fn on_edited(&mut self, cx: &mut Context<Self>) {
         self.dirty = true;
+        let now = Instant::now();
+        if let Some(last) = self.last_edit {
+            let gap = now.duration_since(last);
+            if gap <= SESSION_IDLE {
+                self.session_seconds += gap.as_secs_f64();
+            }
+        }
+        self.last_edit = Some(now);
         self.save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(AUTOSAVE_DELAY).await;
             this.update(cx, |ws, cx| ws.save_now(cx)).ok();
@@ -247,6 +356,7 @@ impl Workspace {
 
     fn save_now(&mut self, cx: &mut Context<Self>) {
         self.save_task = None;
+        self.record_session();
         match self.project.project.save() {
             Ok(()) => {
                 self.dirty = false;
@@ -262,7 +372,30 @@ impl Workspace {
             }
             Err(e) => tracing::error!("save failed: {e:#}"),
         }
+        if let Some(home) = &self.home {
+            home.update(cx, |_, cx| cx.notify());
+        }
         cx.notify();
+    }
+
+    /// Fold the pending writing time and the current manuscript count into
+    /// today's session (starting a new one after midnight).
+    fn record_session(&mut self) {
+        let p = &self.project.project;
+        let day = today();
+        let words = p.manuscript_word_count();
+        if p.session(day).is_none() {
+            // A new day: yesterday's end count is where today starts.
+            let start = p.sessions().last().map(|s| s.words_end).unwrap_or(words);
+            if let Err(e) = p.begin_session(day, start) {
+                tracing::error!("begin session: {e:#}");
+            }
+        }
+        let secs = self.session_seconds.round() as i64;
+        self.session_seconds = 0.;
+        if let Err(e) = p.update_session(day, words, secs) {
+            tracing::error!("update session: {e:#}");
+        }
     }
 
     fn save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
@@ -303,6 +436,17 @@ impl Workspace {
             .bg(cx.theme().sidebar)
             .border_r_1()
             .border_color(cx.theme().border)
+            .child(
+                Button::new("rail-home")
+                    .ghost()
+                    .small()
+                    .w(px(48.))
+                    .label("⌂")
+                    .tooltip("Home: dashboard, reports, tasks, placeholders")
+                    .toggled(self.home.is_some() && self.active.is_none())
+                    .on_click(cx.listener(|this, _, window, cx| this.show_home(window, cx))),
+            )
+            .child(div().h(px(6.)))
             .children(spaces.into_iter().map(|(id, label, space)| {
                 let active = self.space == space;
                 Button::new(id)
@@ -332,6 +476,17 @@ impl Workspace {
             .map(|n| n.word_count())
             .sum();
         parts.push(format!("manuscript {manuscript}"));
+        let day = today();
+        let p = &self.project.project;
+        // Live today count: the saved session plus whatever is unsaved.
+        let start = p.session(day).map(|s| s.words_start).unwrap_or(p.manuscript_word_count());
+        let today_words = manuscript as i64 - start;
+        parts.push(format!("today {today_words:+}"));
+        let streak = p.streak(day);
+        if streak > 0 || today_words > 0 {
+            let streak = streak.max(if today_words > 0 { 1 } else { 0 });
+            parts.push(format!("streak {streak}"));
+        }
         parts.join("  ·  ")
     }
 }
@@ -372,6 +527,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_item))
             .on_action(cx.listener(Self::toggle_reference))
             .on_action(cx.listener(Self::search_project))
+            .on_action(cx.listener(Self::on_show_home))
             .on_action(|_: &ToggleTheme, window, cx| app::toggle_theme(window, cx))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)

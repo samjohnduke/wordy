@@ -5,6 +5,7 @@
 
 pub mod comments;
 pub mod mentions;
+pub mod momentum;
 pub mod node;
 pub mod templates;
 pub mod paragraphs;
@@ -19,5 +20,6 @@ pub use mentions::{EntityNames, Matcher, Mention};
 pub use node::{Attachment, Node, NodeKind, Relation, Space, Status};
 pub use comments::{Comment, Comments};
 pub use paragraphs::{count_words, Block, Marks, Paragraph, Paragraphs, Run};
+pub use momentum::{Goals, Placeholder, Session, Task, Version};
 pub use project::META_ORIGIN;
 pub use project::Project;

@@ -170,13 +170,13 @@ impl Project {
     pub fn comments(&self) -> Comments {
         Comments::new(self.doc.get_map(schema::COMMENTS))
     }
-    pub fn versions(&self) -> LoroMap {
+    pub fn versions_map(&self) -> LoroMap {
         self.doc.get_map(schema::VERSIONS)
     }
-    pub fn sessions(&self) -> LoroMap {
+    pub fn sessions_map(&self) -> LoroMap {
         self.doc.get_map(schema::SESSIONS)
     }
-    pub fn settings(&self) -> LoroMap {
+    pub fn settings_map(&self) -> LoroMap {
         self.project_map()
             .ensure_mergeable_map(schema::project::SETTINGS)
             .expect("settings map")

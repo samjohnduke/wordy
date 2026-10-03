@@ -17,6 +17,7 @@ use wordy_doc::{Block, Comments, Marks, Paragraphs, Run, META_ORIGIN};
 
 use crate::element::{FrameLayout, ProseElement};
 use crate::style::EditorStyle;
+use crate::spell::{self, SpellState};
 use crate::typography::smart_replace;
 use crate::*;
 
@@ -49,6 +50,8 @@ pub enum EditorEvent {
     /// A link or unique mention was clicked. `navigate` (secondary-click)
     /// asks for the target to open in the editor rather than the reference pane.
     OpenLink { id: TreeID, navigate: bool },
+    /// A word was added to the custom dictionary; persist it and re-check other editors.
+    DictionaryChanged(String),
 }
 
 /// An entity the editor can link to.
@@ -70,6 +73,13 @@ impl MentionSpan {
     pub fn is_ambiguous(&self) -> bool {
         self.candidates.len() > 1
     }
+}
+
+/// The right-click menu over a misspelled word.
+struct SpellPopup {
+    range: Range<usize>,
+    word: String,
+    suggestions: Vec<String>,
 }
 
 /// The floating entity picker for inserting or pinning a link.
@@ -185,6 +195,13 @@ pub struct ProseEditor {
     self_id: Option<TreeID>,
     pub(crate) mentions: Vec<MentionSpan>,
     link_picker: Option<LinkPicker>,
+    /// Misspelled words, in code points.
+    pub(crate) misspellings: Vec<Range<usize>>,
+    spell_popup: Option<SpellPopup>,
+    /// A task is polling for the dictionary to finish loading.
+    spell_waiting: bool,
+    /// Spellcheck on (off for read-only views).
+    pub spellcheck: bool,
 }
 
 impl EventEmitter<EditorEvent> for ProseEditor {}
@@ -270,8 +287,13 @@ impl ProseEditor {
             self_id: None,
             mentions: Vec::new(),
             link_picker: None,
+            misspellings: Vec::new(),
+            spell_popup: None,
+            spell_waiting: false,
+            spellcheck: true,
         };
         this.restart_blink(cx);
+        this.rescan_spelling(cx);
         this
     }
 
@@ -307,6 +329,7 @@ impl ProseEditor {
         self.matcher = Matcher::new(&entries);
         self.link_targets = targets;
         self.rescan_mentions();
+        self.rescan_spelling(cx);
         cx.notify();
     }
 
@@ -329,12 +352,8 @@ impl ProseEditor {
         self.scroll_to_cursor = false;
     }
 
-    fn rescan_mentions(&mut self) {
-        self.mentions.clear();
-        if self.matcher.is_empty() {
-            return;
-        }
-        // Byte → code point table for the whole text.
+    /// Byte offset → code point index for the whole text (one past the end included).
+    fn byte_to_cp_table(&self) -> Vec<usize> {
         let mut cp_at_byte: Vec<usize> = Vec::with_capacity(self.plain.len() + 1);
         for (i, (b, _)) in self.plain.char_indices().enumerate() {
             while cp_at_byte.len() < b {
@@ -346,6 +365,59 @@ impl ProseEditor {
         while cp_at_byte.len() <= self.plain.len() {
             cp_at_byte.push(total);
         }
+        cp_at_byte
+    }
+
+    /// Re-check every word. Cheap after the first pass: checks are memoized
+    /// in [`SpellState`]. Skips links and entity mentions.
+    pub fn rescan_spelling(&mut self, cx: &mut Context<Self>) {
+        self.misspellings.clear();
+        if !self.spellcheck || self.read_only {
+            return;
+        }
+        spell::ensure_loading();
+        if spell::dictionary().is_none() {
+            if !self.spell_waiting {
+                self.spell_waiting = true;
+                cx.spawn(async move |this, cx| {
+                    while spell::dictionary().is_none() {
+                        cx.background_executor().timer(Duration::from_millis(200)).await;
+                    }
+                    this.update(cx, |e, cx| {
+                        e.spell_waiting = false;
+                        e.rescan_spelling(cx);
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            return;
+        }
+        let cp_at_byte = self.byte_to_cp_table();
+        let links = self.link_ranges();
+        let mentions: Vec<Range<usize>> = self.mentions.iter().map(|m| m.range.clone()).collect();
+        let plain = std::mem::take(&mut self.plain);
+        for (br, word) in spell::checkable_words(&plain) {
+            let r = cp_at_byte[br.start]..cp_at_byte[br.end];
+            if links.iter().any(|(l, _)| l.start < r.end && r.start < l.end)
+                || mentions.iter().any(|m| m.start < r.end && r.start < m.end)
+            {
+                continue;
+            }
+            if SpellState::check(cx, word) == Some(false) {
+                self.misspellings.push(r);
+            }
+        }
+        self.plain = plain;
+    }
+
+    fn rescan_mentions(&mut self) {
+        self.mentions.clear();
+        if self.matcher.is_empty() {
+            return;
+        }
+        let cp_at_byte = self.byte_to_cp_table();
         let links = self.link_ranges();
         for m in self.matcher.scan_excluding(&self.plain, self.self_id) {
             let r = cp_at_byte[m.range.start]..cp_at_byte[m.range.end];
@@ -687,6 +759,7 @@ impl ProseEditor {
         self.pending = None;
         self.recompute_matches();
         self.rescan_mentions();
+        self.rescan_spelling(cx);
         self.scroll_to_cursor = true;
         self.restart_blink(cx);
         cx.notify();
@@ -1621,6 +1694,13 @@ impl ProseEditor {
         self.set_selection(Selection { anchor: 0, head: max }, cx);
     }
 
+    /// Select `r` (code points) and scroll it into view.
+    pub fn select_range(&mut self, r: Range<usize>, cx: &mut Context<Self>) {
+        self.set_selection(Selection { anchor: r.start, head: r.end }, cx);
+        self.scroll_to_cursor = true;
+        cx.notify();
+    }
+
     // ----- mouse -----------------------------------------------------------
 
     fn cp_for_window_point(&self, pt: Point<Pixels>) -> Option<usize> {
@@ -1632,6 +1712,7 @@ impl ProseEditor {
         let Some(cp) = self.cp_for_window_point(ev.position) else { return };
         self.comment_edit = None;
         self.link_picker = None;
+        self.spell_popup = None;
         self.goal_x = None;
         match ev.click_count {
             1 => {
@@ -1653,6 +1734,123 @@ impl ProseEditor {
             }
         }
         self.scroll_to_cursor = false;
+    }
+
+    /// Right click: open the spelling menu when over a misspelled word.
+    pub(crate) fn on_secondary_click(&mut self, ev: &MouseDownEvent, cx: &mut Context<Self>) {
+        self.spell_popup = None;
+        let Some(cp) = self.cp_for_window_point(ev.position) else { return };
+        let Some(r) = self.misspellings.iter().find(|r| r.start <= cp && cp < r.end).cloned() else {
+            cx.notify();
+            return;
+        };
+        let word: String = self.plain.chars().skip(r.start).take(r.end - r.start).collect();
+        let suggestions = SpellState::suggest(&word, 6);
+        if self.sel.range() != r {
+            self.sel = Selection::caret(cp);
+            cx.emit(EditorEvent::SelectionChanged);
+        }
+        self.scroll_to_cursor = false;
+        self.spell_popup = Some(SpellPopup { range: r, word, suggestions });
+        cx.notify();
+    }
+
+    pub fn close_spell_popup(&mut self, cx: &mut Context<Self>) {
+        if self.spell_popup.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn apply_suggestion(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(p) = self.spell_popup.take() else { return };
+        let Some(with) = p.suggestions.get(ix).cloned() else { return };
+        if self.read_only {
+            return;
+        }
+        let r = p.range;
+        self.begin_edit();
+        self.delete_cp_range(r.clone());
+        self.insert_at(r.start, &with);
+        self.sel = Selection::caret(r.start + with.chars().count());
+        self.commit(cx);
+    }
+
+    fn add_word_to_dictionary(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = self.spell_popup.take() else { return };
+        SpellState::add_custom_word(cx, &p.word);
+        cx.emit(EditorEvent::DictionaryChanged(p.word));
+        self.rescan_spelling(cx);
+        cx.notify();
+    }
+
+    fn ignore_word(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = self.spell_popup.take() else { return };
+        SpellState::ignore(cx, &p.word);
+        self.rescan_spelling(cx);
+        cx.notify();
+    }
+
+    fn render_spell_popup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let popup = self.spell_popup.as_ref()?;
+        let frame = self.frame.borrow();
+        let f = frame.as_ref()?;
+        let (pt, lh) = f.point_for_cp(popup.range.start, &self.paras)?;
+        let width = px(220.).min(f.wrap_width);
+        let left = (pt.x - f.bounds_origin.x).min(f.origin.x + f.wrap_width - width - f.bounds_origin.x).max(px(0.));
+        let top = pt.y + lh + px(4.) - f.bounds_origin.y;
+        let theme = cx.theme();
+        let (bg, border, muted, accent) = (theme.popover, theme.border, theme.muted_foreground, theme.primary);
+        let row = |id: ElementId, label: String, muted_text: bool| {
+            div()
+                .id(id)
+                .w_full()
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .cursor_pointer()
+                .text_sm()
+                .when(muted_text, |d| d.text_color(muted))
+                .hover(|d| d.bg(accent.opacity(0.1)))
+                .child(label)
+        };
+        let suggestions: Vec<AnyElement> = popup
+            .suggestions
+            .iter()
+            .enumerate()
+            .map(|(ix, w)| {
+                row(("spell-sug", ix).into(), w.clone(), false)
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |e, _, _, cx| e.apply_suggestion(ix, cx)))
+                    .into_any_element()
+            })
+            .collect();
+        Some(
+            v_flex()
+                .id("spell-popup")
+                .occlude()
+                .absolute()
+                .left(left)
+                .top(top)
+                .w(width)
+                .p_1()
+                .gap_0p5()
+                .rounded_md()
+                .bg(bg)
+                .border_1()
+                .border_color(border)
+                .shadow_md()
+                .when(suggestions.is_empty(), |d| d.child(div().px_2().py_1().text_xs().text_color(muted).child("No suggestions")))
+                .children(suggestions)
+                .child(div().h(px(1.)).w_full().bg(border))
+                .child(
+                    row("spell-add".into(), format!("Add “{}” to dictionary", popup.word), true)
+                        .on_mouse_down(MouseButton::Left, cx.listener(|e, _, _, cx| e.add_word_to_dictionary(cx))),
+                )
+                .child(
+                    row("spell-ignore".into(), "Ignore".to_string(), true)
+                        .on_mouse_down(MouseButton::Left, cx.listener(|e, _, _, cx| e.ignore_word(cx))),
+                )
+                .into_any_element(),
+        )
     }
 
     pub(crate) fn on_drag(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
@@ -2037,6 +2235,7 @@ impl Render for ProseEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let overlay = self.render_comment_overlay(cx);
         let picker = self.render_link_picker(cx);
+        let spell_popup = self.render_spell_popup(cx);
         div()
             .id("prose-editor")
             .key_context(KEY_CONTEXT)
@@ -2117,7 +2316,9 @@ impl Render for ProseEditor {
             .on_action(cx.listener(|e, _: &AddComment, window, cx| e.add_comment(window, cx)))
             .on_action(cx.listener(|e, _: &ToggleResolvedComments, _, cx| e.toggle_show_resolved(cx)))
             .on_action(cx.listener(|e, _: &Cancel, window, cx| {
-                if e.link_picker.is_some() {
+                if e.spell_popup.is_some() {
+                    e.close_spell_popup(cx);
+                } else if e.link_picker.is_some() {
                     e.close_link_picker(window, cx);
                 } else if e.comment_edit.is_some() {
                     e.end_comment_edit(window, cx);
@@ -2141,5 +2342,6 @@ impl Render for ProseEditor {
             .child(ProseElement::new(cx.entity().clone()))
             .children(overlay)
             .children(picker)
+            .children(spell_popup)
     }
 }

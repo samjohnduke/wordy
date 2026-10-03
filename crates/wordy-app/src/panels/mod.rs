@@ -1,4 +1,5 @@
 pub mod editor;
+pub mod home;
 pub mod reference;
 pub mod sheet;
 pub mod sidebar;

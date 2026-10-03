@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 gpui-kit.workspace = true
+spellbook = "0.4"
 tracing.workspace = true
 unicode-segmentation.workspace = true
 wordy-doc = { path = "../wordy-doc" }
