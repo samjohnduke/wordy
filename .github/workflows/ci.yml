@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Linux build dependencies (gpui: Wayland, X11, fonts, audio, Vulkan)
+      - name: Linux build dependencies for gpui (Wayland, X11, fonts, audio, Vulkan)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
