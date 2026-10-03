@@ -73,7 +73,9 @@ pub struct Marks {
 }
 
 impl Marks {
-    pub fn from_attributes<S: std::hash::BuildHasher>(attrs: Option<&HashMap<String, LoroValue, S>>) -> Marks {
+    pub fn from_attributes<S: std::hash::BuildHasher>(
+        attrs: Option<&HashMap<String, LoroValue, S>>,
+    ) -> Marks {
         let mut m = Marks::default();
         let Some(attrs) = attrs else { return m };
         for (k, v) in attrs {
@@ -153,7 +155,11 @@ impl Paragraph {
     /// (how a caret inherits formatting when typing).
     pub fn marks_before(&self, cp: usize) -> Marks {
         if cp == 0 {
-            return self.runs.first().map(|r| r.marks.clone()).unwrap_or_default();
+            return self
+                .runs
+                .first()
+                .map(|r| r.marks.clone())
+                .unwrap_or_default();
         }
         let mut acc = 0;
         for run in &self.runs {
@@ -163,7 +169,10 @@ impl Paragraph {
             }
             acc += n;
         }
-        self.runs.last().map(|r| r.marks.clone()).unwrap_or_default()
+        self.runs
+            .last()
+            .map(|r| r.marks.clone())
+            .unwrap_or_default()
     }
 
     pub fn word_count(&self) -> usize {
@@ -210,11 +219,16 @@ impl Paragraphs {
                     return;
                 }
             }
-            runs.push(Run { text: s.to_string(), marks: marks.clone() });
+            runs.push(Run {
+                text: s.to_string(),
+                marks: marks.clone(),
+            });
         };
 
         for item in delta {
-            let TextDelta::Insert { insert, attributes } = item else { continue };
+            let TextDelta::Insert { insert, attributes } = item else {
+                continue;
+            };
             let marks = Marks::from_attributes(attributes.as_ref());
             let mut rest = insert.as_str();
             while let Some(nl) = rest.find('\n') {
@@ -256,7 +270,10 @@ impl Paragraphs {
             });
         }
 
-        Paragraphs { paras, total_cp: cp }
+        Paragraphs {
+            paras,
+            total_cp: cp,
+        }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Paragraph> {
@@ -302,7 +319,11 @@ impl Paragraphs {
     /// that paragraph; offsets past the end clamp to the last paragraph.
     pub fn locate(&self, cp: usize) -> Position {
         if self.paras.is_empty() {
-            return Position { para: 0, byte: 0, cp: 0 };
+            return Position {
+                para: 0,
+                byte: 0,
+                cp: 0,
+            };
         }
         let ix = match self.paras.binary_search_by(|p| {
             if cp < p.start_cp {
@@ -318,7 +339,11 @@ impl Paragraphs {
         };
         let p = &self.paras[ix];
         let cp_in = cp.saturating_sub(p.start_cp).min(p.len_cp);
-        Position { para: ix, byte: p.cp_to_byte(cp_in), cp: cp_in }
+        Position {
+            para: ix,
+            byte: p.cp_to_byte(cp_in),
+            cp: cp_in,
+        }
     }
 
     /// Code-point offset of a (paragraph, byte offset) pair.
@@ -409,16 +434,30 @@ mod tests {
         let p = Paragraphs::from_text(&t);
         // 'é' is 2 bytes, 1 cp.
         let pos = p.locate(3);
-        assert_eq!(pos, Position { para: 0, byte: 4, cp: 3 });
+        assert_eq!(
+            pos,
+            Position {
+                para: 0,
+                byte: 4,
+                cp: 3
+            }
+        );
         // The newline position maps to end of paragraph 0.
         let pos = p.locate(5);
         assert_eq!(pos.para, 0);
         assert_eq!(pos.cp, 5);
         // Start of paragraph 1.
         let pos = p.locate(6);
-        assert_eq!(pos, Position { para: 1, byte: 0, cp: 0 });
+        assert_eq!(
+            pos,
+            Position {
+                para: 1,
+                byte: 0,
+                cp: 0
+            }
+        );
         assert_eq!(p.cp_at(1, 3), 6 + 2); // "wö" is 3 bytes, 2 cps
-        // Past the end clamps.
+                                          // Past the end clamps.
         let pos = p.locate(999);
         assert_eq!(pos.para, 1);
         assert_eq!(pos.cp, 5);
@@ -439,7 +478,14 @@ mod tests {
         let p = Paragraphs::from_text(&t);
         assert_eq!(p.len(), 1);
         assert_eq!(p.get(0).unwrap().text, "");
-        assert_eq!(p.locate(0), Position { para: 0, byte: 0, cp: 0 });
+        assert_eq!(
+            p.locate(0),
+            Position {
+                para: 0,
+                byte: 0,
+                cp: 0
+            }
+        );
     }
 
     #[test]

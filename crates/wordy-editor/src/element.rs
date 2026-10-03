@@ -207,7 +207,9 @@ fn paint_cp_range(
         if para.end_cp() <= r.start || para.start_cp >= r.end {
             continue;
         }
-        let Some(pl) = frame.paras.get(ix) else { continue };
+        let Some(pl) = frame.paras.get(ix) else {
+            continue;
+        };
         let para_top = frame.origin.y + pl.y;
         if para_top + pl.height < top || para_top > bottom {
             continue;
@@ -235,7 +237,10 @@ fn paint_cp_range(
                 x2 += newline_width;
             }
             let rect = Bounds {
-                origin: point(frame.origin.x + pl.indent + x1, para_top + pl.line_height * ri as f32),
+                origin: point(
+                    frame.origin.x + pl.indent + x1,
+                    para_top + pl.line_height * ri as f32,
+                ),
                 size: size(x2 - x1, pl.line_height),
             };
             window.paint_quad(fill(rect, color));
@@ -262,14 +267,24 @@ impl ProseElement {
         dim: bool,
     ) -> (SharedString, Vec<TextRun>) {
         let family = style.font_family.clone();
-        let base_weight = if para.block.is_heading() { FontWeight::BOLD } else { FontWeight::NORMAL };
+        let base_weight = if para.block.is_heading() {
+            FontWeight::BOLD
+        } else {
+            FontWeight::NORMAL
+        };
         let base_italic = para.block == Block::Quote;
 
         if para.block == Block::Break {
             let s: SharedString = "* * *".into();
             let run = TextRun {
                 len: s.len(),
-                font: Font { family, features: FontFeatures::default(), fallbacks: None, weight: FontWeight::NORMAL, style: FontStyle::Normal },
+                font: Font {
+                    family,
+                    features: FontFeatures::default(),
+                    fallbacks: None,
+                    weight: FontWeight::NORMAL,
+                    style: FontStyle::Normal,
+                },
                 color: pal.muted,
                 background_color: None,
                 underline: None,
@@ -281,7 +296,11 @@ impl ProseElement {
         let mut runs = Vec::with_capacity(para.runs.len());
         for r in &para.runs {
             let m = &r.marks;
-            let weight = if m.bold { FontWeight::BOLD } else { base_weight };
+            let weight = if m.bold {
+                FontWeight::BOLD
+            } else {
+                base_weight
+            };
             let italic = m.italic ^ base_italic;
             let color = if dim {
                 pal.dim
@@ -313,7 +332,11 @@ impl ProseElement {
                     features,
                     fallbacks: None,
                     weight,
-                    style: if italic { FontStyle::Italic } else { FontStyle::Normal },
+                    style: if italic {
+                        FontStyle::Italic
+                    } else {
+                        FontStyle::Normal
+                    },
                 },
                 color,
                 background_color,
@@ -322,7 +345,10 @@ impl ProseElement {
                     color: Some(color),
                     wavy: false,
                 }),
-                strikethrough: m.strike.then_some(StrikethroughStyle { thickness: px(1.), color: Some(color) }),
+                strikethrough: m.strike.then_some(StrikethroughStyle {
+                    thickness: px(1.),
+                    color: Some(color),
+                }),
             });
         }
         if !mentions.is_empty() {
@@ -332,8 +358,15 @@ impl ProseElement {
     }
 
     /// Split runs at decoration boundaries and underline the decorated spans.
-    fn decorate_mentions(runs: Vec<TextRun>, mentions: &[(Range<usize>, Underline)], pal: &Palette) -> Vec<TextRun> {
-        let mut cuts: Vec<usize> = mentions.iter().flat_map(|(r, _)| [r.start, r.end]).collect();
+    fn decorate_mentions(
+        runs: Vec<TextRun>,
+        mentions: &[(Range<usize>, Underline)],
+        pal: &Palette,
+    ) -> Vec<TextRun> {
+        let mut cuts: Vec<usize> = mentions
+            .iter()
+            .flat_map(|(r, _)| [r.start, r.end])
+            .collect();
         cuts.sort_unstable();
         cuts.dedup();
         let mut out = Vec::with_capacity(runs.len() + cuts.len());
@@ -355,14 +388,21 @@ impl ProseElement {
         let mut pos = 0usize;
         for run in &mut out {
             let r = pos..pos + run.len;
-            if let Some((_, kind)) = mentions.iter().find(|(m, _)| m.start <= r.start && r.end <= m.end) {
+            if let Some((_, kind)) = mentions
+                .iter()
+                .find(|(m, _)| m.start <= r.start && r.end <= m.end)
+            {
                 if run.underline.is_none() {
                     let (color, wavy) = match kind {
                         Underline::Mention => (pal.mention, false),
                         Underline::Ambiguous => (pal.ambiguous, true),
                         Underline::Spelling => (pal.spelling, true),
                     };
-                    run.underline = Some(UnderlineStyle { thickness: px(1.), color: Some(color), wavy });
+                    run.underline = Some(UnderlineStyle {
+                        thickness: px(1.),
+                        color: Some(color),
+                        wavy,
+                    });
                 }
             }
             pos = r.end;
@@ -420,7 +460,17 @@ impl Element for ProseElement {
         let started = std::time::Instant::now();
         let pal = Palette::from_theme(cx);
 
-        let (style, scroll_y, want_scroll, head, frame_cell, active_comment, anchors, typewriter, dim_inactive) = {
+        let (
+            style,
+            scroll_y,
+            want_scroll,
+            head,
+            frame_cell,
+            active_comment,
+            anchors,
+            typewriter,
+            dim_inactive,
+        ) = {
             let e = self.editor.read(cx);
             (
                 e.style.clone(),
@@ -437,7 +487,12 @@ impl Element for ProseElement {
         let paras = self.editor.read(cx).paragraphs_rc();
         // Typewriter mode needs half a view of slack above the text so the
         // first line can sit at the centre too.
-        let padding_top = style.padding_top + if typewriter { bounds.size.height * 0.5 } else { px(0.) };
+        let padding_top = style.padding_top
+            + if typewriter {
+                bounds.size.height * 0.5
+            } else {
+                px(0.)
+            };
         let caret_para = paras.locate(head).para;
         let visible_comment = |id: &str| anchors.iter().any(|a| a.id == id);
         // Mentions and misspellings as byte ranges within their paragraph.
@@ -448,7 +503,16 @@ impl Element for ProseElement {
             let spans = e
                 .mentions()
                 .iter()
-                .map(|m| (m.range.clone(), if m.is_ambiguous() { Underline::Ambiguous } else { Underline::Mention }))
+                .map(|m| {
+                    (
+                        m.range.clone(),
+                        if m.is_ambiguous() {
+                            Underline::Ambiguous
+                        } else {
+                            Underline::Mention
+                        },
+                    )
+                })
                 .chain(
                     e.misspellings
                         .iter()
@@ -504,7 +568,14 @@ impl Element for ProseElement {
                 Block::Quote => (px(32.), TextAlign::Left),
                 _ => (px(0.), TextAlign::Left),
             };
-            layouts.push(ParaLayout { y, height, line_height, indent, line, align });
+            layouts.push(ParaLayout {
+                y,
+                height,
+                line_height,
+                indent,
+                line,
+                align,
+            });
             y += height;
             prev = Some(para.block);
         }
@@ -530,7 +601,9 @@ impl Element for ProseElement {
                     let margin = pl.line_height * 1.5;
                     let view_h = bounds.size.height;
                     if typewriter {
-                        scroll_y = (caret_top + pl.line_height * 0.5 - view_h * 0.5).max(px(0.)).min(max_scroll);
+                        scroll_y = (caret_top + pl.line_height * 0.5 - view_h * 0.5)
+                            .max(px(0.))
+                            .min(max_scroll);
                     } else if caret_top - scroll_y < margin {
                         scroll_y = (caret_top - margin).max(px(0.));
                     } else if caret_bottom - scroll_y > view_h - margin {
@@ -566,11 +639,19 @@ impl Element for ProseElement {
                     .map(|(p, _)| p.y)
                     .unwrap_or(next_y);
                 let empty = a.text.trim().is_empty();
-                let text: SharedString = if empty { "Add a note…".into() } else { a.text.clone().into() };
+                let text: SharedString = if empty {
+                    "Add a note…".into()
+                } else {
+                    a.text.clone().into()
+                };
                 let run = TextRun {
                     len: text.len(),
                     font: ui_font.clone(),
-                    color: if empty || a.resolved { pal.muted } else { pal.fg },
+                    color: if empty || a.resolved {
+                        pal.muted
+                    } else {
+                        pal.fg
+                    },
                     background_color: None,
                     underline: None,
                     strikethrough: None,
@@ -585,7 +666,10 @@ impl Element for ProseElement {
                 let y = anchor_y.max(next_y);
                 cards.push(CommentCard {
                     id: a.id.clone(),
-                    bounds: Bounds { origin: point(card_x, y), size: size(card_w, h) },
+                    bounds: Bounds {
+                        origin: point(card_x, y),
+                        size: size(card_w, h),
+                    },
                     resolved: a.resolved,
                     empty,
                     line,
@@ -613,7 +697,10 @@ impl Element for ProseElement {
 
         let took = started.elapsed();
         if took > std::time::Duration::from_millis(8) {
-            tracing::debug!("slow prose prepaint: {took:?} for {} paragraphs", paras.len());
+            tracing::debug!(
+                "slow prose prepaint: {took:?} for {} paragraphs",
+                paras.len()
+            );
         }
 
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
@@ -632,7 +719,18 @@ impl Element for ProseElement {
     ) {
         let pal = Palette::from_theme(cx);
 
-        let (focus, sel, blink_on, frame_cell, paras, font_size, matches, match_ix, active_comment, editing) = {
+        let (
+            focus,
+            sel,
+            blink_on,
+            frame_cell,
+            paras,
+            font_size,
+            matches,
+            match_ix,
+            active_comment,
+            editing,
+        ) = {
             let e = self.editor.read(cx);
             (
                 e.focus.clone(),
@@ -649,7 +747,11 @@ impl Element for ProseElement {
         };
         let focused = focus.is_focused(window);
 
-        window.handle_input(&focus, ElementInputHandler::new(bounds, self.editor.clone()), cx);
+        window.handle_input(
+            &focus,
+            ElementInputHandler::new(bounds, self.editor.clone()),
+            cx,
+        );
         window.set_cursor_style(CursorStyle::IBeam, &prepaint.hitbox);
 
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
@@ -662,12 +764,26 @@ impl Element for ProseElement {
 
             // Search matches, then the selection on top.
             for (i, m) in matches.iter().enumerate() {
-                let color = if Some(i) == match_ix { pal.search_active } else { pal.search };
+                let color = if Some(i) == match_ix {
+                    pal.search_active
+                } else {
+                    pal.search
+                };
                 paint_cp_range(window, frame, &paras, m.clone(), color, nl_w, (top, bottom));
             }
-            let on_current_match = match_ix.and_then(|i| matches.get(i)).is_some_and(|m| *m == sel.range());
+            let on_current_match = match_ix
+                .and_then(|i| matches.get(i))
+                .is_some_and(|m| *m == sel.range());
             if !on_current_match {
-                paint_cp_range(window, frame, &paras, sel.range(), pal.selection, nl_w, (top, bottom));
+                paint_cp_range(
+                    window,
+                    frame,
+                    &paras,
+                    sel.range(),
+                    pal.selection,
+                    nl_w,
+                    (top, bottom),
+                );
             }
 
             // Text.
@@ -677,14 +793,21 @@ impl Element for ProseElement {
                     continue;
                 }
                 let origin = point(frame.origin.x + pl.indent, para_top);
-                let _ = pl.line.paint_background(origin, pl.line_height, pl.align, None, window, cx);
-                let _ = pl.line.paint(origin, pl.line_height, pl.align, None, window, cx);
+                let _ =
+                    pl.line
+                        .paint_background(origin, pl.line_height, pl.align, None, window, cx);
+                let _ = pl
+                    .line
+                    .paint(origin, pl.line_height, pl.align, None, window, cx);
             }
 
             // Caret.
             if focused && blink_on && !editing {
                 if let Some((pt, lh)) = frame.point_for_cp(sel.head, &paras) {
-                    let rect = Bounds { origin: point(pt.x - px(1.), pt.y), size: size(px(2.), lh) };
+                    let rect = Bounds {
+                        origin: point(pt.x - px(1.), pt.y),
+                        size: size(px(2.), lh),
+                    };
                     window.paint_quad(fill(rect, pal.caret));
                 }
             }
@@ -700,9 +823,16 @@ impl Element for ProseElement {
                     continue; // the overlay editor covers it
                 }
                 let border = if active { pal.accent } else { pal.card_border };
-                window.paint_quad(fill(b, pal.card_bg).corner_radii(px(6.)).border_widths(px(1.)).border_color(border));
+                window.paint_quad(
+                    fill(b, pal.card_bg)
+                        .corner_radii(px(6.))
+                        .border_widths(px(1.))
+                        .border_color(border),
+                );
                 let origin = point(b.origin.x + CARD_PAD, b.origin.y + CARD_PAD);
-                let _ = card.line.paint(origin, card.line_height, TextAlign::Left, None, window, cx);
+                let _ =
+                    card.line
+                        .paint(origin, card.line_height, TextAlign::Left, None, window, cx);
                 let _ = card.empty;
             }
         });
@@ -725,10 +855,12 @@ impl Element for ProseElement {
             if ev.button != MouseButton::Left {
                 return;
             }
-            let card = frame_for_down
-                .borrow()
-                .as_ref()
-                .and_then(|f| f.cards.iter().find(|c| c.bounds.contains(&ev.position)).map(|c| c.id.clone()));
+            let card = frame_for_down.borrow().as_ref().and_then(|f| {
+                f.cards
+                    .iter()
+                    .find(|c| c.bounds.contains(&ev.position))
+                    .map(|c| c.id.clone())
+            });
             match card {
                 Some(id) => editor.update(cx, |e, cx| e.begin_comment_edit(&id, window, cx)),
                 None => {

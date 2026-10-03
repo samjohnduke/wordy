@@ -27,7 +27,11 @@ pub enum HomeEvent {
     /// Open a node in an editor tab.
     Open(TreeID),
     /// Open a node and select `len` code points at `offset`.
-    Reveal { id: TreeID, offset: usize, len: usize },
+    Reveal {
+        id: TreeID,
+        offset: usize,
+        len: usize,
+    },
     /// Goals or tasks changed; persist.
     Changed,
     /// The tab became the displayed one.
@@ -124,18 +128,31 @@ pub struct HomePanel {
 }
 
 impl HomePanel {
-    pub fn new(project: SharedProject, sync: Entity<SyncManager>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        project: SharedProject,
+        sync: Entity<SyncManager>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let goals = project.project.goals();
         let opt = |v: Option<i64>| v.map(|x| x.to_string()).unwrap_or_default();
-        let daily = cx.new(|cx| InputState::new(window, cx).default_value(opt(goals.daily)).placeholder("words / day"));
-        let manuscript =
-            cx.new(|cx| InputState::new(window, cx).default_value(opt(goals.manuscript)).placeholder("total words"));
+        let daily = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(opt(goals.daily))
+                .placeholder("words / day")
+        });
+        let manuscript = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(opt(goals.manuscript))
+                .placeholder("total words")
+        });
         let deadline = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(goals.deadline.map(date_str).unwrap_or_default())
                 .placeholder("YYYY-MM-DD")
         });
-        let task = cx.new(|cx| InputState::new(window, cx).placeholder("Add a task and press Enter"));
+        let task =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Add a task and press Enter"));
         let settings = project.project.settings_map();
         let project_name = project.project.name();
         let export_title = cx.new(|cx| {
@@ -151,66 +168,94 @@ impl HomePanel {
 
         let mut subs = Vec::new();
         for input in [&daily, &manuscript, &deadline] {
-            subs.push(cx.subscribe_in(input, window, |this, _, ev: &InputEvent, _, cx| {
-                if matches!(ev, InputEvent::Change | InputEvent::PressEnter { .. }) {
-                    this.apply_goals(cx);
-                }
-            }));
+            subs.push(
+                cx.subscribe_in(input, window, |this, _, ev: &InputEvent, _, cx| {
+                    if matches!(ev, InputEvent::Change | InputEvent::PressEnter { .. }) {
+                        this.apply_goals(cx);
+                    }
+                }),
+            );
         }
-        subs.push(cx.subscribe_in(&task, window, |this, input, ev: &InputEvent, window, cx| {
-            if let InputEvent::PressEnter { .. } = ev {
-                let text = input.read(cx).value().trim().to_string();
-                if !text.is_empty() {
-                    if let Err(e) = this.project.project.add_task(&text, None) {
-                        tracing::error!("add task: {e:#}");
+        subs.push(
+            cx.subscribe_in(&task, window, |this, input, ev: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } = ev {
+                    let text = input.read(cx).value().trim().to_string();
+                    if !text.is_empty() {
+                        if let Err(e) = this.project.project.add_task(&text, None) {
+                            tracing::error!("add task: {e:#}");
+                        }
+                        input.update(cx, |s, cx| s.set_value("", window, cx));
+                        this.changed(cx);
                     }
-                    input.update(cx, |s, cx| s.set_value("", window, cx));
-                    this.changed(cx);
                 }
-            }
-        }));
+            }),
+        );
 
-        for (input, key) in [(&export_title, export_keys::TITLE), (&export_author, export_keys::AUTHOR)] {
-            subs.push(cx.subscribe_in(input, window, move |this, input, ev: &InputEvent, _, cx| {
-                if matches!(ev, InputEvent::Change) {
-                    let v = input.read(cx).value().trim().to_string();
-                    let map = this.project.project.settings_map();
-                    let r = if v.is_empty() { map.delete(key) } else { map.insert(key, v).map(|_| ()) };
-                    if let Err(e) = r {
-                        tracing::error!("export setting: {e:#}");
+        for (input, key) in [
+            (&export_title, export_keys::TITLE),
+            (&export_author, export_keys::AUTHOR),
+        ] {
+            subs.push(cx.subscribe_in(
+                input,
+                window,
+                move |this, input, ev: &InputEvent, _, cx| {
+                    if matches!(ev, InputEvent::Change) {
+                        let v = input.read(cx).value().trim().to_string();
+                        let map = this.project.project.settings_map();
+                        let r = if v.is_empty() {
+                            map.delete(key)
+                        } else {
+                            map.insert(key, v).map(|_| ())
+                        };
+                        if let Err(e) = r {
+                            tracing::error!("export setting: {e:#}");
+                        }
+                        this.changed(cx);
                     }
-                    this.changed(cx);
-                }
-            }));
+                },
+            ));
         }
 
         let (peer_name, pairing_code) = {
             let m = sync.read(cx);
             (m.config.peer_name.clone(), m.config.pairing_code.clone())
         };
-        let sync_name =
-            cx.new(|cx| InputState::new(window, cx).default_value(peer_name).placeholder("This machine's name"));
-        let sync_code = cx.new(|cx| {
-            InputState::new(window, cx).default_value(pairing_code).placeholder("Same code on both machines")
+        let sync_name = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(peer_name)
+                .placeholder("This machine's name")
         });
-        let sync_addr = cx.new(|cx| InputState::new(window, cx).placeholder("host:port, e.g. 192.168.1.20:40123"));
-        subs.push(cx.subscribe_in(&sync_name, window, |this, input, ev: &InputEvent, _, cx| {
-            if matches!(ev, InputEvent::Change) {
-                let v = input.read(cx).value().to_string();
-                this.sync.update(cx, |m, cx| m.set_peer_name(&v, cx));
-            }
-        }));
-        subs.push(cx.subscribe_in(&sync_code, window, |this, input, ev: &InputEvent, _, cx| {
-            if matches!(ev, InputEvent::Change) {
-                let v = input.read(cx).value().to_string();
-                this.sync.update(cx, |m, cx| m.set_pairing_code(&v, cx));
-            }
-        }));
-        subs.push(cx.subscribe_in(&sync_addr, window, |this, _, ev: &InputEvent, _, cx| {
-            if matches!(ev, InputEvent::PressEnter { .. }) {
-                this.sync_manual(cx);
-            }
-        }));
+        let sync_code = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(pairing_code)
+                .placeholder("Same code on both machines")
+        });
+        let sync_addr = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("host:port, e.g. 192.168.1.20:40123")
+        });
+        subs.push(
+            cx.subscribe_in(&sync_name, window, |this, input, ev: &InputEvent, _, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    let v = input.read(cx).value().to_string();
+                    this.sync.update(cx, |m, cx| m.set_peer_name(&v, cx));
+                }
+            }),
+        );
+        subs.push(
+            cx.subscribe_in(&sync_code, window, |this, input, ev: &InputEvent, _, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    let v = input.read(cx).value().to_string();
+                    this.sync.update(cx, |m, cx| m.set_pairing_code(&v, cx));
+                }
+            }),
+        );
+        subs.push(
+            cx.subscribe_in(&sync_addr, window, |this, _, ev: &InputEvent, _, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. }) {
+                    this.sync_manual(cx);
+                }
+            }),
+        );
         subs.push(cx.observe(&sync, |_, _, cx| cx.notify()));
 
         Self {
@@ -255,7 +300,13 @@ impl HomePanel {
             .unwrap_or_else(|| PathBuf::from("."))
     }
 
-    fn set_status(&mut self, message: String, path: Option<PathBuf>, ok: bool, cx: &mut Context<Self>) {
+    fn set_status(
+        &mut self,
+        message: String,
+        path: Option<PathBuf>,
+        ok: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.exporting = false;
         self.export_status = Some(ExportStatus { message, path, ok });
         cx.notify();
@@ -277,7 +328,11 @@ impl HomePanel {
             );
             return;
         }
-        let name = format!("{}.{}", wordy_export::file_stem(&compiled.title), format.extension());
+        let name = format!(
+            "{}.{}",
+            wordy_export::file_stem(&compiled.title),
+            format.extension()
+        );
         let rx = cx.prompt_for_new_path(&self.export_dir(), Some(&name));
         self.exporting = true;
         self.export_status = None;
@@ -295,7 +350,12 @@ impl HomePanel {
                 }
                 Ok(Err(e)) => {
                     this.update(cx, |t, cx| {
-                        t.set_status(format!("Could not open a save dialog: {e:#}"), None, false, cx)
+                        t.set_status(
+                            format!("Could not open a save dialog: {e:#}"),
+                            None,
+                            false,
+                            cx,
+                        )
                     })
                     .ok();
                     return;
@@ -312,7 +372,12 @@ impl HomePanel {
                 .await;
             this.update(cx, |t, cx| match result {
                 Ok(n) => t.set_status(
-                    format!("Exported {} ({}) to {}", format.label(), human_size(n), path.display()),
+                    format!(
+                        "Exported {} ({}) to {}",
+                        format.label(),
+                        human_size(n),
+                        path.display()
+                    ),
                     Some(path),
                     true,
                     cx,
@@ -329,15 +394,23 @@ impl HomePanel {
             return;
         }
         let Some(dir) = self.project.dir().cloned() else {
-            self.set_status("This project is not saved to disk yet.".into(), None, false, cx);
+            self.set_status(
+                "This project is not saved to disk yet.".into(),
+                None,
+                false,
+                cx,
+            );
             return;
         };
         // Flush pending edits so the archive is current.
         if let Err(e) = self.project.project.save() {
             tracing::error!("save before backup: {e:#}");
         }
-        let name =
-            format!("{}-{}.zip", wordy_export::file_stem(&self.project.project.name()), today().format("%Y-%m-%d"));
+        let name = format!(
+            "{}-{}.zip",
+            wordy_export::file_stem(&self.project.project.name()),
+            today().format("%Y-%m-%d")
+        );
         let rx = cx.prompt_for_new_path(&self.export_dir(), Some(&name));
         self.exporting = true;
         self.export_status = None;
@@ -347,7 +420,12 @@ impl HomePanel {
                 Ok(Ok(Some(path))) => path,
                 Ok(Err(e)) => {
                     this.update(cx, |t, cx| {
-                        t.set_status(format!("Could not open a save dialog: {e:#}"), None, false, cx)
+                        t.set_status(
+                            format!("Could not open a save dialog: {e:#}"),
+                            None,
+                            false,
+                            cx,
+                        )
                     })
                     .ok();
                     return;
@@ -362,10 +440,17 @@ impl HomePanel {
                 }
             };
             let out = path.clone();
-            let result =
-                cx.background_executor().spawn(async move { wordy_export::archive::zip_project(&dir, &out) }).await;
+            let result = cx
+                .background_executor()
+                .spawn(async move { wordy_export::archive::zip_project(&dir, &out) })
+                .await;
             this.update(cx, |t, cx| match result {
-                Ok(n) => t.set_status(format!("Backed up {n} files to {}", path.display()), Some(path), true, cx),
+                Ok(n) => t.set_status(
+                    format!("Backed up {n} files to {}", path.display()),
+                    Some(path),
+                    true,
+                    cx,
+                ),
                 Err(e) => t.set_status(format!("Backup failed: {e:#}"), None, false, cx),
             })
             .ok();
@@ -383,7 +468,13 @@ impl HomePanel {
             h_flex()
                 .items_center()
                 .gap_3()
-                .child(div().w(px(70.)).text_xs().text_color(muted).child(label.to_string()))
+                .child(
+                    div()
+                        .w(px(70.))
+                        .text_xs()
+                        .text_color(muted)
+                        .child(label.to_string()),
+                )
                 .child(div().w(px(360.)).child(Input::new(input).small()))
         };
         let manuscript = Self::section("Manuscript", cx)
@@ -444,9 +535,16 @@ impl HomePanel {
         }
         let mut status = v_flex().gap_2();
         if let Some(st) = &self.export_status {
-            let color = if st.ok { theme.foreground } else { theme.danger };
-            let mut row =
-                h_flex().items_center().gap_3().text_sm().child(div().text_color(color).child(st.message.clone()));
+            let color = if st.ok {
+                theme.foreground
+            } else {
+                theme.danger
+            };
+            let mut row = h_flex()
+                .items_center()
+                .gap_3()
+                .text_sm()
+                .child(div().text_color(color).child(st.message.clone()));
             if let Some(path) = st.path.clone() {
                 let p2 = path.clone();
                 row = row
@@ -468,7 +566,14 @@ impl HomePanel {
             status = status.child(row);
         }
 
-        v_flex().gap_3().w_full().child(manuscript).child(export_box).child(backup_box).child(status).into_any_element()
+        v_flex()
+            .gap_3()
+            .w_full()
+            .child(manuscript)
+            .child(export_box)
+            .child(backup_box)
+            .child(status)
+            .into_any_element()
     }
 
     /// Sync with the address typed into the manual field.
@@ -477,7 +582,10 @@ impl HomePanel {
         if text.is_empty() {
             return;
         }
-        let addr: Option<SocketAddr> = text.parse().ok().or_else(|| text.to_socket_addrs().ok()?.next());
+        let addr: Option<SocketAddr> = text
+            .parse()
+            .ok()
+            .or_else(|| text.to_socket_addrs().ok()?.next());
         match addr {
             Some(addr) => {
                 self.sync_addr_error = None;
@@ -504,11 +612,19 @@ impl HomePanel {
             h_flex()
                 .items_center()
                 .gap_3()
-                .child(div().w(px(90.)).text_xs().text_color(muted).child(label.to_string()))
+                .child(
+                    div()
+                        .w(px(90.))
+                        .text_xs()
+                        .text_color(muted)
+                        .child(label.to_string()),
+                )
                 .child(div().w(px(360.)).child(Input::new(input).small()))
         };
         let listening = match port {
-            Some(p) => format!("Listening on port {p}. Other copies of this project on the network appear below."),
+            Some(p) => format!(
+                "Listening on port {p}. Other copies of this project on the network appear below."
+            ),
             None => "The sync server could not start; see the log.".to_string(),
         };
         let this_machine = Self::section("This machine", cx)
@@ -535,8 +651,20 @@ impl HomePanel {
             let mut row = h_flex()
                 .items_center()
                 .gap_3()
-                .child(div().text_sm().font_semibold().w(px(200.)).child(name.clone()))
-                .child(div().text_xs().text_color(muted).w(px(180.)).child(addr.to_string()));
+                .child(
+                    div()
+                        .text_sm()
+                        .font_semibold()
+                        .w(px(200.))
+                        .child(name.clone()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .w(px(180.))
+                        .child(addr.to_string()),
+                );
             if same {
                 row = row.child(
                     Button::new(ElementId::Name(format!("sync-peer-{i}").into()))
@@ -557,7 +685,13 @@ impl HomePanel {
         let mut manual = h_flex()
             .items_center()
             .gap_3()
-            .child(div().w(px(90.)).text_xs().text_color(muted).child("By address"))
+            .child(
+                div()
+                    .w(px(90.))
+                    .text_xs()
+                    .text_color(muted)
+                    .child("By address"),
+            )
             .child(div().w(px(360.)).child(Input::new(&self.sync_addr).small()))
             .child(
                 Button::new("sync-manual")
@@ -574,9 +708,11 @@ impl HomePanel {
         let status_line: Option<(String, bool)> = match status {
             SyncStatus::Idle => None,
             SyncStatus::Busy(s) => Some((s, true)),
-            SyncStatus::Done { peer, summary, when } => {
-                Some((format!("Synced with {peer} at {when}: {summary}."), true))
-            }
+            SyncStatus::Done {
+                peer,
+                summary,
+                when,
+            } => Some((format!("Synced with {peer} at {when}: {summary}."), true)),
             SyncStatus::Failed(e) => Some((format!("Sync failed: {e}"), false)),
         };
         let mut status_box = v_flex().gap_2();
@@ -585,11 +721,21 @@ impl HomePanel {
             status_box = status_box.child(div().text_sm().text_color(color).child(text));
         }
         if !ready {
-            status_box = status_box
-                .child(div().text_xs().text_color(theme.danger).child("Enter a pairing code before syncing."));
+            status_box = status_box.child(
+                div()
+                    .text_xs()
+                    .text_color(theme.danger)
+                    .child("Enter a pairing code before syncing."),
+            );
         }
 
-        v_flex().gap_3().w_full().child(this_machine).child(peer_box).child(status_box).into_any_element()
+        v_flex()
+            .gap_3()
+            .w_full()
+            .child(this_machine)
+            .child(peer_box)
+            .child(status_box)
+            .into_any_element()
     }
 
     fn changed(&mut self, cx: &mut Context<Self>) {
@@ -605,7 +751,9 @@ impl HomePanel {
             if v.is_empty() {
                 Ok(None)
             } else {
-                v.parse::<i64>().map(|n| Some(n).filter(|n| *n > 0)).map_err(|_| ())
+                v.parse::<i64>()
+                    .map(|n| Some(n).filter(|n| *n > 0))
+                    .map_err(|_| ())
             }
         };
         let current = self.project.project.goals();
@@ -620,7 +768,11 @@ impl HomePanel {
                 None => current.deadline,
             }
         };
-        let goals = Goals { daily, manuscript, deadline };
+        let goals = Goals {
+            daily,
+            manuscript,
+            deadline,
+        };
         if goals != current {
             if let Err(e) = self.project.project.set_goals(&goals) {
                 tracing::error!("set goals: {e:#}");
@@ -643,7 +795,13 @@ impl HomePanel {
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().secondary.opacity(0.35))
-            .child(div().text_xs().font_semibold().text_color(cx.theme().muted_foreground).child(title.to_uppercase()))
+            .child(
+                div()
+                    .text_xs()
+                    .font_semibold()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(title.to_uppercase()),
+            )
     }
 
     fn render_dashboard(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -668,7 +826,14 @@ impl HomePanel {
             h_flex()
                 .gap_6()
                 .child(big(format!("{words_today:+}"), "words today"))
-                .child(big(format!("{streak}"), if streak == 1 { "day streak" } else { "days streak" }))
+                .child(big(
+                    format!("{streak}"),
+                    if streak == 1 {
+                        "day streak"
+                    } else {
+                        "days streak"
+                    },
+                ))
                 .child(big(format!("{manuscript}"), "manuscript words")),
         );
         if let Some(d) = goals.daily {
@@ -676,8 +841,17 @@ impl HomePanel {
             today_box = today_box.child(
                 v_flex()
                     .gap_1()
-                    .child(div().text_xs().text_color(muted).child(format!("Daily goal: {words_today} / {d}")))
-                    .child(Progress::new("daily-progress").value(pct).color(theme.primary)),
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("Daily goal: {words_today} / {d}")),
+                    )
+                    .child(
+                        Progress::new("daily-progress")
+                            .value(pct)
+                            .color(theme.primary),
+                    ),
             );
         }
 
@@ -688,14 +862,23 @@ impl HomePanel {
             goal_box = goal_box.child(
                 v_flex()
                     .gap_1()
-                    .child(div().text_xs().text_color(muted).child(format!("Manuscript: {manuscript} / {m}")))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("Manuscript: {manuscript} / {m}")),
+                    )
                     .child(Progress::new("ms-progress").value(pct).color(theme.primary)),
             );
             if let Some(dl) = goals.deadline {
                 let days = (dl - today).num_days();
                 let line = match goals.required_pace(manuscript, today) {
                     Some(pace) if days >= 0 => {
-                        format!("Deadline {} · {} days left · {pace} words/day needed", date_str(dl), days + 1)
+                        format!(
+                            "Deadline {} · {} days left · {pace} words/day needed",
+                            date_str(dl),
+                            days + 1
+                        )
                     }
                     _ if days < 0 => format!("Deadline {} passed", date_str(dl)),
                     _ => format!("Deadline {} · goal reached", date_str(dl)),
@@ -707,7 +890,13 @@ impl HomePanel {
             h_flex()
                 .gap_2()
                 .items_center()
-                .child(div().w(px(90.)).text_xs().text_color(muted).child(label.to_string()))
+                .child(
+                    div()
+                        .w(px(90.))
+                        .text_xs()
+                        .text_color(muted)
+                        .child(label.to_string()),
+                )
                 .child(div().w(px(w)).child(Input::new(input).small()))
         };
         goal_box = goal_box
@@ -729,7 +918,10 @@ impl HomePanel {
                     if n.include_in_compile() {
                         words += n.word_count();
                     }
-                    let ix = Status::ALL.iter().position(|s| *s == n.status()).unwrap_or(1);
+                    let ix = Status::ALL
+                        .iter()
+                        .position(|s| *s == n.status())
+                        .unwrap_or(1);
                     by_status[ix] += 1;
                 }
             });
@@ -739,7 +931,10 @@ impl HomePanel {
                 if node.include_in_compile() {
                     words = node.word_count();
                 }
-                let ix = Status::ALL.iter().position(|s| *s == node.status()).unwrap_or(1);
+                let ix = Status::ALL
+                    .iter()
+                    .position(|s| *s == node.status())
+                    .unwrap_or(1);
                 by_status[ix] += 1;
             }
             let id = chapter;
@@ -754,7 +949,12 @@ impl HomePanel {
                     .hover(|s| s.bg(theme.secondary))
                     .text_sm()
                     .child(div().flex_1().child(node.title()))
-                    .child(div().w(px(70.)).text_color(muted).child(format!("{scenes} sc")))
+                    .child(
+                        div()
+                            .w(px(70.))
+                            .text_color(muted)
+                            .child(format!("{scenes} sc")),
+                    )
                     .child(div().w(px(80.)).text_right().child(format!("{words}")))
                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(HomeEvent::Open(id)))),
             );
@@ -767,16 +967,25 @@ impl HomePanel {
             .collect::<Vec<_>>()
             .join(" · ");
         let structure = Self::section("Manuscript", cx)
-            .child(div().text_xs().text_color(muted).child(if status_line.is_empty() {
-                "No scenes yet.".to_string()
-            } else {
-                status_line
-            }))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(if status_line.is_empty() {
+                        "No scenes yet.".to_string()
+                    } else {
+                        status_line
+                    }),
+            )
             .child(rows);
 
         // ---- project file ----
         let stats = p.history_stats();
-        let backups = self.project.dir().map(|d| storage::backups(d).len()).unwrap_or(0);
+        let backups = self
+            .project
+            .dir()
+            .map(|d| storage::backups(d).len())
+            .unwrap_or(0);
         let mut summary = format!(
             "{} on disk · {} changes · {} operations · {} backup{} in snapshots/",
             human_size(stats.file_bytes as usize),
@@ -821,7 +1030,11 @@ impl HomePanel {
 
     fn compact_history(&mut self, cx: &mut Context<Self>) {
         self.compact_status = Some(match self.project.project.compact_history() {
-            Ok(s) => format!("Compacted: {} on disk, {} operations.", human_size(s.file_bytes as usize), s.ops),
+            Ok(s) => format!(
+                "Compacted: {} on disk, {} operations.",
+                human_size(s.file_bytes as usize),
+                s.ops
+            ),
             Err(e) => format!("Compaction failed: {e:#}"),
         });
         cx.notify();
@@ -829,7 +1042,11 @@ impl HomePanel {
 
     fn render_shortcuts(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let (m, alt, shift) = if cfg!(target_os = "macos") { ("⌘", "⌥", "⇧") } else { ("Ctrl", "Alt", "Shift") };
+        let (m, alt, shift) = if cfg!(target_os = "macos") {
+            ("⌘", "⌥", "⇧")
+        } else {
+            ("Ctrl", "Alt", "Shift")
+        };
         let j = |parts: &[&str]| parts.join(if cfg!(target_os = "macos") { "" } else { "+" });
         let groups: Vec<(&str, Vec<(String, &str)>)> = vec![
             (
@@ -879,11 +1096,21 @@ impl HomePanel {
                     .gap_3()
                     .items_start()
                     .text_sm()
-                    .child(div().w(px(200.)).flex_shrink_0().font_semibold().child(keys))
+                    .child(
+                        div()
+                            .w(px(200.))
+                            .flex_shrink_0()
+                            .font_semibold()
+                            .child(keys),
+                    )
                     .child(div().flex_1().min_w_0().text_color(muted).child(what))
             }))
         });
-        v_flex().gap_3().w_full().children(sections).into_any_element()
+        v_flex()
+            .gap_3()
+            .w_full()
+            .children(sections)
+            .into_any_element()
     }
 
     fn render_reports(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -907,7 +1134,10 @@ impl HomePanel {
                 active += 1;
             }
             total += words;
-            days.push(Day { label: d.format("%-d").to_string(), words: words as f64 });
+            days.push(Day {
+                label: d.format("%-d").to_string(),
+                words: words as f64,
+            });
         }
         let avg = if active > 0 { total / active as i64 } else { 0 };
         let best = sessions.iter().map(|s| s.words()).max().unwrap_or(0);
@@ -926,8 +1156,16 @@ impl HomePanel {
             .gap_6()
             .text_sm()
             .child(div().child(format!("{total} words in the last 30 days")))
-            .child(div().text_color(muted).child(format!("{active} active days · avg {avg} · best {best}")))
-            .child(div().text_color(muted).child(format!("{} h written", seconds / 3600)));
+            .child(
+                div()
+                    .text_color(muted)
+                    .child(format!("{active} active days · avg {avg} · best {best}")),
+            )
+            .child(
+                div()
+                    .text_color(muted)
+                    .child(format!("{} h written", seconds / 3600)),
+            );
 
         let mut table = v_flex().gap_0().w_full().text_sm();
         for s in sessions.iter().rev().take(14) {
@@ -937,9 +1175,26 @@ impl HomePanel {
                     .px_1()
                     .py_0p5()
                     .child(div().w(px(110.)).child(date_str(s.date)))
-                    .child(div().w(px(90.)).text_right().child(format!("{:+}", s.words())))
-                    .child(div().w(px(90.)).text_right().text_color(muted).child(format!("{} min", s.seconds / 60)))
-                    .child(div().flex_1().text_right().text_color(muted).child(format!("{}", s.words_end))),
+                    .child(
+                        div()
+                            .w(px(90.))
+                            .text_right()
+                            .child(format!("{:+}", s.words())),
+                    )
+                    .child(
+                        div()
+                            .w(px(90.))
+                            .text_right()
+                            .text_color(muted)
+                            .child(format!("{} min", s.seconds / 60)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_right()
+                            .text_color(muted)
+                            .child(format!("{}", s.words_end)),
+                    ),
             );
         }
 
@@ -1000,7 +1255,8 @@ impl HomePanel {
                                 let id = id.clone();
                                 let checked = *checked;
                                 weak.update(cx, move |this, cx| {
-                                    if let Err(e) = this.project.project.set_task_done(&id, checked) {
+                                    if let Err(e) = this.project.project.set_task_done(&id, checked)
+                                    {
                                         tracing::error!("task: {e:#}");
                                     }
                                     this.changed(cx);
@@ -1055,7 +1311,14 @@ impl HomePanel {
         let mut last: Option<TreeID> = None;
         for (ix, h) in hits.iter().enumerate() {
             if last != Some(h.node) {
-                list = list.child(div().mt_2().text_xs().font_semibold().text_color(muted).child(h.title.clone()));
+                list = list.child(
+                    div()
+                        .mt_2()
+                        .text_xs()
+                        .font_semibold()
+                        .text_color(muted)
+                        .child(h.title.clone()),
+                );
                 last = Some(h.node);
             }
             let (id, offset, len) = (h.node, h.offset, h.marker.chars().count());
@@ -1071,7 +1334,13 @@ impl HomePanel {
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.secondary))
                     .text_sm()
-                    .child(div().w(px(160.)).flex_shrink_0().font_semibold().child(h.marker.clone()))
+                    .child(
+                        div()
+                            .w(px(160.))
+                            .flex_shrink_0()
+                            .font_semibold()
+                            .child(h.marker.clone()),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -1082,7 +1351,9 @@ impl HomePanel {
                             .text_color(muted)
                             .child(h.snippet.clone()),
                     )
-                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(HomeEvent::Reveal { id, offset, len }))),
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(HomeEvent::Reveal { id, offset, len })
+                    })),
             );
         }
         if hits.is_empty() {
@@ -1090,7 +1361,9 @@ impl HomePanel {
                 "Nothing to fill in. Markers like [TODO], [TK], [FIX], [CHECK], [?] and TK / TBD / XXX are listed here.",
             ));
         }
-        Self::section(&format!("Placeholders · {}", hits.len()), cx).child(list).into_any_element()
+        Self::section(&format!("Placeholders · {}", hits.len()), cx)
+            .child(list)
+            .into_any_element()
     }
 }
 
@@ -1131,16 +1404,20 @@ impl EventEmitter<HomeEvent> for HomePanel {}
 impl Render for HomePanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let page = self.page;
-        let tabs = h_flex().gap_1().px_3().py_2().border_b_1().border_color(cx.theme().border).children(
-            Page::ALL.into_iter().map(|p| {
+        let tabs = h_flex()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .children(Page::ALL.into_iter().map(|p| {
                 Button::new(p.id())
                     .ghost()
                     .small()
                     .label(p.label())
                     .toggled(p == page)
                     .on_click(cx.listener(move |this, _, _, cx| this.set_page(p, cx)))
-            }),
-        );
+            }));
         let body = match page {
             Page::Dashboard => self.render_dashboard(cx),
             Page::Reports => self.render_reports(cx),
@@ -1150,14 +1427,19 @@ impl Render for HomePanel {
             Page::Sync => self.render_sync(cx),
             Page::Shortcuts => self.render_shortcuts(cx),
         };
-        v_flex().size_full().track_focus(&self.focus).bg(cx.theme().background).child(tabs).child(
-            div()
-                .id("home-scroll")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .child(div().max_w(px(820.)).w_full().mx_auto().p_4().child(body)),
-        )
+        v_flex()
+            .size_full()
+            .track_focus(&self.focus)
+            .bg(cx.theme().background)
+            .child(tabs)
+            .child(
+                div()
+                    .id("home-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(div().max_w(px(820.)).w_full().mx_auto().p_4().child(body)),
+            )
     }
 }
 

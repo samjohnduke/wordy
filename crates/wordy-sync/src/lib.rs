@@ -72,7 +72,11 @@ impl SyncOutcome {
     pub fn summary(&self) -> String {
         let mut parts = vec![format!("{} changes in, {} out", self.ops_in, self.ops_out)];
         if !self.files_in.is_empty() || !self.files_out.is_empty() {
-            parts.push(format!("{} files in, {} out", self.files_in.len(), self.files_out.len()));
+            parts.push(format!(
+                "{} files in, {} out",
+                self.files_in.len(),
+                self.files_out.len()
+            ));
         }
         if !self.new_words.is_empty() {
             parts.push(format!("{} new words", self.new_words.len()));

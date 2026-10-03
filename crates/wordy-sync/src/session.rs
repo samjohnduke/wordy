@@ -59,7 +59,9 @@ impl Session<'_> {
         read_msg(&mut self.r)
     }
     fn reject(&mut self, reason: &str) -> Result<()> {
-        let _ = self.send(&Msg::Reject { reason: reason.to_string() });
+        let _ = self.send(&Msg::Reject {
+            reason: reason.to_string(),
+        });
         bail!("{reason}")
     }
 
@@ -130,7 +132,14 @@ impl Session<'_> {
             Msg::Hello { .. } => Ok(()),
             other => bail!("expected Hello, got {other:?}"),
         })?;
-        let Msg::Hello { peer, nonce: their_nonce, .. } = theirs else { unreachable!() };
+        let Msg::Hello {
+            peer,
+            nonce: their_nonce,
+            ..
+        } = theirs
+        else {
+            unreachable!()
+        };
         outcome.peer = peer;
         let (client_nonce, server_nonce) = match self.role {
             Role::Initiator => (my_nonce.clone(), their_nonce.clone()),
@@ -156,26 +165,41 @@ impl Session<'_> {
 
         // 3. Versions, then the updates each side is missing.
         let doc = LoroDoc::new();
-        doc.import(&self.state.snapshot).map_err(|e| anyhow!("local snapshot: {e}"))?;
+        doc.import(&self.state.snapshot)
+            .map_err(|e| anyhow!("local snapshot: {e}"))?;
         let my_vv = doc.oplog_vv();
         let theirs = self.exchange(Msg::Version { vv: my_vv.encode() }, |m| match m {
             Msg::Version { .. } => Ok(()),
             other => bail!("expected Version, got {other:?}"),
         })?;
-        let Msg::Version { vv } = theirs else { unreachable!() };
-        let their_vv = VersionVector::decode(&vv).map_err(|e| anyhow!("peer version vector: {e}"))?;
+        let Msg::Version { vv } = theirs else {
+            unreachable!()
+        };
+        let their_vv =
+            VersionVector::decode(&vv).map_err(|e| anyhow!("peer version vector: {e}"))?;
         // An export with nothing new is still a few header bytes; send none.
         let ops_out = ops_between(&their_vv, &my_vv);
         let out = if ops_out == 0 {
             Vec::new()
         } else {
-            doc.export(ExportMode::updates(&their_vv)).map_err(|e| anyhow!("export updates: {e}"))?
+            doc.export(ExportMode::updates(&their_vv))
+                .map_err(|e| anyhow!("export updates: {e}"))?
         };
-        let (theirs, incoming) =
-            self.exchange_payload(Msg::Updates { len: out.len() as u64, ops: ops_out as u64 }, &out)?;
-        let Msg::Updates { len, .. } = theirs else { bail!("expected Updates, got {theirs:?}") };
+        let (theirs, incoming) = self.exchange_payload(
+            Msg::Updates {
+                len: out.len() as u64,
+                ops: ops_out as u64,
+            },
+            &out,
+        )?;
+        let Msg::Updates { len, .. } = theirs else {
+            bail!("expected Updates, got {theirs:?}")
+        };
         if len as usize != incoming.len() {
-            bail!("updates frame was {} bytes, header said {len}", incoming.len());
+            bail!(
+                "updates frame was {} bytes, header said {len}",
+                incoming.len()
+            );
         }
         outcome.bytes_out = out.len();
         outcome.bytes_in = incoming.len();
@@ -201,12 +225,20 @@ impl Session<'_> {
 
         // 4. Assets: swap manifests, ask for what is missing, copy both ways.
         let mine = manifest(&self.state.assets_dir)?;
-        let theirs = self.exchange(Msg::Manifest { files: mine.clone() }, |m| match m {
-            Msg::Manifest { .. } => Ok(()),
-            other => bail!("expected Manifest, got {other:?}"),
-        })?;
-        let Msg::Manifest { files: their_files } = theirs else { unreachable!() };
-        let mine_by_path: HashMap<&str, &FileEntry> = mine.iter().map(|f| (f.path.as_str(), f)).collect();
+        let theirs = self.exchange(
+            Msg::Manifest {
+                files: mine.clone(),
+            },
+            |m| match m {
+                Msg::Manifest { .. } => Ok(()),
+                other => bail!("expected Manifest, got {other:?}"),
+            },
+        )?;
+        let Msg::Manifest { files: their_files } = theirs else {
+            unreachable!()
+        };
+        let mine_by_path: HashMap<&str, &FileEntry> =
+            mine.iter().map(|f| (f.path.as_str(), f)).collect();
         let mut wants = Vec::new();
         let mut expected_hash: HashMap<String, String> = HashMap::new();
         for f in &their_files {
@@ -220,17 +252,30 @@ impl Session<'_> {
                     expected_hash.insert(f.path.clone(), f.sha256.clone());
                 }
                 Some(local) if local.sha256 != f.sha256 => {
-                    tracing::warn!("asset {} differs on both sides; keeping the local copy", f.path);
+                    tracing::warn!(
+                        "asset {} differs on both sides; keeping the local copy",
+                        f.path
+                    );
                 }
                 Some(_) => {}
             }
         }
-        let theirs = self.exchange(Msg::Want { paths: wants.clone() }, |m| match m {
-            Msg::Want { .. } => Ok(()),
-            other => bail!("expected Want, got {other:?}"),
-        })?;
-        let Msg::Want { paths: they_want } = theirs else { unreachable!() };
-        let they_want: Vec<String> = they_want.into_iter().filter(|p| mine_by_path.contains_key(p.as_str())).collect();
+        let theirs = self.exchange(
+            Msg::Want {
+                paths: wants.clone(),
+            },
+            |m| match m {
+                Msg::Want { .. } => Ok(()),
+                other => bail!("expected Want, got {other:?}"),
+            },
+        )?;
+        let Msg::Want { paths: they_want } = theirs else {
+            unreachable!()
+        };
+        let they_want: Vec<String> = they_want
+            .into_iter()
+            .filter(|p| mine_by_path.contains_key(p.as_str()))
+            .collect();
         match self.role {
             Role::Initiator => {
                 self.send_files(&they_want, &mut outcome)?;
@@ -243,13 +288,22 @@ impl Session<'_> {
         }
 
         // 5. Dictionary union.
-        let theirs = self.exchange(Msg::Dictionary { words: self.state.dictionary.clone() }, |m| match m {
-            Msg::Dictionary { .. } => Ok(()),
-            other => bail!("expected Dictionary, got {other:?}"),
-        })?;
-        let Msg::Dictionary { words } = theirs else { unreachable!() };
-        outcome.new_words =
-            words.into_iter().filter(|w| !w.trim().is_empty() && !self.state.dictionary.contains(w)).collect();
+        let theirs = self.exchange(
+            Msg::Dictionary {
+                words: self.state.dictionary.clone(),
+            },
+            |m| match m {
+                Msg::Dictionary { .. } => Ok(()),
+                other => bail!("expected Dictionary, got {other:?}"),
+            },
+        )?;
+        let Msg::Dictionary { words } = theirs else {
+            unreachable!()
+        };
+        outcome.new_words = words
+            .into_iter()
+            .filter(|w| !w.trim().is_empty() && !self.state.dictionary.contains(w))
+            .collect();
         outcome.new_words.sort_unstable();
         outcome.new_words.dedup();
 
@@ -264,15 +318,23 @@ impl Session<'_> {
     fn send_files(&mut self, paths: &[String], outcome: &mut SyncOutcome) -> Result<()> {
         for rel in paths {
             let path = self.state.assets_dir.join(rel);
-            let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-            self.send(&Msg::File { path: rel.clone(), len: bytes.len() as u64 })?;
+            let bytes =
+                std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            self.send(&Msg::File {
+                path: rel.clone(),
+                len: bytes.len() as u64,
+            })?;
             write_frame(&mut self.w, &bytes)?;
             outcome.files_out.push(rel.clone());
         }
         self.send(&Msg::FilesDone)
     }
 
-    fn receive_files(&mut self, expected: &HashMap<String, String>, outcome: &mut SyncOutcome) -> Result<()> {
+    fn receive_files(
+        &mut self,
+        expected: &HashMap<String, String>,
+        outcome: &mut SyncOutcome,
+    ) -> Result<()> {
         loop {
             match self.recv()? {
                 Msg::FilesDone => return Ok(()),
@@ -318,7 +380,9 @@ pub fn safe_relative(path: &str) -> bool {
     if path.is_empty() || path.contains('\\') || path.contains('\0') {
         return false;
     }
-    Path::new(path).components().all(|c| matches!(c, Component::Normal(_)))
+    Path::new(path)
+        .components()
+        .all(|c| matches!(c, Component::Normal(_)))
 }
 
 /// Every file under `dir` (recursively) with its size and hash.
@@ -336,14 +400,26 @@ pub fn manifest(dir: &Path) -> Result<Vec<FileEntry>> {
             if name.ends_with(".tmp") || name.starts_with('.') {
                 continue;
             }
-            let rel_path = if rel.as_os_str().is_empty() { PathBuf::from(name) } else { rel.join(name) };
+            let rel_path = if rel.as_os_str().is_empty() {
+                PathBuf::from(name)
+            } else {
+                rel.join(name)
+            };
             let ty = entry.file_type()?;
             if ty.is_dir() {
                 stack.push(rel_path);
             } else if ty.is_file() {
                 let bytes = std::fs::read(entry.path())?;
-                let path = rel_path.components().filter_map(|c| c.as_os_str().to_str()).collect::<Vec<_>>().join("/");
-                out.push(FileEntry { path, size: bytes.len() as u64, sha256: protocol::sha256_hex(&bytes) });
+                let path = rel_path
+                    .components()
+                    .filter_map(|c| c.as_os_str().to_str())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                out.push(FileEntry {
+                    path,
+                    size: bytes.len() as u64,
+                    sha256: protocol::sha256_hex(&bytes),
+                });
             }
         }
     }
@@ -367,8 +443,14 @@ mod tests {
 
     #[test]
     fn ops_between_counts_only_new() {
-        let a = VersionVector::from(vec![wordy_doc::loro::ID::new(1, 4), wordy_doc::loro::ID::new(2, 9)]);
-        let b = VersionVector::from(vec![wordy_doc::loro::ID::new(1, 9), wordy_doc::loro::ID::new(3, 2)]);
+        let a = VersionVector::from(vec![
+            wordy_doc::loro::ID::new(1, 4),
+            wordy_doc::loro::ID::new(2, 9),
+        ]);
+        let b = VersionVector::from(vec![
+            wordy_doc::loro::ID::new(1, 9),
+            wordy_doc::loro::ID::new(3, 2),
+        ]);
         // from a to b: peer 1 gained 5, peer 3 is new with 3 ops (counter 2 → 3 ops), peer 2 dropped (ignored).
         assert_eq!(ops_between(&a, &b), 5 + 3);
     }

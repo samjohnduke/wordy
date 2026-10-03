@@ -4,7 +4,9 @@
 
 use anyhow::{anyhow, Result};
 use chrono::{Days, NaiveDate};
-use loro::{ContainerTrait as _, Frontiers, LoroDoc, LoroMap, LoroText, LoroValue, TreeID, ValueOrContainer};
+use loro::{
+    ContainerTrait as _, Frontiers, LoroDoc, LoroMap, LoroText, LoroValue, TreeID, ValueOrContainer,
+};
 
 use crate::node::NodeKind;
 use crate::project::{now_ms, Project};
@@ -46,7 +48,9 @@ fn child_map(map: &LoroMap, key: &str) -> Option<LoroMap> {
 /// Every child map of `map`, keyed.
 fn child_maps(map: &LoroMap) -> Vec<(String, LoroMap)> {
     let keys: Vec<String> = map.keys().map(|k| k.to_string()).collect();
-    keys.into_iter().filter_map(|k| child_map(map, &k).map(|m| (k, m))).collect()
+    keys.into_iter()
+        .filter_map(|k| child_map(map, &k).map(|m| (k, m)))
+        .collect()
 }
 
 pub fn date_str(d: NaiveDate) -> String {
@@ -172,7 +176,9 @@ pub fn scan_placeholders(text: &str) -> Vec<(usize, String)> {
         let c = chars[i];
         if c == '[' {
             // Bracketed note: [TODO ...], [?], [fix this], up to 80 chars, same paragraph.
-            if let Some(end) = (i + 1..chars.len().min(i + 82)).find(|&j| chars[j] == ']' || chars[j] == '\n') {
+            if let Some(end) =
+                (i + 1..chars.len().min(i + 82)).find(|&j| chars[j] == ']' || chars[j] == '\n')
+            {
                 if chars[end] == ']' {
                     let inner: String = chars[i + 1..end].iter().collect();
                     let t = inner.trim();
@@ -298,7 +304,8 @@ impl Project {
     /// Record the current word count and add active seconds to `date`'s session.
     pub fn update_session(&self, date: NaiveDate, words: i64, add_seconds: i64) -> Result<Session> {
         self.begin_session(date, words)?;
-        let m = child_map(&self.sessions_map(), &date_str(date)).ok_or_else(|| anyhow!("session vanished"))?;
+        let m = child_map(&self.sessions_map(), &date_str(date))
+            .ok_or_else(|| anyhow!("session vanished"))?;
         m.insert(keys::WORDS_END, words)?;
         if add_seconds > 0 {
             let secs = get_i64(&m, keys::SECONDS).unwrap_or(0) + add_seconds;
@@ -349,8 +356,10 @@ impl Project {
 
     /// Every task, oldest first.
     pub fn task_list(&self) -> Vec<Task> {
-        let mut out: Vec<Task> =
-            child_maps(&self.tasks()).into_iter().map(|(k, m)| Self::read_task(k, &m)).collect();
+        let mut out: Vec<Task> = child_maps(&self.tasks())
+            .into_iter()
+            .map(|(k, m)| Self::read_task(k, &m))
+            .collect();
         out.sort_by(|a, b| a.created.cmp(&b.created).then_with(|| a.id.cmp(&b.id)));
         out
     }
@@ -441,7 +450,10 @@ impl Project {
     /// node's body text in it. Read-only in practice: edits never come back.
     pub fn version_doc(&self, v: &Version) -> Result<(LoroDoc, LoroText)> {
         let frontiers = v.frontiers()?;
-        let fork = self.doc.fork_at(&frontiers).map_err(|e| anyhow!("fork at version: {e}"))?;
+        let fork = self
+            .doc
+            .fork_at(&frontiers)
+            .map_err(|e| anyhow!("fork at version: {e}"))?;
         schema::configure_text_styles(&fork);
         let body = self.node(v.node)?.body()?;
         let text = fork.get_text(body.id());
@@ -465,7 +477,8 @@ impl Project {
             body.delete(0, len)?;
         }
         body.apply_delta(&delta)?;
-        self.doc.commit_with(loro::CommitOptions::default().origin(origin));
+        self.doc
+            .commit_with(loro::CommitOptions::default().origin(origin));
         Ok(())
     }
 
@@ -476,7 +489,8 @@ impl Project {
         let mut out = Vec::new();
         for id in self.all_nodes() {
             let Ok(n) = self.node(id) else { continue };
-            if !n.kind().has_body() || n.kind() == NodeKind::Entity && n.body_if_exists().is_none() {
+            if !n.kind().has_body() || n.kind() == NodeKind::Entity && n.body_if_exists().is_none()
+            {
                 continue;
             }
             let text = n.plain_text();
@@ -486,8 +500,16 @@ impl Project {
             let chars: Vec<char> = text.chars().collect();
             for (offset, marker) in scan_placeholders(&text) {
                 let end = offset + marker.chars().count();
-                let lo = chars[..offset].iter().rposition(|c| *c == '\n').map(|p| p + 1).unwrap_or(0);
-                let hi = chars[end..].iter().position(|c| *c == '\n').map(|p| end + p).unwrap_or(chars.len());
+                let lo = chars[..offset]
+                    .iter()
+                    .rposition(|c| *c == '\n')
+                    .map(|p| p + 1)
+                    .unwrap_or(0);
+                let hi = chars[end..]
+                    .iter()
+                    .position(|c| *c == '\n')
+                    .map(|p| end + p)
+                    .unwrap_or(chars.len());
                 let lo = lo.max(offset.saturating_sub(40));
                 let hi = hi.min(end + 60);
                 let mut snippet: String = chars[lo..hi].iter().collect();
@@ -497,7 +519,13 @@ impl Project {
                 if hi < chars.len() && chars[hi] != '\n' {
                     snippet.push('…');
                 }
-                out.push(Placeholder { node: id, title: n.title(), offset, marker, snippet });
+                out.push(Placeholder {
+                    node: id,
+                    title: n.title(),
+                    offset,
+                    marker,
+                    snippet,
+                });
             }
         }
         out
@@ -517,7 +545,11 @@ mod tests {
     fn goals_round_trip_and_pace() {
         let p = Project::new_in_memory("T").unwrap();
         assert_eq!(p.goals(), Goals::default());
-        let g = Goals { daily: Some(500), manuscript: Some(80_000), deadline: Some(d("2026-12-31")) };
+        let g = Goals {
+            daily: Some(500),
+            manuscript: Some(80_000),
+            deadline: Some(d("2026-12-31")),
+        };
         p.set_goals(&g).unwrap();
         assert_eq!(p.goals(), g);
         // 10 days inclusive, 1000 words to go → 100/day.
@@ -545,13 +577,18 @@ mod tests {
         assert_eq!(p.streak(d("2026-03-03")), 2); // yesterday counts
         assert_eq!(p.streak(d("2026-03-04")), 0);
         // begin_session is idempotent within a day.
-        assert_eq!(p.begin_session(d("2026-03-01"), 999).unwrap().words_start, 100);
+        assert_eq!(
+            p.begin_session(d("2026-03-01"), 999).unwrap().words_start,
+            100
+        );
     }
 
     #[test]
     fn tasks_crud() {
         let p = Project::new_in_memory("T").unwrap();
-        let sc = p.create_node(p.root(Space::Manuscript), NodeKind::Scene, "S").unwrap();
+        let sc = p
+            .create_node(p.root(Space::Manuscript), NodeKind::Scene, "S")
+            .unwrap();
         let a = p.add_task("Fix the ending", Some(sc)).unwrap();
         let b = p.add_task("Name the dog", None).unwrap();
         let list = p.task_list();
@@ -571,7 +608,9 @@ mod tests {
     #[test]
     fn versions_view_and_restore() {
         let p = Project::new_in_memory("T").unwrap();
-        let sc = p.create_node(p.root(Space::Manuscript), NodeKind::Scene, "S").unwrap();
+        let sc = p
+            .create_node(p.root(Space::Manuscript), NodeKind::Scene, "S")
+            .unwrap();
         let body = p.node(sc).unwrap().body().unwrap();
         body.delete(0, body.len_unicode()).unwrap();
         body.insert(0, "First draft.\n").unwrap();
@@ -591,7 +630,10 @@ mod tests {
         // Formatting came back too.
         let delta = p.node(sc).unwrap().body().unwrap().to_delta();
         let bold = delta.iter().any(|d| match d {
-            loro::TextDelta::Insert { attributes: Some(a), .. } => a.contains_key("bold"),
+            loro::TextDelta::Insert {
+                attributes: Some(a),
+                ..
+            } => a.contains_key("bold"),
             _ => false,
         });
         assert!(bold);
@@ -605,13 +647,20 @@ mod tests {
     fn versions_survive_save_and_reopen() {
         let dir = std::env::temp_dir().join(format!("wordy-ver-{}", ulid::Ulid::new()));
         let p = Project::create(&dir, "T").unwrap();
-        let sc = p.create_node(p.root(Space::Manuscript), NodeKind::Scene, "S").unwrap();
+        let sc = p
+            .create_node(p.root(Space::Manuscript), NodeKind::Scene, "S")
+            .unwrap();
         let body = p.node(sc).unwrap().body().unwrap();
         body.delete(0, body.len_unicode()).unwrap();
         body.insert(0, "one\n").unwrap();
         p.doc.commit();
         let v = p.save_version(sc, "v").unwrap();
-        p.node(sc).unwrap().body().unwrap().insert(0, "zero ").unwrap();
+        p.node(sc)
+            .unwrap()
+            .body()
+            .unwrap()
+            .insert(0, "zero ")
+            .unwrap();
         p.save().unwrap();
         let q = Project::open(&dir).unwrap();
         assert_eq!(q.node(sc).unwrap().plain_text(), "zero one");
@@ -622,7 +671,9 @@ mod tests {
 
     #[test]
     fn placeholder_scan() {
-        let hits = scan_placeholders("She said TK and left. [TODO: name] Nothing here [maybe]. TKTK? [?] fine. Stalk TK.");
+        let hits = scan_placeholders(
+            "She said TK and left. [TODO: name] Nothing here [maybe]. TKTK? [?] fine. Stalk TK.",
+        );
         let markers: Vec<&str> = hits.iter().map(|(_, m)| m.as_str()).collect();
         assert_eq!(markers, vec!["TK", "[TODO: name]", "TKTK", "[?]", "TK"]);
         assert_eq!(hits[0].0, 9);
@@ -631,10 +682,24 @@ mod tests {
     #[test]
     fn placeholders_across_project() {
         let p = Project::new_in_memory("T").unwrap();
-        let sc = p.create_node(p.root(Space::Manuscript), NodeKind::Scene, "Opening").unwrap();
-        p.node(sc).unwrap().body().unwrap().insert(0, "Line one.\nHe grabbed the TK and ran.\n").unwrap();
-        let note = p.create_node(p.root(Space::Notes), NodeKind::Note, "Ideas").unwrap();
-        p.node(note).unwrap().body().unwrap().insert(0, "[TODO think about this]\n").unwrap();
+        let sc = p
+            .create_node(p.root(Space::Manuscript), NodeKind::Scene, "Opening")
+            .unwrap();
+        p.node(sc)
+            .unwrap()
+            .body()
+            .unwrap()
+            .insert(0, "Line one.\nHe grabbed the TK and ran.\n")
+            .unwrap();
+        let note = p
+            .create_node(p.root(Space::Notes), NodeKind::Note, "Ideas")
+            .unwrap();
+        p.node(note)
+            .unwrap()
+            .body()
+            .unwrap()
+            .insert(0, "[TODO think about this]\n")
+            .unwrap();
         let ph = p.placeholders();
         assert_eq!(ph.len(), 2);
         assert_eq!(ph[0].title, "Opening");

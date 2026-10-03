@@ -11,9 +11,12 @@ pub mod spell;
 mod style;
 mod typography;
 
-pub use editor::{CommentAnchor, EditorEvent, LinkTarget, MentionSpan, ProseEditor, RichClipboard, RichFragment, Selection};
-pub use spell::SpellState;
+pub use editor::{
+    CommentAnchor, EditorEvent, LinkTarget, MentionSpan, ProseEditor, RichClipboard, RichFragment,
+    Selection,
+};
 pub use element::ProseElement;
+pub use spell::SpellState;
 pub use style::EditorStyle;
 
 use gpui_kit::{App, KeyBinding};

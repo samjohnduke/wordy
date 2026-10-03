@@ -10,7 +10,11 @@ pub struct FieldSpec {
 }
 
 const fn f(key: &'static str, label: &'static str, multiline: bool) -> FieldSpec {
-    FieldSpec { key, label, multiline }
+    FieldSpec {
+        key,
+        label,
+        multiline,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,7 +81,11 @@ pub const OBJECT: Template = Template {
     ],
 };
 
-pub const CUSTOM: Template = Template { id: "custom", label: "Custom", fields: &[f("notes", "Notes", true)] };
+pub const CUSTOM: Template = Template {
+    id: "custom",
+    label: "Custom",
+    fields: &[f("notes", "Notes", true)],
+};
 
 pub const ALL: [Template; 6] = [CHARACTER, LOCATION, CULTURE, SYSTEM, OBJECT, CUSTOM];
 

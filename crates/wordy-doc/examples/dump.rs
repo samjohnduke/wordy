@@ -5,7 +5,10 @@ use std::path::PathBuf;
 use wordy_doc::{Paragraphs, Project};
 
 fn main() -> anyhow::Result<()> {
-    let dir = std::env::args().nth(1).map(PathBuf::from).expect("project dir");
+    let dir = std::env::args()
+        .nth(1)
+        .map(PathBuf::from)
+        .expect("project dir");
     let project = Project::open(&dir)?;
     println!("project: {}", project.name());
     for id in project.manuscript_scenes() {
@@ -17,12 +20,29 @@ fn main() -> anyhow::Result<()> {
             for r in &p.runs {
                 let m = &r.marks;
                 let mut tags = Vec::new();
-                for (on, t) in [(m.bold, "b"), (m.italic, "i"), (m.underline, "u"), (m.strike, "s"), (m.smallcaps, "sc"), (m.highlight, "hl")] {
-                    if on { tags.push(t.to_string()); }
+                for (on, t) in [
+                    (m.bold, "b"),
+                    (m.italic, "i"),
+                    (m.underline, "u"),
+                    (m.strike, "s"),
+                    (m.smallcaps, "sc"),
+                    (m.highlight, "hl"),
+                ] {
+                    if on {
+                        tags.push(t.to_string());
+                    }
                 }
-                if let Some(l) = &m.link { tags.push(format!("link={l}")); }
-                if let Some(c) = &m.comment { tags.push(format!("comment={c}")); }
-                if tags.is_empty() { print!(" {:?}", r.text) } else { print!(" {:?}<{}>", r.text, tags.join(",")) }
+                if let Some(l) = &m.link {
+                    tags.push(format!("link={l}"));
+                }
+                if let Some(c) = &m.comment {
+                    tags.push(format!("comment={c}"));
+                }
+                if tags.is_empty() {
+                    print!(" {:?}", r.text)
+                } else {
+                    print!(" {:?}<{}>", r.text, tags.join(","))
+                }
             }
             println!();
         }
@@ -30,7 +50,10 @@ fn main() -> anyhow::Result<()> {
     let comments = project.comments();
     for id in comments.ids() {
         if let Some(c) = comments.get(&id) {
-            println!("comment {id}: {:?} resolved={} node={:?}", c.text, c.resolved, c.node);
+            println!(
+                "comment {id}: {:?} resolved={} node={:?}",
+                c.text, c.resolved, c.node
+            );
         }
     }
     Ok(())

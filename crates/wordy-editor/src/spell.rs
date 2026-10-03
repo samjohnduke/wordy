@@ -56,7 +56,10 @@ impl Global for SpellState {}
 
 impl SpellState {
     pub fn custom_words(cx: &App) -> Vec<String> {
-        let mut v: Vec<String> = cx.try_global::<SpellState>().map(|s| s.custom.iter().cloned().collect()).unwrap_or_default();
+        let mut v: Vec<String> = cx
+            .try_global::<SpellState>()
+            .map(|s| s.custom.iter().cloned().collect())
+            .unwrap_or_default();
         v.sort();
         v
     }
@@ -64,7 +67,11 @@ impl SpellState {
     /// Replace the custom word list (loaded from the project's dictionary file).
     pub fn set_custom_words(cx: &mut App, words: impl IntoIterator<Item = String>) {
         let s = cx.default_global::<SpellState>();
-        s.custom = words.into_iter().map(|w| normalize(&w)).filter(|w| !w.is_empty()).collect();
+        s.custom = words
+            .into_iter()
+            .map(|w| normalize(&w))
+            .filter(|w| !w.is_empty())
+            .collect();
         s.cache.clear();
     }
 
@@ -103,7 +110,9 @@ impl SpellState {
 
     /// Suggestions for a misspelled word, best first.
     pub fn suggest(word: &str, limit: usize) -> Vec<String> {
-        let Some(dict) = dictionary() else { return Vec::new() };
+        let Some(dict) = dictionary() else {
+            return Vec::new();
+        };
         let mut out = Vec::new();
         dict.suggest(&normalize(word), &mut out);
         out.truncate(limit);
@@ -113,7 +122,8 @@ impl SpellState {
 
 /// Curly apostrophes to straight so the dictionary recognizes contractions.
 pub fn normalize(word: &str) -> String {
-    word.trim_matches(|c: char| c == '\'' || c == '\u{2019}').replace('\u{2019}', "'")
+    word.trim_matches(|c: char| c == '\'' || c == '\u{2019}')
+        .replace('\u{2019}', "'")
 }
 
 /// "Sam's", "readers'" and similar possessive forms of known words.
@@ -136,7 +146,10 @@ pub fn checkable_words(text: &str) -> Vec<(Range<usize>, &str)> {
             if trimmed.is_empty() {
                 return None;
             }
-            let start = i + (w.len() - w.trim_start_matches(|c: char| c == '\'' || c == '\u{2019}').len());
+            let start = i
+                + (w.len()
+                    - w.trim_start_matches(|c: char| c == '\'' || c == '\u{2019}')
+                        .len());
             let end = start + trimmed.len();
             let mut letters = 0;
             let mut lower = false;
@@ -168,8 +181,14 @@ mod tests {
 
     #[test]
     fn tokenizer_skips_noise() {
-        let words: Vec<&str> = checkable_words("Don’t read 42 NASA pages, 'quoted' word-ish x.").into_iter().map(|(_, w)| w).collect();
-        assert_eq!(words, vec!["Don’t", "read", "pages", "quoted", "word", "ish"]);
+        let words: Vec<&str> = checkable_words("Don’t read 42 NASA pages, 'quoted' word-ish x.")
+            .into_iter()
+            .map(|(_, w)| w)
+            .collect();
+        assert_eq!(
+            words,
+            vec!["Don’t", "read", "pages", "quoted", "word", "ish"]
+        );
         let r = &checkable_words("say 'hi'")[1].0;
         assert_eq!(&"say 'hi'"[r.clone()], "hi");
     }

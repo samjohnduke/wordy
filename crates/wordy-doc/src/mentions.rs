@@ -44,7 +44,10 @@ fn is_word_char(c: char) -> bool {
 
 impl Matcher {
     pub fn empty() -> Self {
-        Self { ac: None, owners: Vec::new() }
+        Self {
+            ac: None,
+            owners: Vec::new(),
+        }
     }
 
     pub fn new(entries: &[EntityNames]) -> Self {
@@ -84,12 +87,22 @@ impl Matcher {
 
     /// Scan `text` for whole-word mentions. Ranges are byte offsets into `text`.
     pub fn scan(&self, text: &str) -> Vec<Mention> {
-        let Some(ac) = &self.ac else { return Vec::new() };
+        let Some(ac) = &self.ac else {
+            return Vec::new();
+        };
         let mut out = Vec::new();
         for m in ac.find_iter(text) {
             let (start, end) = (m.start(), m.end());
-            let before_ok = text[..start].chars().next_back().map(|c| !is_word_char(c)).unwrap_or(true);
-            let after_ok = text[end..].chars().next().map(|c| !is_word_char(c)).unwrap_or(true);
+            let before_ok = text[..start]
+                .chars()
+                .next_back()
+                .map(|c| !is_word_char(c))
+                .unwrap_or(true);
+            let after_ok = text[end..]
+                .chars()
+                .next()
+                .map(|c| !is_word_char(c))
+                .unwrap_or(true);
             if !before_ok || !after_ok {
                 continue;
             }
@@ -100,7 +113,10 @@ impl Matcher {
             if pat.to_lowercase() != pat.to_lowercase() {
                 continue;
             }
-            out.push(Mention { range: start..end, candidates: owners.clone() });
+            out.push(Mention {
+                range: start..end,
+                candidates: owners.clone(),
+            });
         }
         out
     }
@@ -125,25 +141,50 @@ mod tests {
     use loro::TreeID;
 
     fn tid(n: u32) -> TreeID {
-        TreeID { peer: 1, counter: n as i32 }
+        TreeID {
+            peer: 1,
+            counter: n as i32,
+        }
     }
 
     #[test]
     fn whole_word_case_insensitive() {
         let m = Matcher::new(&[
-            EntityNames { id: tid(1), names: vec!["Anna".into(), "the Captain".into()] },
-            EntityNames { id: tid(2), names: vec!["Annabel".into()] },
+            EntityNames {
+                id: tid(1),
+                names: vec!["Anna".into(), "the Captain".into()],
+            },
+            EntityNames {
+                id: tid(2),
+                names: vec!["Annabel".into()],
+            },
         ]);
         let hits = m.scan("anna met Annabel, the captain. Hannah too.");
-        let ranges: Vec<_> = hits.iter().map(|h| (h.range.clone(), h.candidates.clone())).collect();
-        assert_eq!(ranges, vec![(0..4, vec![tid(1)]), (9..16, vec![tid(2)]), (18..29, vec![tid(1)])]);
+        let ranges: Vec<_> = hits
+            .iter()
+            .map(|h| (h.range.clone(), h.candidates.clone()))
+            .collect();
+        assert_eq!(
+            ranges,
+            vec![
+                (0..4, vec![tid(1)]),
+                (9..16, vec![tid(2)]),
+                (18..29, vec![tid(1)])
+            ]
+        );
     }
 
     #[test]
     fn ambiguous_and_exclusion() {
         let m = Matcher::new(&[
-            EntityNames { id: tid(1), names: vec!["Sam".into()] },
-            EntityNames { id: tid(2), names: vec!["Sam".into(), "Samantha".into()] },
+            EntityNames {
+                id: tid(1),
+                names: vec!["Sam".into()],
+            },
+            EntityNames {
+                id: tid(2),
+                names: vec!["Sam".into(), "Samantha".into()],
+            },
         ]);
         let hits = m.scan("Sam and Samantha");
         assert!(hits[0].is_ambiguous());
@@ -155,7 +196,10 @@ mod tests {
 
     #[test]
     fn possessives_match_the_name() {
-        let m = Matcher::new(&[EntityNames { id: tid(1), names: vec!["Sam".into()] }]);
+        let m = Matcher::new(&[EntityNames {
+            id: tid(1),
+            names: vec!["Sam".into()],
+        }]);
         let hits = m.scan("Sam's lamp. Sam\u{2019}s boat. Samson's.");
         let ranges: Vec<_> = hits.iter().map(|h| h.range.clone()).collect();
         assert_eq!(ranges, vec![0..3, 12..15]);

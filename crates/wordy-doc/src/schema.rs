@@ -41,7 +41,14 @@ pub mod meta {
 }
 
 /// Inline marks that extend when you type at their right edge.
-pub const INLINE_EXPAND_AFTER: &[&str] = &["bold", "italic", "underline", "strike", "smallcaps", "highlight"];
+pub const INLINE_EXPAND_AFTER: &[&str] = &[
+    "bold",
+    "italic",
+    "underline",
+    "strike",
+    "smallcaps",
+    "highlight",
+];
 /// Marks that never grow: links, comments, and the paragraph attributes on `\n`.
 pub const EXPAND_NONE: &[&str] = &["link", "comment", "block", "align"];
 
@@ -60,11 +67,23 @@ pub mod block {
 pub fn configure_text_styles(doc: &LoroDoc) {
     let mut map = StyleConfigMap::new();
     for k in INLINE_EXPAND_AFTER {
-        map.insert(InternalString::from(*k), StyleConfig { expand: ExpandType::After });
+        map.insert(
+            InternalString::from(*k),
+            StyleConfig {
+                expand: ExpandType::After,
+            },
+        );
     }
     for k in EXPAND_NONE {
-        map.insert(InternalString::from(*k), StyleConfig { expand: ExpandType::None });
+        map.insert(
+            InternalString::from(*k),
+            StyleConfig {
+                expand: ExpandType::None,
+            },
+        );
     }
     doc.config_text_style(map);
-    doc.config_default_text_style(Some(StyleConfig { expand: ExpandType::None }));
+    doc.config_default_text_style(Some(StyleConfig {
+        expand: ExpandType::None,
+    }));
 }

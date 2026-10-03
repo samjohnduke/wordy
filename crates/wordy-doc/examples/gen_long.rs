@@ -6,8 +6,14 @@ use std::path::PathBuf;
 use wordy_doc::{NodeKind, Project, Space};
 
 fn main() -> anyhow::Result<()> {
-    let dir = std::env::args().nth(1).map(PathBuf::from).expect("project dir");
-    let words: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(30_000);
+    let dir = std::env::args()
+        .nth(1)
+        .map(PathBuf::from)
+        .expect("project dir");
+    let words: usize = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30_000);
     let project = Project::create(&dir, "Long Haul")?;
     let root = project.root(Space::Manuscript);
     let chapter = project.create_node(root, NodeKind::Chapter, "Chapter One")?;
@@ -15,10 +21,11 @@ fn main() -> anyhow::Result<()> {
     let short = project.create_node(chapter, NodeKind::Scene, "A Short One")?;
     let body = project.node(scene)?.body()?;
     let lexicon = [
-        "the", "harbour", "lamps", "guttered", "as", "Mara", "counted", "the", "boats", "again,", "and", "found",
-        "one", "missing.", "Nobody", "spoke", "of", "it", "at", "supper;", "the", "silence", "had", "its", "own",
-        "weather.", "Later", "she", "walked", "the", "quay", "with", "a", "lantern", "that", "would", "not", "stay",
-        "lit,", "and", "listened", "to", "the", "water", "working", "at", "the", "stones.",
+        "the", "harbour", "lamps", "guttered", "as", "Mara", "counted", "the", "boats", "again,",
+        "and", "found", "one", "missing.", "Nobody", "spoke", "of", "it", "at", "supper;", "the",
+        "silence", "had", "its", "own", "weather.", "Later", "she", "walked", "the", "quay",
+        "with", "a", "lantern", "that", "would", "not", "stay", "lit,", "and", "listened", "to",
+        "the", "water", "working", "at", "the", "stones.",
     ];
     let mut text = String::new();
     let mut n = 0;
@@ -38,7 +45,10 @@ fn main() -> anyhow::Result<()> {
         text.push('\n');
     }
     body.insert(0, &text)?;
-    project.node(short)?.body()?.insert(0, "A short scene to switch to.\n")?;
+    project
+        .node(short)?
+        .body()?
+        .insert(0, "A short scene to switch to.\n")?;
     project.commit_meta();
     project.save()?;
     println!("{} words in {} paragraphs at {}", n, i, dir.display());

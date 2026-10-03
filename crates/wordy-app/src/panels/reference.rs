@@ -1,10 +1,10 @@
 //! Reference pane: read-only view of a pinned entity or note, with its
 //! sheet summary and "Appears in", so you can glance at it while writing.
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::base::StyledExt as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dock::Panel;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Sizable as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use wordy_doc::templates;
@@ -38,11 +38,18 @@ pub struct ReferencePanel {
 
 impl ReferencePanel {
     pub fn new(project: SharedProject, cx: &mut Context<Self>) -> Self {
-        Self { project, pinned: None, focus: cx.focus_handle() }
+        Self {
+            project,
+            pinned: None,
+            focus: cx.focus_handle(),
+        }
     }
 
     pub fn pinned_id(&self) -> Option<TreeID> {
-        self.pinned.as_ref().filter(|p| p.version.is_none()).map(|p| p.id)
+        self.pinned
+            .as_ref()
+            .filter(|p| p.version.is_none())
+            .map(|p| p.id)
     }
 
     /// Show a saved version of a body, read-only, with a Restore button.
@@ -69,7 +76,12 @@ impl ReferencePanel {
                 }
             }
         });
-        self.pinned = Some(Pinned { id: v.node, version: Some(v), editor, _sub: sub });
+        self.pinned = Some(Pinned {
+            id: v.node,
+            version: Some(v),
+            editor,
+            _sub: sub,
+        });
         cx.notify();
     }
 
@@ -78,7 +90,9 @@ impl ReferencePanel {
             self.refresh(cx);
             return;
         }
-        let Ok(node) = self.project.project.node(id) else { return };
+        let Ok(node) = self.project.project.node(id) else {
+            return;
+        };
         let Ok(body) = node.body() else { return };
         let doc = self.project.project.doc.clone();
         let editor = cx.new(|cx| ProseEditor::new(doc, body, cx));
@@ -97,7 +111,12 @@ impl ReferencePanel {
                 }
             }
         });
-        self.pinned = Some(Pinned { id, version: None, editor, _sub: sub });
+        self.pinned = Some(Pinned {
+            id,
+            version: None,
+            editor,
+            _sub: sub,
+        });
         cx.notify();
     }
 
@@ -120,7 +139,11 @@ impl ReferencePanel {
         }
     }
 
-    pub fn set_link_targets(&mut self, targets: Vec<wordy_editor::LinkTarget>, cx: &mut Context<Self>) {
+    pub fn set_link_targets(
+        &mut self,
+        targets: Vec<wordy_editor::LinkTarget>,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(p) = &self.pinned {
             p.editor.update(cx, |e, cx| e.set_link_targets(targets, cx));
         }
@@ -129,7 +152,10 @@ impl ReferencePanel {
 
     fn render_pinned(&self, pinned: &Pinned, cx: &mut Context<Self>) -> AnyElement {
         let Ok(node) = self.project.project.node(pinned.id) else {
-            return div().p_2().child("This item no longer exists.").into_any_element();
+            return div()
+                .p_2()
+                .child("This item no longer exists.")
+                .into_any_element();
         };
         let id = pinned.id;
         let muted = cx.theme().muted_foreground;
@@ -137,7 +163,11 @@ impl ReferencePanel {
 
         if let Some(v) = &pinned.version {
             let when = wordy_doc::chrono::DateTime::from_timestamp_millis(v.created)
-                .map(|d| d.with_timezone(&wordy_doc::chrono::Local).format("%b %-d, %Y %H:%M").to_string())
+                .map(|d| {
+                    d.with_timezone(&wordy_doc::chrono::Local)
+                        .format("%b %-d, %Y %H:%M")
+                        .to_string()
+                })
                 .unwrap_or_default();
             let words = pinned.editor.read(cx).word_count();
             let restore = v.clone();
@@ -161,7 +191,9 @@ impl ReferencePanel {
                                         .primary()
                                         .xsmall()
                                         .label("Restore")
-                                        .tooltip("Replace the current body with this version (undoable)")
+                                        .tooltip(
+                                            "Replace the current body with this version (undoable)",
+                                        )
                                         .on_click(cx.listener(move |_, _, _, cx| {
                                             cx.emit(ReferenceEvent::RestoreVersion(restore.clone()))
                                         })),
@@ -176,43 +208,66 @@ impl ReferencePanel {
                                 ),
                         ),
                 )
-                .child(div().text_xs().text_color(muted).child(format!("Version · {} · {when} · {words} words", v.label)));
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(format!("Version · {} · {when} · {words} words", v.label)),
+                );
             return v_flex()
                 .size_full()
                 .child(header)
-                .child(div().flex_1().min_h_0().w_full().child(pinned.editor.clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .child(pinned.editor.clone()),
+                )
                 .into_any_element();
         }
 
-        let mut header = v_flex().gap_1().px_3().pt_2().pb_2().border_b_1().border_color(cx.theme().border).child(
-            h_flex()
-                .items_center()
-                .justify_between()
-                .child(div().font_semibold().text_base().child(node.title()))
-                .child(
-                    h_flex()
-                        .gap_0p5()
-                        .child(
-                            Button::new("ref-open")
-                                .ghost()
-                                .xsmall()
-                                .label("Open")
-                                .tooltip("Open in an editor tab")
-                                .on_click(cx.listener(move |_, _, _, cx| cx.emit(ReferenceEvent::Open(id)))),
-                        )
-                        .child(
-                            Button::new("ref-unpin")
-                                .ghost()
-                                .xsmall()
-                                .label("×")
-                                .tooltip("Unpin")
-                                .on_click(cx.listener(|this, _, _, cx| this.unpin(cx))),
-                        ),
-                ),
-        );
+        let mut header = v_flex()
+            .gap_1()
+            .px_3()
+            .pt_2()
+            .pb_2()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().font_semibold().text_base().child(node.title()))
+                    .child(
+                        h_flex()
+                            .gap_0p5()
+                            .child(
+                                Button::new("ref-open")
+                                    .ghost()
+                                    .xsmall()
+                                    .label("Open")
+                                    .tooltip("Open in an editor tab")
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.emit(ReferenceEvent::Open(id))
+                                    })),
+                            )
+                            .child(
+                                Button::new("ref-unpin")
+                                    .ghost()
+                                    .xsmall()
+                                    .label("×")
+                                    .tooltip("Unpin")
+                                    .on_click(cx.listener(|this, _, _, cx| this.unpin(cx))),
+                            ),
+                    ),
+            );
 
         if is_entity {
-            let template = node.template().map(|t| templates::by_id(&t)).unwrap_or(templates::DEFAULT);
+            let template = node
+                .template()
+                .map(|t| templates::by_id(&t))
+                .unwrap_or(templates::DEFAULT);
             let aliases = node.aliases();
             let mut line = template.label.to_string();
             if !aliases.is_empty() {
@@ -234,7 +289,9 @@ impl ReferencePanel {
             }
             let backlinks = self.project.appears_in(id);
             if !backlinks.is_empty() {
-                let mut list = v_flex().gap_0().child(div().text_xs().text_color(muted).child("Appears in"));
+                let mut list = v_flex()
+                    .gap_0()
+                    .child(div().text_xs().text_color(muted).child("Appears in"));
                 for (ix, b) in backlinks.iter().enumerate() {
                     let target = b.node;
                     list = list.child(
@@ -244,7 +301,9 @@ impl ReferencePanel {
                             .text_color(cx.theme().primary)
                             .cursor_pointer()
                             .child(format!("{} ×{}", b.title, b.count))
-                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(ReferenceEvent::Open(target)))),
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(ReferenceEvent::Open(target))
+                            })),
                     );
                 }
                 header = header.child(list);
@@ -253,8 +312,20 @@ impl ReferencePanel {
 
         v_flex()
             .size_full()
-            .child(div().id("ref-head").max_h(px(320.)).overflow_y_scroll().child(header))
-            .child(div().flex_1().min_h_0().w_full().child(pinned.editor.clone()))
+            .child(
+                div()
+                    .id("ref-head")
+                    .max_h(px(320.))
+                    .overflow_y_scroll()
+                    .child(header),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(pinned.editor.clone()),
+            )
             .into_any_element()
     }
 }
@@ -272,7 +343,10 @@ impl EventEmitter<ReferenceEvent> for ReferencePanel {}
 impl Render for ReferencePanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         match &self.pinned {
-            Some(p) => div().size_full().track_focus(&self.focus).child(self.render_pinned(p, cx)),
+            Some(p) => div()
+                .size_full()
+                .track_focus(&self.focus)
+                .child(self.render_pinned(p, cx)),
             None => div().size_full().track_focus(&self.focus).child(
                 v_flex()
                     .size_full()

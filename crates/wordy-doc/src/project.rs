@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use loro::{
-    CommitOptions, ExportMode, Frontiers, LoroDoc, LoroMap, LoroTree, LoroValue, TreeID, TreeParentId, ValueOrContainer,
+    CommitOptions, ExportMode, Frontiers, LoroDoc, LoroMap, LoroTree, LoroValue, TreeID,
+    TreeParentId, ValueOrContainer,
 };
 
 use crate::comments::Comments;
@@ -49,7 +50,12 @@ impl Project {
         let doc = LoroDoc::new();
         doc.set_record_timestamp(true);
         schema::configure_text_styles(&doc);
-        let project = Self { doc, dir: None, recovered_from: None, shallow_root: RefCell::new(None) };
+        let project = Self {
+            doc,
+            dir: None,
+            recovered_from: None,
+            shallow_root: RefCell::new(None),
+        };
         project.init_schema(name)?;
         project.ensure_id()?;
         Ok(project)
@@ -103,7 +109,12 @@ impl Project {
                 doc
             }
         };
-        let p = Self { doc, dir: Some(dir.to_path_buf()), recovered_from, shallow_root: RefCell::new(None) };
+        let p = Self {
+            doc,
+            dir: Some(dir.to_path_buf()),
+            recovered_from,
+            shallow_root: RefCell::new(None),
+        };
         p.ensure_roots()?;
         if p.recovered_from.is_some() {
             // Put a good main file back right away.
@@ -122,7 +133,8 @@ impl Project {
     /// `meta` origin. Editors exclude that origin from their undo stacks, so a
     /// rename or a status change never gets undone by Ctrl-Z in a scene.
     pub fn commit_meta(&self) {
-        self.doc.commit_with(CommitOptions::default().origin(META_ORIGIN));
+        self.doc
+            .commit_with(CommitOptions::default().origin(META_ORIGIN));
     }
 
     fn load_doc(path: &Path) -> Result<LoroDoc> {
@@ -130,7 +142,8 @@ impl Project {
         let doc = LoroDoc::new();
         doc.set_record_timestamp(true);
         schema::configure_text_styles(&doc);
-        doc.import(&bytes).map_err(|e| anyhow!("import {}: {e}", path.display()))?;
+        doc.import(&bytes)
+            .map_err(|e| anyhow!("import {}: {e}", path.display()))?;
         if doc.get_tree(schema::NODES).is_empty() && doc.get_map(schema::PROJECT).is_empty() {
             bail!("{} holds no project data", path.display());
         }
@@ -146,8 +159,14 @@ impl Project {
         let Some(dir) = &self.dir else { return Ok(()) };
         self.commit_meta();
         let bytes = match &*self.shallow_root.borrow() {
-            Some(f) => self.doc.export(ExportMode::shallow_snapshot(f)).map_err(|e| anyhow!("export: {e}"))?,
-            None => self.doc.export(ExportMode::Snapshot).map_err(|e| anyhow!("export: {e}"))?,
+            Some(f) => self
+                .doc
+                .export(ExportMode::shallow_snapshot(f))
+                .map_err(|e| anyhow!("export: {e}"))?,
+            None => self
+                .doc
+                .export(ExportMode::Snapshot)
+                .map_err(|e| anyhow!("export: {e}"))?,
         };
         storage::write_project(&self.doc, dir, &bytes)
     }
@@ -248,7 +267,11 @@ impl Project {
             .tree()
             .roots()
             .into_iter()
-            .filter(|id| self.node(*id).map(|n| n.kind() == kind && n.space() == space).unwrap_or(false))
+            .filter(|id| {
+                self.node(*id)
+                    .map(|n| n.kind() == kind && n.space() == space)
+                    .unwrap_or(false)
+            })
             .collect();
         roots.sort_by_key(|id| (id.peer, id.counter));
         roots
@@ -288,7 +311,9 @@ impl Project {
         self.doc.get_map(schema::SESSIONS)
     }
     pub fn settings_map(&self) -> LoroMap {
-        self.project_map().ensure_mergeable_map(schema::project::SETTINGS).expect("settings map")
+        self.project_map()
+            .ensure_mergeable_map(schema::project::SETTINGS)
+            .expect("settings map")
     }
 
     /// The project's stable id (a ulid minted when it was first opened by a
@@ -306,7 +331,8 @@ impl Project {
         if !self.id().is_empty() {
             return Ok(false);
         }
-        self.project_map().insert(schema::project::ID, ulid::Ulid::new().to_string())?;
+        self.project_map()
+            .insert(schema::project::ID, ulid::Ulid::new().to_string())?;
         self.commit_meta();
         Ok(true)
     }
@@ -330,11 +356,13 @@ impl Project {
     }
 
     pub fn root(&self, space: Space) -> TreeID {
-        self.find_root(space, NodeKind::Root).expect("roots exist after ensure_roots")
+        self.find_root(space, NodeKind::Root)
+            .expect("roots exist after ensure_roots")
     }
 
     pub fn trash(&self, space: Space) -> TreeID {
-        self.find_root(space, NodeKind::Trash).expect("trash exists after ensure_roots")
+        self.find_root(space, NodeKind::Trash)
+            .expect("trash exists after ensure_roots")
     }
 
     /// Children in order.
@@ -353,7 +381,10 @@ impl Project {
             m.insert(meta::INCLUDE_IN_COMPILE, true)?;
         }
         if kind.has_body() {
-            let body = self.tree().get_meta(id)?.ensure_mergeable_text(meta::BODY)?;
+            let body = self
+                .tree()
+                .get_meta(id)?
+                .ensure_mergeable_text(meta::BODY)?;
             if body.is_empty() {
                 // Quill convention: a body always ends with a newline.
                 body.insert(0, "\n")?;
@@ -363,8 +394,16 @@ impl Project {
     }
 
     /// Create a node right after `sibling`, in the same parent.
-    pub fn create_node_after(&self, sibling: TreeID, kind: NodeKind, title: &str) -> Result<TreeID> {
-        let parent = self.node(sibling)?.parent().ok_or_else(|| anyhow!("sibling has no parent"))?;
+    pub fn create_node_after(
+        &self,
+        sibling: TreeID,
+        kind: NodeKind,
+        title: &str,
+    ) -> Result<TreeID> {
+        let parent = self
+            .node(sibling)?
+            .parent()
+            .ok_or_else(|| anyhow!("sibling has no parent"))?;
         let id = self.create_node(parent, kind, title)?;
         self.tree().mov_after(id, sibling)?;
         Ok(id)
@@ -455,7 +494,10 @@ impl Project {
             match tree.parent(cur) {
                 Some(loro::TreeParentId::Node(p)) => cur = p,
                 Some(loro::TreeParentId::Root) => {
-                    return self.node(cur).map(|n| n.kind() == NodeKind::Root).unwrap_or(false)
+                    return self
+                        .node(cur)
+                        .map(|n| n.kind() == NodeKind::Root)
+                        .unwrap_or(false)
                 }
                 _ => return false,
             }
@@ -509,7 +551,9 @@ mod tests {
     #[test]
     fn create_hierarchy_and_body() {
         let p = Project::new_in_memory("T").unwrap();
-        let act = p.create_node(p.root(Space::Manuscript), NodeKind::Act, "Act I").unwrap();
+        let act = p
+            .create_node(p.root(Space::Manuscript), NodeKind::Act, "Act I")
+            .unwrap();
         let ch = p.create_node(act, NodeKind::Chapter, "Ch 1").unwrap();
         let sc = p.create_node(ch, NodeKind::Scene, "Opening").unwrap();
         let scene = p.node(sc).unwrap();
@@ -517,7 +561,11 @@ mod tests {
         assert_eq!(scene.space(), Space::Manuscript);
         assert_eq!(scene.status(), Status::Draft);
         assert!(scene.include_in_compile());
-        scene.body().unwrap().insert(0, "It was a dark night.").unwrap();
+        scene
+            .body()
+            .unwrap()
+            .insert(0, "It was a dark night.")
+            .unwrap();
         assert_eq!(scene.plain_text(), "It was a dark night.");
         assert_eq!(scene.word_count(), 5);
         assert_eq!(p.manuscript_scenes(), vec![sc]);
@@ -540,14 +588,26 @@ mod tests {
     #[test]
     fn roundtrip_through_snapshot() {
         let p = Project::new_in_memory("Round").unwrap();
-        let sc = p.create_node(p.root(Space::Manuscript), NodeKind::Scene, "S").unwrap();
-        p.node(sc).unwrap().body().unwrap().insert(0, "hello").unwrap();
+        let sc = p
+            .create_node(p.root(Space::Manuscript), NodeKind::Scene, "S")
+            .unwrap();
+        p.node(sc)
+            .unwrap()
+            .body()
+            .unwrap()
+            .insert(0, "hello")
+            .unwrap();
         let bytes = p.export_snapshot().unwrap();
 
         let q = LoroDoc::new();
         schema::configure_text_styles(&q);
         q.import(&bytes).unwrap();
-        let q = Project { doc: q, dir: None, recovered_from: None, shallow_root: RefCell::new(None) };
+        let q = Project {
+            doc: q,
+            dir: None,
+            recovered_from: None,
+            shallow_root: RefCell::new(None),
+        };
         q.ensure_roots().unwrap();
         assert_eq!(q.name(), "Round");
         assert_eq!(q.tree().roots().len(), 6);
@@ -559,26 +619,42 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("Novel");
         let p = Project::create(&dir, "Novel").unwrap();
-        let sc = p.create_node(p.root(Space::Notes), NodeKind::Note, "Idea").unwrap();
-        p.node(sc).unwrap().body().unwrap().insert(0, "kept").unwrap();
+        let sc = p
+            .create_node(p.root(Space::Notes), NodeKind::Note, "Idea")
+            .unwrap();
+        p.node(sc)
+            .unwrap()
+            .body()
+            .unwrap()
+            .insert(0, "kept")
+            .unwrap();
         p.save().unwrap();
         storage::backup(&dir).unwrap();
         // Edits after the backup are lost by design; the file is then torn.
-        p.node(sc).unwrap().body().unwrap().insert(4, " lost").unwrap();
+        p.node(sc)
+            .unwrap()
+            .body()
+            .unwrap()
+            .insert(4, " lost")
+            .unwrap();
         p.save().unwrap();
         let main = storage::snapshot_path(&dir);
         let bytes = std::fs::read(&main).unwrap();
         std::fs::write(&main, &bytes[..bytes.len() / 2]).unwrap();
 
         let q = Project::open(&dir).unwrap();
-        assert!(q.recovered_from().is_some(), "should report the backup used");
+        assert!(
+            q.recovered_from().is_some(),
+            "should report the backup used"
+        );
         assert_eq!(q.node(sc).unwrap().plain_text(), "kept");
         // The main file is good again and the damaged one was kept aside.
         assert!(Project::open(&dir).unwrap().recovered_from().is_none());
-        let aside = std::fs::read_dir(&dir)
-            .unwrap()
-            .flatten()
-            .any(|e| e.file_name().to_string_lossy().starts_with("project.loro.corrupt-"));
+        let aside = std::fs::read_dir(&dir).unwrap().flatten().any(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("project.loro.corrupt-")
+        });
         assert!(aside);
 
         // No backup at all: a clear error, not a silent empty project.
@@ -593,7 +669,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("Novel");
         let a = Project::create(&dir, "Novel").unwrap();
-        let sc = a.create_node(a.root(Space::Manuscript), NodeKind::Scene, "One").unwrap();
+        let sc = a
+            .create_node(a.root(Space::Manuscript), NodeKind::Scene, "One")
+            .unwrap();
         let body = a.node(sc).unwrap().body().unwrap();
         for i in 0..50 {
             body.insert(body.len_unicode(), &format!("w{i} ")).unwrap();
@@ -611,15 +689,30 @@ mod tests {
 
         let after = a.compact_history().unwrap();
         assert!(after.shallow);
-        assert!(after.file_bytes < before.file_bytes, "{after:?} vs {before:?}");
-        assert!(storage::backups(&dir).len() == 1, "full history backed up first");
+        assert!(
+            after.file_bytes < before.file_bytes,
+            "{after:?} vs {before:?}"
+        );
+        assert!(
+            storage::backups(&dir).len() == 1,
+            "full history backed up first"
+        );
 
         // Reopen: content intact, history gone, and further saves stay shallow.
         let a2 = Project::open(&dir).unwrap();
         assert!(a2.doc.is_shallow());
-        assert!(a2.history_stats().ops < before.ops, "{:?} vs {before:?}", a2.history_stats());
+        assert!(
+            a2.history_stats().ops < before.ops,
+            "{:?} vs {before:?}",
+            a2.history_stats()
+        );
         assert!(a2.node(sc).unwrap().plain_text().contains("w0 w1 w2"));
-        a2.node(sc).unwrap().body().unwrap().insert(0, "A: ").unwrap();
+        a2.node(sc)
+            .unwrap()
+            .body()
+            .unwrap()
+            .insert(0, "A: ")
+            .unwrap();
         a2.save().unwrap();
         let a3 = Project::open(&dir).unwrap();
         assert!(a3.doc.is_shallow());
@@ -629,12 +722,24 @@ mod tests {
         let bb = b.node(sc).unwrap().body().unwrap();
         bb.insert(bb.len_unicode(), "B end").unwrap();
         b.doc.commit();
-        let to_b = a3.doc.export(ExportMode::updates(&b.doc.oplog_vv())).unwrap();
-        let to_a = b.doc.export(ExportMode::updates(&a3.doc.oplog_vv())).unwrap();
+        let to_b = a3
+            .doc
+            .export(ExportMode::updates(&b.doc.oplog_vv()))
+            .unwrap();
+        let to_a = b
+            .doc
+            .export(ExportMode::updates(&a3.doc.oplog_vv()))
+            .unwrap();
         let st = b.doc.import(&to_b).unwrap();
-        assert!(st.pending.is_none(), "B must be able to apply A's post-compaction ops");
+        assert!(
+            st.pending.is_none(),
+            "B must be able to apply A's post-compaction ops"
+        );
         a3.import_bytes(&to_a).unwrap();
-        assert_eq!(a3.node(sc).unwrap().plain_text(), b.node(sc).unwrap().plain_text());
+        assert_eq!(
+            a3.node(sc).unwrap().plain_text(),
+            b.node(sc).unwrap().plain_text()
+        );
         assert!(a3.node(sc).unwrap().plain_text().starts_with("A: "));
         assert!(a3.node(sc).unwrap().plain_text().ends_with("B end"));
     }
@@ -644,8 +749,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("Novel");
         let p = Project::create(&dir, "Novel").unwrap();
-        let sc = p.create_node(p.root(Space::Notes), NodeKind::Note, "Idea").unwrap();
-        p.node(sc).unwrap().body().unwrap().insert(0, "note text").unwrap();
+        let sc = p
+            .create_node(p.root(Space::Notes), NodeKind::Note, "Idea")
+            .unwrap();
+        p.node(sc)
+            .unwrap()
+            .body()
+            .unwrap()
+            .insert(0, "note text")
+            .unwrap();
         p.save().unwrap();
         assert!(dir.join("project.loro").exists());
         assert!(dir.join("project.json").exists());
@@ -654,14 +766,17 @@ mod tests {
         assert_eq!(q.name(), "Novel");
         assert_eq!(q.node(sc).unwrap().plain_text(), "note text");
         let json: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.join("project.json")).unwrap()).unwrap();
+            serde_json::from_str(&std::fs::read_to_string(dir.join("project.json")).unwrap())
+                .unwrap();
         assert_eq!(json["project"]["name"], "Novel");
     }
 
     #[test]
     fn marks_expand_as_configured() {
         let p = Project::new_in_memory("M").unwrap();
-        let sc = p.create_node(p.root(Space::Manuscript), NodeKind::Scene, "S").unwrap();
+        let sc = p
+            .create_node(p.root(Space::Manuscript), NodeKind::Scene, "S")
+            .unwrap();
         let t = p.node(sc).unwrap().body().unwrap();
         t.insert(0, "abc").unwrap();
         t.mark(0..3, "bold", true).unwrap();
@@ -672,7 +787,8 @@ mod tests {
         let mut runs = Vec::new();
         for d in delta {
             if let loro::TextDelta::Insert { insert, attributes } = d {
-                let mut keys: Vec<String> = attributes.unwrap_or_default().keys().cloned().collect();
+                let mut keys: Vec<String> =
+                    attributes.unwrap_or_default().keys().cloned().collect();
                 keys.sort();
                 runs.push((insert, keys));
             }
@@ -680,7 +796,10 @@ mod tests {
         assert_eq!(
             runs,
             vec![
-                ("ab".to_string(), vec!["bold".to_string(), "link".to_string()]),
+                (
+                    "ab".to_string(),
+                    vec!["bold".to_string(), "link".to_string()]
+                ),
                 ("Zcd".to_string(), vec!["bold".to_string()]),
                 ("\n".to_string(), vec![]),
             ]
@@ -692,9 +811,12 @@ mod tests {
         use crate::Paragraphs;
         let dir = std::env::temp_dir().join(format!("wordy-rt-{}", ulid::Ulid::new()));
         let p = Project::create(&dir, "RT").unwrap();
-        let scene = p.create_node(p.root(Space::Manuscript), NodeKind::Scene, "S").unwrap();
+        let scene = p
+            .create_node(p.root(Space::Manuscript), NodeKind::Scene, "S")
+            .unwrap();
         let body = p.node(scene).unwrap().body().unwrap();
-        body.insert(0, "Title\nSome bold and italic text.\n* * *\n").unwrap();
+        body.insert(0, "Title\nSome bold and italic text.\n* * *\n")
+            .unwrap();
         body.mark(5..6, "block", "h1").unwrap();
         body.mark(11..15, "bold", true).unwrap();
         body.mark(20..26, "italic", true).unwrap();
@@ -712,7 +834,9 @@ mod tests {
         assert_eq!(after.get(2).unwrap().block, crate::Block::Break);
         let runs = &after.get(1).unwrap().runs;
         assert!(runs.iter().any(|r| r.marks.bold && r.marks.highlight));
-        assert!(runs.iter().any(|r| r.marks.comment.as_deref() == Some("01ABC")));
+        assert!(runs
+            .iter()
+            .any(|r| r.marks.comment.as_deref() == Some("01ABC")));
         std::fs::remove_dir_all(&dir).ok();
     }
 }
@@ -732,15 +856,26 @@ mod entity_tests {
         na.set_field("role", "Protagonist").unwrap();
         na.add_alias("Annie").unwrap();
         na.add_relation(b, "sibling", "older").unwrap();
-        na.add_attachment("face.png", "abc.png", "image/png").unwrap();
+        na.add_attachment("face.png", "abc.png", "image/png")
+            .unwrap();
         p.commit_meta();
         let bytes = p.export_snapshot().unwrap();
         let q = Project::new_in_memory("t2").unwrap();
         q.import_bytes(&bytes).unwrap();
         let n = q.node(a).unwrap();
         assert_eq!(n.field("role"), "Protagonist");
-        assert_eq!(n.fields(), vec![("role".to_string(), "Protagonist".to_string())]);
-        assert_eq!(n.relations(), vec![Relation { to: b, kind: "sibling".into(), note: "older".into() }]);
+        assert_eq!(
+            n.fields(),
+            vec![("role".to_string(), "Protagonist".to_string())]
+        );
+        assert_eq!(
+            n.relations(),
+            vec![Relation {
+                to: b,
+                kind: "sibling".into(),
+                note: "older".into()
+            }]
+        );
         assert_eq!(n.attachments()[0].path, "abc.png");
         n.set_field("role", "").unwrap();
         assert!(n.fields().is_empty());
@@ -748,7 +883,10 @@ mod entity_tests {
         assert!(n.relations().is_empty());
         let names = q.entity_names();
         assert_eq!(names.len(), 2);
-        assert_eq!(names[0].names, vec!["Anna".to_string(), "Annie".to_string()]);
+        assert_eq!(
+            names[0].names,
+            vec!["Anna".to_string(), "Annie".to_string()]
+        );
         assert!(q.is_live(a));
         q.trash_node(a).unwrap();
         assert!(!q.is_live(a));

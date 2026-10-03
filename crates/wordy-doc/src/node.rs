@@ -203,7 +203,9 @@ fn value_bool(v: Option<ValueOrContainer>) -> Option<bool> {
 
 impl Node {
     pub(crate) fn new(tree: LoroTree, id: TreeID) -> Result<Self> {
-        let meta = tree.get_meta(id).map_err(|e| anyhow!("node {id} has no meta: {e}"))?;
+        let meta = tree
+            .get_meta(id)
+            .map_err(|e| anyhow!("node {id} has no meta: {e}"))?;
         Ok(Self { id, tree, meta })
     }
 
@@ -283,7 +285,10 @@ impl Node {
 
     /// Plain text of the body without the terminating newline.
     pub fn plain_text(&self) -> String {
-        let mut s = self.body_if_exists().map(|t| t.to_string()).unwrap_or_default();
+        let mut s = self
+            .body_if_exists()
+            .map(|t| t.to_string())
+            .unwrap_or_default();
         if s.ends_with('\n') {
             s.pop();
         }
@@ -410,12 +415,20 @@ impl Node {
         self.record_list(meta::RELATIONS)
             .into_iter()
             .filter_map(|m| {
-                let to = m.get("to").and_then(|v| v.as_string().map(|s| s.to_string()))?;
+                let to = m
+                    .get("to")
+                    .and_then(|v| v.as_string().map(|s| s.to_string()))?;
                 let to = TreeID::try_from(to.as_str()).ok()?;
                 Some(Relation {
                     to,
-                    kind: m.get("kind").and_then(|v| v.as_string().map(|s| s.to_string())).unwrap_or_default(),
-                    note: m.get("note").and_then(|v| v.as_string().map(|s| s.to_string())).unwrap_or_default(),
+                    kind: m
+                        .get("kind")
+                        .and_then(|v| v.as_string().map(|s| s.to_string()))
+                        .unwrap_or_default(),
+                    note: m
+                        .get("note")
+                        .and_then(|v| v.as_string().map(|s| s.to_string()))
+                        .unwrap_or_default(),
                 })
             })
             .collect()
@@ -442,9 +455,18 @@ impl Node {
         self.record_list(meta::ATTACHMENTS)
             .into_iter()
             .map(|m| Attachment {
-                name: m.get("name").and_then(|v| v.as_string().map(|s| s.to_string())).unwrap_or_default(),
-                path: m.get("path").and_then(|v| v.as_string().map(|s| s.to_string())).unwrap_or_default(),
-                mime: m.get("mime").and_then(|v| v.as_string().map(|s| s.to_string())).unwrap_or_default(),
+                name: m
+                    .get("name")
+                    .and_then(|v| v.as_string().map(|s| s.to_string()))
+                    .unwrap_or_default(),
+                path: m
+                    .get("path")
+                    .and_then(|v| v.as_string().map(|s| s.to_string()))
+                    .unwrap_or_default(),
+                mime: m
+                    .get("mime")
+                    .and_then(|v| v.as_string().map(|s| s.to_string()))
+                    .unwrap_or_default(),
             })
             .collect()
     }
@@ -454,7 +476,8 @@ impl Node {
         m.insert("name".into(), LoroValue::from(name));
         m.insert("path".into(), LoroValue::from(path));
         m.insert("mime".into(), LoroValue::from(mime));
-        self.list(meta::ATTACHMENTS)?.push(LoroValue::Map(m.into()))?;
+        self.list(meta::ATTACHMENTS)?
+            .push(LoroValue::Map(m.into()))?;
         Ok(())
     }
 

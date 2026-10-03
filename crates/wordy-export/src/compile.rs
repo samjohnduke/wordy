@@ -16,7 +16,12 @@ pub struct CompileOptions {
 
 impl Default for CompileOptions {
     fn default() -> Self {
-        Self { title: String::new(), author: String::new(), scene_titles: false, separator: "#".to_string() }
+        Self {
+            title: String::new(),
+            author: String::new(),
+            scene_titles: false,
+            separator: "#".to_string(),
+        }
     }
 }
 
@@ -71,7 +76,11 @@ impl Compiled {
 /// chapters (acts, parts) are transparent. A scene sitting directly among
 /// chapters becomes a chapter of its own.
 pub fn compile(project: &Project, opts: &CompileOptions) -> Compiled {
-    let title = if opts.title.trim().is_empty() { project.name() } else { opts.title.trim().to_string() };
+    let title = if opts.title.trim().is_empty() {
+        project.name()
+    } else {
+        opts.title.trim().to_string()
+    };
     let mut out = Compiled {
         title,
         author: opts.author.trim().to_string(),
@@ -94,7 +103,10 @@ fn collect(project: &Project, parent: TreeID, chapters: &mut Vec<Chapter>) {
         match node.kind() {
             NodeKind::Scene => {
                 if let Some(scene) = scene_of(project, id) {
-                    chapters.push(Chapter { title: scene.title.clone(), scenes: vec![scene] });
+                    chapters.push(Chapter {
+                        title: scene.title.clone(),
+                        scenes: vec![scene],
+                    });
                 }
             }
             NodeKind::Chapter => chapters.push(chapter_of(project, id, &node.title())),
@@ -123,7 +135,10 @@ fn contains_chapter(project: &Project, id: TreeID) -> bool {
 fn chapter_of(project: &Project, id: TreeID, title: &str) -> Chapter {
     let mut scenes = Vec::new();
     collect_scenes(project, id, &mut scenes);
-    Chapter { title: title.to_string(), scenes }
+    Chapter {
+        title: title.to_string(),
+        scenes,
+    }
 }
 
 /// Included scenes under `parent`, skipping excluded subtrees.
@@ -148,10 +163,17 @@ fn scene_of(project: &Project, id: TreeID) -> Option<Scene> {
     let body = node.body().ok()?;
     let mut paragraphs: Vec<Paragraph> = Paragraphs::from_text(&body).iter().cloned().collect();
     // Drop trailing empties so chapters do not end in blank lines.
-    while paragraphs.last().map(|p| p.text.trim().is_empty() && p.block != wordy_doc::Block::Break).unwrap_or(false) {
+    while paragraphs
+        .last()
+        .map(|p| p.text.trim().is_empty() && p.block != wordy_doc::Block::Break)
+        .unwrap_or(false)
+    {
         paragraphs.pop();
     }
-    Some(Scene { title: node.title(), paragraphs })
+    Some(Scene {
+        title: node.title(),
+        paragraphs,
+    })
 }
 
 #[cfg(test)]
@@ -164,15 +186,35 @@ mod tests {
         let act = p.create_node(root, NodeKind::Act, "Act I").unwrap();
         let ch1 = p.create_node(act, NodeKind::Chapter, "One").unwrap();
         let s1 = p.create_node(ch1, NodeKind::Scene, "Dawn").unwrap();
-        p.node(s1).unwrap().body().unwrap().insert(0, "First scene.\n").unwrap();
+        p.node(s1)
+            .unwrap()
+            .body()
+            .unwrap()
+            .insert(0, "First scene.\n")
+            .unwrap();
         let s2 = p.create_node(ch1, NodeKind::Scene, "Noon").unwrap();
-        p.node(s2).unwrap().body().unwrap().insert(0, "Second scene.\n").unwrap();
+        p.node(s2)
+            .unwrap()
+            .body()
+            .unwrap()
+            .insert(0, "Second scene.\n")
+            .unwrap();
         p.node(s2).unwrap().set_include_in_compile(false).unwrap();
         let ch2 = p.create_node(act, NodeKind::Chapter, "Two").unwrap();
         let s3 = p.create_node(ch2, NodeKind::Scene, "Dusk").unwrap();
-        p.node(s3).unwrap().body().unwrap().insert(0, "Third scene.\n\n").unwrap();
+        p.node(s3)
+            .unwrap()
+            .body()
+            .unwrap()
+            .insert(0, "Third scene.\n\n")
+            .unwrap();
         let loose = p.create_node(root, NodeKind::Scene, "Epilogue").unwrap();
-        p.node(loose).unwrap().body().unwrap().insert(0, "The end.\n").unwrap();
+        p.node(loose)
+            .unwrap()
+            .body()
+            .unwrap()
+            .insert(0, "The end.\n")
+            .unwrap();
         p.commit_meta();
         p
     }
@@ -186,7 +228,11 @@ mod tests {
         assert_eq!(titles, ["One", "Two", "Epilogue"]);
         assert_eq!(c.chapters[0].scenes.len(), 1, "excluded scene is skipped");
         assert_eq!(c.chapters[0].scenes[0].paragraphs[0].text, "First scene.");
-        assert_eq!(c.chapters[1].scenes[0].paragraphs.len(), 1, "trailing blank paragraph trimmed");
+        assert_eq!(
+            c.chapters[1].scenes[0].paragraphs.len(),
+            1,
+            "trailing blank paragraph trimmed"
+        );
         assert_eq!(c.scene_count(), 3);
         assert_eq!(c.word_count(), 6);
     }
@@ -194,7 +240,14 @@ mod tests {
     #[test]
     fn options_override_title() {
         let p = project();
-        let c = compile(&p, &CompileOptions { title: "Real Title".into(), author: "Me".into(), ..Default::default() });
+        let c = compile(
+            &p,
+            &CompileOptions {
+                title: "Real Title".into(),
+                author: "Me".into(),
+                ..Default::default()
+            },
+        );
         assert_eq!(c.title, "Real Title");
         assert_eq!(c.author, "Me");
     }

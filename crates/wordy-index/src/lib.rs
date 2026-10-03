@@ -104,7 +104,9 @@ impl Index {
     pub fn rebuild(&mut self, project: &Project, matcher: &Matcher) -> Result<()> {
         let started = std::time::Instant::now();
         let tx = self.conn.transaction()?;
-        tx.execute_batch("DELETE FROM nodes; DELETE FROM backlinks; DELETE FROM tags; DELETE FROM fts_body;")?;
+        tx.execute_batch(
+            "DELETE FROM nodes; DELETE FROM backlinks; DELETE FROM tags; DELETE FROM fts_body;",
+        )?;
         let mut n = 0usize;
         for id in project.all_nodes() {
             if let Ok(node) = project.node(id) {
@@ -158,7 +160,13 @@ impl Index {
         for row in rows {
             let (id, title, space, kind, count) = row?;
             if let Ok(node) = TreeID::try_from(id.as_str()) {
-                out.push(Backlink { node, title, space, kind: LinkKind::parse(&kind), count });
+                out.push(Backlink {
+                    node,
+                    title,
+                    space,
+                    kind: LinkKind::parse(&kind),
+                    count,
+                });
             }
         }
         // Merge explicit+auto rows for the same node into one entry.
@@ -178,10 +186,14 @@ impl Index {
 
     /// Entities a node references (for "mentions" filters).
     pub fn entities_in(&self, node: TreeID) -> Result<Vec<TreeID>> {
-        let mut stmt =
-            self.conn.prepare("SELECT DISTINCT entity_id FROM backlinks WHERE node_id = ?1")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT entity_id FROM backlinks WHERE node_id = ?1")?;
         let rows = stmt.query_map(params![node.to_string()], |r| r.get::<_, String>(0))?;
-        Ok(rows.flatten().filter_map(|s| TreeID::try_from(s.as_str()).ok()).collect())
+        Ok(rows
+            .flatten()
+            .filter_map(|s| TreeID::try_from(s.as_str()).ok())
+            .collect())
     }
 
     /// Full-text search over titles and bodies. Each term matches as a prefix.
@@ -212,7 +224,12 @@ impl Index {
         for row in rows {
             let (id, title, space, snippet) = row?;
             if let Ok(node) = TreeID::try_from(id.as_str()) {
-                out.push(SearchHit { node, title, space, snippet });
+                out.push(SearchHit {
+                    node,
+                    title,
+                    space,
+                    snippet,
+                });
             }
         }
         Ok(out)
@@ -228,9 +245,14 @@ impl Index {
     }
 
     pub fn nodes_with_tag(&self, tag: &str) -> Result<Vec<TreeID>> {
-        let mut stmt = self.conn.prepare("SELECT node_id FROM tags WHERE tag = ?1")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT node_id FROM tags WHERE tag = ?1")?;
         let rows = stmt.query_map(params![tag], |r| r.get::<_, String>(0))?;
-        Ok(rows.flatten().filter_map(|s| TreeID::try_from(s.as_str()).ok()).collect())
+        Ok(rows
+            .flatten()
+            .filter_map(|s| TreeID::try_from(s.as_str()).ok())
+            .collect())
     }
 
     pub fn set_daily_words(&self, date: &str, words: i64) -> Result<()> {
@@ -243,7 +265,9 @@ impl Index {
     }
 
     pub fn daily_words(&self) -> Result<Vec<(String, i64)>> {
-        let mut stmt = self.conn.prepare("SELECT date, words FROM daily_words ORDER BY date")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT date, words FROM daily_words ORDER BY date")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         Ok(rows.flatten().collect())
     }
@@ -275,7 +299,10 @@ fn index_node(tx: &rusqlite::Transaction<'_>, node: &Node, matcher: &Matcher) ->
         ],
     )?;
     for tag in node.tags() {
-        tx.execute("INSERT OR IGNORE INTO tags(node_id, tag) VALUES (?1, ?2)", params![id, tag])?;
+        tx.execute(
+            "INSERT OR IGNORE INTO tags(node_id, tag) VALUES (?1, ?2)",
+            params![id, tag],
+        )?;
     }
     if node.kind().has_body() {
         tx.execute(

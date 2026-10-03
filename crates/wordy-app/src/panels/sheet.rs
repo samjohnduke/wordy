@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use wordy_doc::templates::{self, FieldSpec, Template};
@@ -55,17 +55,32 @@ pub struct EntitySheet {
 }
 
 impl EntitySheet {
-    pub fn new(project: SharedProject, id: TreeID, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let aliases_now = project.project.node(id).map(|n| n.aliases().join(", ")).unwrap_or_default();
+    pub fn new(
+        project: SharedProject,
+        id: TreeID,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let aliases_now = project
+            .project
+            .node(id)
+            .map(|n| n.aliases().join(", "))
+            .unwrap_or_default();
         let aliases = cx.new(|cx| {
-            InputState::new(window, cx).default_value(aliases_now).placeholder("Aliases, comma separated")
+            InputState::new(window, cx)
+                .default_value(aliases_now)
+                .placeholder("Aliases, comma separated")
         });
-        let sub = cx.subscribe_in(&aliases, window, |this, input, ev: &InputEvent, _window, cx| {
-            if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                let value = input.read(cx).value().to_string();
-                this.commit_aliases(&value, cx);
-            }
-        });
+        let sub = cx.subscribe_in(
+            &aliases,
+            window,
+            |this, input, ev: &InputEvent, _window, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    let value = input.read(cx).value().to_string();
+                    this.commit_aliases(&value, cx);
+                }
+            },
+        );
         let mut this = Self {
             project,
             id,
@@ -80,7 +95,12 @@ impl EntitySheet {
     }
 
     pub fn template(&self) -> Template {
-        let id = self.project.project.node(self.id).ok().and_then(|n| n.template());
+        let id = self
+            .project
+            .project
+            .node(self.id)
+            .ok()
+            .and_then(|n| n.template());
         match id {
             Some(id) => templates::by_id(&id),
             None => templates::DEFAULT,
@@ -95,30 +115,48 @@ impl EntitySheet {
 
     fn build_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.fields.clear();
-        let Ok(node) = self.project.project.node(self.id) else { return };
+        let Ok(node) = self.project.project.node(self.id) else {
+            return;
+        };
         for spec in self.template().fields {
             let value = node.field(spec.key);
             let key = spec.key;
             let (input, sub) = if spec.multiline {
-                let state = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 12).default_value(value));
-                let sub = cx.subscribe_in(&state, window, move |this, input, ev: &InputEvent, _window, cx| {
-                    if matches!(ev, InputEvent::Change) {
-                        let v = input.read(cx).value().to_string();
-                        this.set_field(key, &v, cx);
-                    }
+                let state = cx.new(|cx| {
+                    TextareaState::new(window, cx)
+                        .auto_grow(2, 12)
+                        .default_value(value)
                 });
+                let sub = cx.subscribe_in(
+                    &state,
+                    window,
+                    move |this, input, ev: &InputEvent, _window, cx| {
+                        if matches!(ev, InputEvent::Change) {
+                            let v = input.read(cx).value().to_string();
+                            this.set_field(key, &v, cx);
+                        }
+                    },
+                );
                 (FieldInput::Multi(state), sub)
             } else {
                 let state = cx.new(|cx| InputState::new(window, cx).default_value(value));
-                let sub = cx.subscribe_in(&state, window, move |this, input, ev: &InputEvent, _window, cx| {
-                    if matches!(ev, InputEvent::Change) {
-                        let v = input.read(cx).value().to_string();
-                        this.set_field(key, &v, cx);
-                    }
-                });
+                let sub = cx.subscribe_in(
+                    &state,
+                    window,
+                    move |this, input, ev: &InputEvent, _window, cx| {
+                        if matches!(ev, InputEvent::Change) {
+                            let v = input.read(cx).value().to_string();
+                            this.set_field(key, &v, cx);
+                        }
+                    },
+                );
                 (FieldInput::Single(state), sub)
             };
-            self.fields.push(Field { spec: *spec, input, _sub: sub });
+            self.fields.push(Field {
+                spec: *spec,
+                input,
+                _sub: sub,
+            });
         }
     }
 
@@ -133,7 +171,12 @@ impl EntitySheet {
         }
     }
 
-    fn set_template(&mut self, template: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+    fn set_template(
+        &mut self,
+        template: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Ok(node) = self.project.project.node(self.id) {
             if let Err(e) = node.set_template(template) {
                 tracing::error!("set template: {e:#}");
@@ -144,9 +187,14 @@ impl EntitySheet {
     }
 
     fn commit_aliases(&mut self, value: &str, cx: &mut Context<Self>) {
-        let Ok(node) = self.project.project.node(self.id) else { return };
-        let wanted: Vec<String> =
-            value.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        let Ok(node) = self.project.project.node(self.id) else {
+            return;
+        };
+        let wanted: Vec<String> = value
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
         let current = node.aliases();
         if wanted == current {
             return;
@@ -183,7 +231,11 @@ impl EntitySheet {
             }
         });
         kind.update(cx, |s, cx| s.focus(window, cx));
-        self.relation_form = Some(RelationForm { kind, target, _subs: vec![s1, s2] });
+        self.relation_form = Some(RelationForm {
+            kind,
+            target,
+            _subs: vec![s1, s2],
+        });
         cx.notify();
     }
 
@@ -196,12 +248,15 @@ impl EntitySheet {
         let targets = self.project.link_targets();
         let exact = targets.iter().find(|t| {
             t.id != self.id
-                && (t.title.to_lowercase() == name || t.aliases.iter().any(|a| a.to_lowercase() == name))
+                && (t.title.to_lowercase() == name
+                    || t.aliases.iter().any(|a| a.to_lowercase() == name))
         });
         if let Some(t) = exact {
             return Some(t.id);
         }
-        let mut prefix = targets.iter().filter(|t| t.id != self.id && t.title.to_lowercase().starts_with(&name));
+        let mut prefix = targets
+            .iter()
+            .filter(|t| t.id != self.id && t.title.to_lowercase().starts_with(&name));
         let first = prefix.next()?;
         if prefix.next().is_some() {
             return None;
@@ -210,7 +265,9 @@ impl EntitySheet {
     }
 
     fn commit_relation(&mut self, cx: &mut Context<Self>) {
-        let Some(form) = self.relation_form.as_ref() else { return };
+        let Some(form) = self.relation_form.as_ref() else {
+            return;
+        };
         let kind = form.kind.read(cx).value().trim().to_string();
         let target = form.target.read(cx).value().to_string();
         let Some(to) = self.resolve_entity(&target) else {
@@ -242,7 +299,12 @@ impl EntitySheet {
     }
 
     fn add_attachments(&mut self, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: None });
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: None,
+        });
         cx.spawn(async move |this, cx| {
             let picked = match rx.await {
                 Ok(Ok(Some(paths))) => paths,
@@ -263,20 +325,35 @@ impl EntitySheet {
 
     /// Copy `src` into `assets/` under a content-hash name and record it.
     fn attach(&self, src: &Path) -> anyhow::Result<()> {
-        let assets = self.assets_dir().ok_or_else(|| anyhow::anyhow!("project has no folder"))?;
+        let assets = self
+            .assets_dir()
+            .ok_or_else(|| anyhow::anyhow!("project has no folder"))?;
         std::fs::create_dir_all(&assets)?;
         let bytes = std::fs::read(src)?;
         let mut h = DefaultHasher::new();
         bytes.hash(&mut h);
-        let ext = src.extension().and_then(|e| e.to_str()).map(|e| format!(".{e}")).unwrap_or_default();
+        let ext = src
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!(".{e}"))
+            .unwrap_or_default();
         let rel = format!("{:016x}{ext}", h.finish());
         let dest = assets.join(&rel);
         if !dest.exists() {
             std::fs::write(&dest, &bytes)?;
         }
-        let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("attachment").to_string();
-        let mime = mime_guess::from_path(src).first_raw().unwrap_or("application/octet-stream");
-        self.project.project.node(self.id)?.add_attachment(&name, &rel, mime)?;
+        let name = src
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("attachment")
+            .to_string();
+        let mime = mime_guess::from_path(src)
+            .first_raw()
+            .unwrap_or("application/octet-stream");
+        self.project
+            .project
+            .node(self.id)?
+            .add_attachment(&name, &rel, mime)?;
         Ok(())
     }
 
@@ -298,20 +375,28 @@ impl EntitySheet {
     // ----- render ----------------------------------------------------------
 
     fn label(text: impl Into<SharedString>, cx: &App) -> Div {
-        div().text_xs().text_color(cx.theme().muted_foreground).child(text.into())
+        div()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(text.into())
     }
 
     fn render_templates(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.template().id;
-        h_flex().flex_wrap().gap_1().children(templates::ALL.iter().map(|t| {
-            let id = t.id;
-            Button::new(ElementId::Name(format!("tpl-{id}").into()))
-                .ghost()
-                .xsmall()
-                .label(t.label)
-                .toggled(current == id)
-                .on_click(cx.listener(move |this, _, window, cx| this.set_template(id, window, cx)))
-        }))
+        h_flex()
+            .flex_wrap()
+            .gap_1()
+            .children(templates::ALL.iter().map(|t| {
+                let id = t.id;
+                Button::new(ElementId::Name(format!("tpl-{id}").into()))
+                    .ghost()
+                    .xsmall()
+                    .label(t.label)
+                    .toggled(current == id)
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.set_template(id, window, cx)),
+                    )
+            }))
     }
 
     fn render_fields(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -322,33 +407,55 @@ impl EntitySheet {
                     FieldInput::Single(s) => Input::new(s).small().into_any_element(),
                     FieldInput::Multi(s) => Textarea::new(s).small().into_any_element(),
                 };
-                v_flex().gap_0p5().w_full().child(Self::label(f.spec.label, cx)).child(input).into_any_element()
+                v_flex()
+                    .gap_0p5()
+                    .w_full()
+                    .child(Self::label(f.spec.label, cx))
+                    .child(input)
+                    .into_any_element()
             })
             .collect()
     }
 
     fn render_relations(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let Ok(node) = self.project.project.node(self.id) else { return v_flex() };
+        let Ok(node) = self.project.project.node(self.id) else {
+            return v_flex();
+        };
         let relations = node.relations();
         let mut section = v_flex().gap_0p5().w_full().child(
-            h_flex().justify_between().items_center().child(Self::label("Relations", cx)).child(
-                Button::new("rel-add")
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Plus)
-                    .tooltip("Add relation")
-                    .on_click(cx.listener(|this, _, window, cx| this.begin_relation(window, cx))),
-            ),
+            h_flex()
+                .justify_between()
+                .items_center()
+                .child(Self::label("Relations", cx))
+                .child(
+                    Button::new("rel-add")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Plus)
+                        .tooltip("Add relation")
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.begin_relation(window, cx)),
+                        ),
+                ),
         );
         for (ix, r) in relations.iter().enumerate() {
             let to = r.to;
-            let title = self.project.project.node(to).map(|n| n.title()).unwrap_or_else(|_| "(missing)".into());
+            let title = self
+                .project
+                .project
+                .node(to)
+                .map(|n| n.title())
+                .unwrap_or_else(|_| "(missing)".into());
             section = section.child(
                 h_flex()
                     .gap_1()
                     .items_center()
                     .text_sm()
-                    .child(div().text_color(cx.theme().muted_foreground).child(r.kind.clone()))
+                    .child(
+                        div()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(r.kind.clone()),
+                    )
                     .child(
                         div()
                             .id(ElementId::Name(format!("rel-{ix}").into()))
@@ -369,7 +476,9 @@ impl EntitySheet {
                             .ghost()
                             .xsmall()
                             .icon(IconName::Close)
-                            .on_click(cx.listener(move |this, _, _, cx| this.remove_relation(ix, cx))),
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.remove_relation(ix, cx)),
+                            ),
                     ),
             );
         }
@@ -387,29 +496,39 @@ impl EntitySheet {
                             .label("Add")
                             .on_click(cx.listener(|this, _, _, cx| this.commit_relation(cx))),
                     )
-                    .child(Button::new("rel-cancel").ghost().xsmall().icon(IconName::Close).on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.relation_form = None;
-                            cx.notify();
-                        }),
-                    )),
+                    .child(
+                        Button::new("rel-cancel")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.relation_form = None;
+                                cx.notify();
+                            })),
+                    ),
             );
         }
         section
     }
 
     fn render_attachments(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let Ok(node) = self.project.project.node(self.id) else { return v_flex() };
+        let Ok(node) = self.project.project.node(self.id) else {
+            return v_flex();
+        };
         let attachments = node.attachments();
         let mut section = v_flex().gap_0p5().w_full().child(
-            h_flex().justify_between().items_center().child(Self::label("Attachments", cx)).child(
-                Button::new("att-add")
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Plus)
-                    .tooltip("Add files…")
-                    .on_click(cx.listener(|this, _, _, cx| this.add_attachments(cx))),
-            ),
+            h_flex()
+                .justify_between()
+                .items_center()
+                .child(Self::label("Attachments", cx))
+                .child(
+                    Button::new("att-add")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Plus)
+                        .tooltip("Add files…")
+                        .on_click(cx.listener(|this, _, _, cx| this.add_attachments(cx))),
+                ),
         );
         for (ix, a) in attachments.iter().enumerate() {
             let rel = a.path.clone();
@@ -429,15 +548,24 @@ impl EntitySheet {
                             .text_color(cx.theme().primary)
                             .cursor_pointer()
                             .child(a.name.clone())
-                            .on_click(cx.listener(move |this, _, _, cx| this.open_attachment(&rel, cx))),
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.open_attachment(&rel, cx)),
+                            ),
                     )
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(a.mime.clone()))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(a.mime.clone()),
+                    )
                     .child(
                         Button::new(ElementId::Name(format!("att-rm-{ix}").into()))
                             .ghost()
                             .xsmall()
                             .icon(IconName::Close)
-                            .on_click(cx.listener(move |this, _, _, cx| this.remove_attachment(ix, cx))),
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.remove_attachment(ix, cx)),
+                            ),
                     ),
             );
         }
@@ -446,10 +574,16 @@ impl EntitySheet {
 
     fn render_appears_in(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let backlinks = self.project.appears_in(self.id);
-        let mut section = v_flex().gap_0p5().w_full().child(Self::label("Appears in", cx));
+        let mut section = v_flex()
+            .gap_0p5()
+            .w_full()
+            .child(Self::label("Appears in", cx));
         if backlinks.is_empty() {
             section = section.child(
-                div().text_sm().text_color(cx.theme().muted_foreground).child("Not mentioned anywhere yet."),
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Not mentioned anywhere yet."),
             );
         }
         for (ix, b) in backlinks.iter().enumerate() {
@@ -524,7 +658,12 @@ impl Render for EntitySheet {
         if !collapsed {
             sheet = sheet
                 .child(self.render_templates(cx))
-                .child(v_flex().gap_0p5().child(Self::label("Aliases", cx)).child(Input::new(&self.aliases).small()))
+                .child(
+                    v_flex()
+                        .gap_0p5()
+                        .child(Self::label("Aliases", cx))
+                        .child(Input::new(&self.aliases).small()),
+                )
                 .children(self.render_fields(cx))
                 .child(self.render_relations(cx))
                 .child(self.render_attachments(cx))

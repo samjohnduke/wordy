@@ -13,7 +13,7 @@ pub mod markdown;
 pub mod pdf;
 pub mod snippet;
 
-pub use compile::{compile, Chapter, Compiled, CompileOptions, Scene};
+pub use compile::{compile, Chapter, CompileOptions, Compiled, Scene};
 pub use snippet::{SnippetOptions, SnippetSize};
 
 use anyhow::Result;

@@ -41,15 +41,23 @@ pub fn render(c: &Compiled) -> Result<Vec<u8>> {
     book.stylesheet(CSS.as_bytes()).map_err(err)?;
 
     let title_page = xhtml(&c.title, &title_body(c));
-    book.add_content(EpubContent::new("title.xhtml", title_page.as_bytes()).title("Title Page").reftype(ReferenceType::TitlePage))
-        .map_err(err)?;
+    book.add_content(
+        EpubContent::new("title.xhtml", title_page.as_bytes())
+            .title("Title Page")
+            .reftype(ReferenceType::TitlePage),
+    )
+    .map_err(err)?;
     book.inline_toc();
 
     for (i, chapter) in c.chapters.iter().enumerate() {
         let href = format!("chapter-{:03}.xhtml", i + 1);
         let page = xhtml(&chapter.title, &chapter_body(c, chapter));
-        book.add_content(EpubContent::new(href, page.as_bytes()).title(&chapter.title).reftype(ReferenceType::Text))
-            .map_err(err)?;
+        book.add_content(
+            EpubContent::new(href, page.as_bytes())
+                .title(&chapter.title)
+                .reftype(ReferenceType::Text),
+        )
+        .map_err(err)?;
     }
 
     let mut out = Vec::new();
@@ -75,7 +83,11 @@ fn chapter_body(c: &Compiled, chapter: &Chapter) -> String {
             let _ = writeln!(s, "<p class=\"sep\">{}</p>", esc(&c.separator));
         }
         for p in &scene.paragraphs {
-            let inner: String = p.runs.iter().map(|r| styled(&esc(&r.text), &r.marks)).collect();
+            let inner: String = p
+                .runs
+                .iter()
+                .map(|r| styled(&esc(&r.text), &r.marks))
+                .collect();
             match p.block {
                 Block::Paragraph => {
                     let _ = writeln!(s, "<p>{inner}</p>");
@@ -165,13 +177,22 @@ mod tests {
         let bytes = render(&crate::docx::tests::sample()).unwrap();
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
         let mut mt = String::new();
-        zip.by_name("mimetype").unwrap().read_to_string(&mut mt).unwrap();
+        zip.by_name("mimetype")
+            .unwrap()
+            .read_to_string(&mut mt)
+            .unwrap();
         assert_eq!(mt, "application/epub+zip");
         let mut ch = String::new();
-        zip.by_name("OEBPS/chapter-001.xhtml").unwrap().read_to_string(&mut ch).unwrap();
+        zip.by_name("OEBPS/chapter-001.xhtml")
+            .unwrap()
+            .read_to_string(&mut ch)
+            .unwrap();
         assert!(ch.contains("<h1>One</h1>"));
         assert!(ch.contains("Hello &lt;world&gt;<strong><em> loud</em></strong>"));
-        assert!(ch.contains("<p class=\"sep\">#</p>"), "scene separator between scenes");
+        assert!(
+            ch.contains("<p class=\"sep\">#</p>"),
+            "scene separator between scenes"
+        );
         assert!(zip.by_name("OEBPS/chapter-002.xhtml").is_ok());
     }
 }

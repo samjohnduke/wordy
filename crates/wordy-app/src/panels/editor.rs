@@ -13,7 +13,9 @@ use wordy_doc::{storage, NodeKind, Status, TreeID, Version};
 use wordy_editor::{EditorEvent, LinkTarget, ProseEditor};
 use wordy_export::{SnippetOptions, SnippetSize};
 
-use crate::app::{CloseFind, Find, FindNext, FindPrev, Replace, SharedProject, EDITOR_PANEL_CONTEXT};
+use crate::app::{
+    CloseFind, Find, FindNext, FindPrev, Replace, SharedProject, EDITOR_PANEL_CONTEXT,
+};
 use crate::panels::sheet::{EntitySheet, SheetEvent};
 
 pub enum EditorPanelEvent {
@@ -98,34 +100,61 @@ impl EditorPanel {
             e.set_self_id(Some(id));
             e.set_link_targets(project.link_targets(), cx);
         });
-        let mut subs = vec![cx.subscribe(&editor, |_, _, ev: &EditorEvent, cx| match ev {
-            EditorEvent::Edited => cx.emit(EditorPanelEvent::Edited),
-            EditorEvent::OpenLink { id, navigate } => {
-                cx.emit(EditorPanelEvent::OpenLink { id: *id, navigate: *navigate })
-            }
-            EditorEvent::DictionaryChanged(w) => cx.emit(EditorPanelEvent::DictionaryChanged(w.clone())),
-            EditorEvent::SelectionChanged => {}
-        })];
-        let is_entity = project.project.node(id).map(|n| n.kind() == NodeKind::Entity).unwrap_or(false);
+        let mut subs = vec![
+            cx.subscribe(&editor, |_, _, ev: &EditorEvent, cx| match ev {
+                EditorEvent::Edited => cx.emit(EditorPanelEvent::Edited),
+                EditorEvent::OpenLink { id, navigate } => cx.emit(EditorPanelEvent::OpenLink {
+                    id: *id,
+                    navigate: *navigate,
+                }),
+                EditorEvent::DictionaryChanged(w) => {
+                    cx.emit(EditorPanelEvent::DictionaryChanged(w.clone()))
+                }
+                EditorEvent::SelectionChanged => {}
+            }),
+        ];
+        let is_entity = project
+            .project
+            .node(id)
+            .map(|n| n.kind() == NodeKind::Entity)
+            .unwrap_or(false);
         let sheet = is_entity.then(|| {
             let sheet = cx.new(|cx| EntitySheet::new(project.clone(), id, window, cx));
             subs.push(cx.subscribe(&sheet, |_, _, ev: &SheetEvent, cx| match ev {
                 SheetEvent::Changed => cx.emit(EditorPanelEvent::Edited),
                 SheetEvent::NamesChanged => cx.emit(EditorPanelEvent::NamesChanged),
-                SheetEvent::Open(id) => cx.emit(EditorPanelEvent::OpenLink { id: *id, navigate: true }),
-                SheetEvent::Pin(id) => cx.emit(EditorPanelEvent::OpenLink { id: *id, navigate: false }),
+                SheetEvent::Open(id) => cx.emit(EditorPanelEvent::OpenLink {
+                    id: *id,
+                    navigate: true,
+                }),
+                SheetEvent::Pin(id) => cx.emit(EditorPanelEvent::OpenLink {
+                    id: *id,
+                    navigate: false,
+                }),
             }));
             sheet
         });
         let meta = (!is_entity).then(|| {
             let node = project.project.node(id).ok();
-            let goal_seed = node.as_ref().and_then(|n| n.word_goal()).map(|g| g.to_string()).unwrap_or_default();
-            let goal = cx.new(|cx| InputState::new(window, cx).default_value(goal_seed).placeholder("goal"));
+            let goal_seed = node
+                .as_ref()
+                .and_then(|n| n.word_goal())
+                .map(|g| g.to_string())
+                .unwrap_or_default();
+            let goal = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .default_value(goal_seed)
+                    .placeholder("goal")
+            });
             let tag = cx.new(|cx| InputState::new(window, cx).placeholder("+ tag"));
             let s1 = cx.subscribe_in(&goal, window, move |this, input, ev: &InputEvent, _, cx| {
                 if matches!(ev, InputEvent::Change) {
                     let v = input.read(cx).value().trim().to_string();
-                    let parsed = if v.is_empty() { None } else { v.parse::<i64>().ok() };
+                    let parsed = if v.is_empty() {
+                        None
+                    } else {
+                        v.parse::<i64>().ok()
+                    };
                     if !v.is_empty() && parsed.is_none() {
                         return;
                     }
@@ -139,21 +168,35 @@ impl EditorPanel {
                     }
                 }
             });
-            let s2 = cx.subscribe_in(&tag, window, move |this, input, ev: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } = ev {
-                    let v = input.read(cx).value().trim().trim_start_matches('#').to_lowercase();
-                    if !v.is_empty() {
-                        if let Ok(node) = this.project.project.node(id) {
-                            if let Err(e) = node.add_tag(&v) {
-                                tracing::error!("add tag: {e:#}");
+            let s2 = cx.subscribe_in(
+                &tag,
+                window,
+                move |this, input, ev: &InputEvent, window, cx| {
+                    if let InputEvent::PressEnter { .. } = ev {
+                        let v = input
+                            .read(cx)
+                            .value()
+                            .trim()
+                            .trim_start_matches('#')
+                            .to_lowercase();
+                        if !v.is_empty() {
+                            if let Ok(node) = this.project.project.node(id) {
+                                if let Err(e) = node.add_tag(&v) {
+                                    tracing::error!("add tag: {e:#}");
+                                }
                             }
+                            input.update(cx, |s, cx| s.set_value("", window, cx));
+                            this.meta_changed(cx);
                         }
-                        input.update(cx, |s, cx| s.set_value("", window, cx));
-                        this.meta_changed(cx);
                     }
-                }
-            });
-            MetaBar { goal, tag, version_label: None, _subs: vec![s1, s2] }
+                },
+            );
+            MetaBar {
+                goal,
+                tag,
+                version_label: None,
+                _subs: vec![s1, s2],
+            }
         });
         Self {
             project,
@@ -178,7 +221,13 @@ impl EditorPanel {
     }
 
     /// Select `len` code points at `offset` and scroll them into view.
-    pub fn reveal(&mut self, offset: usize, len: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn reveal(
+        &mut self,
+        offset: usize,
+        len: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(editor) = &self.editor {
             editor.update(cx, |e, cx| e.select_range(offset..offset + len, cx));
         }
@@ -217,7 +266,9 @@ impl EditorPanel {
         self.notice = Some(text.into());
         cx.notify();
         self._notice_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(std::time::Duration::from_secs(5)).await;
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(5))
+                .await;
             this.update(cx, |t, cx| {
                 t.notice = None;
                 cx.notify();
@@ -252,9 +303,9 @@ impl EditorPanel {
         };
         let settings = self.project.project.settings_map();
         let get = |k: &str| match settings.get(k) {
-            Some(wordy_doc::loro::ValueOrContainer::Value(wordy_doc::loro::LoroValue::String(s))) if !s.is_empty() => {
-                Some(s.to_string())
-            }
+            Some(wordy_doc::loro::ValueOrContainer::Value(wordy_doc::loro::LoroValue::String(
+                s,
+            ))) if !s.is_empty() => Some(s.to_string()),
             _ => None,
         };
         let title = get("export.title").unwrap_or_else(|| self.project.project.name());
@@ -262,9 +313,15 @@ impl EditorPanel {
             Some(a) => format!("{title} · {a}"),
             None => title,
         };
-        let opts = SnippetOptions { size, dark, attribution };
+        let opts = SnippetOptions {
+            size,
+            dark,
+            attribution,
+        };
         let out_dir = self.project.dir().map(|d| d.join("exports"));
-        let stamp = wordy_doc::chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+        let stamp = wordy_doc::chrono::Local::now()
+            .format("%Y%m%d-%H%M%S")
+            .to_string();
         self.notify_user("Rendering snippet…", cx);
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -304,8 +361,15 @@ impl EditorPanel {
         let Some(meta) = self.meta.as_mut() else {
             return;
         };
-        let seed = format!("Version {}", wordy_doc::chrono::Local::now().format("%b %-d %H:%M"));
-        let input = cx.new(|cx| InputState::new(window, cx).default_value(seed).placeholder("Version label"));
+        let seed = format!(
+            "Version {}",
+            wordy_doc::chrono::Local::now().format("%b %-d %H:%M")
+        );
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(seed)
+                .placeholder("Version label")
+        });
         let sub = cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, _, cx| {
             if let InputEvent::PressEnter { .. } = ev {
                 let label = input.read(cx).value().trim().to_string();
@@ -410,9 +474,15 @@ impl EditorPanel {
                         let mut menu = menu;
                         for st in Status::ALL {
                             let w = w.clone();
-                            menu = menu.item(PopupMenuItem::new(st.label()).checked(st == current).on_click(
-                                move |_, _, cx| w.update(cx, |p, cx| p.set_status(st, cx)).ok().unwrap_or(()),
-                            ));
+                            menu = menu.item(
+                                PopupMenuItem::new(st.label())
+                                    .checked(st == current)
+                                    .on_click(move |_, _, cx| {
+                                        w.update(cx, |p, cx| p.set_status(st, cx))
+                                            .ok()
+                                            .unwrap_or(())
+                                    }),
+                            );
                         }
                         menu
                     }),
@@ -444,7 +514,11 @@ impl EditorPanel {
                     .text_color(theme.accent_foreground)
                     .child(format!("#{tag}"))
                     .child(
-                        div().text_color(muted).cursor_pointer().hover(|s| s.text_color(theme.foreground)).child("×"),
+                        div()
+                            .text_color(muted)
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(theme.foreground))
+                            .child("×"),
                     )
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| this.remove_tag(&t, cx))),
@@ -475,7 +549,9 @@ impl EditorPanel {
                     ] {
                         let w = ws.clone();
                         menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                            w.update(cx, |p, cx| p.make_snippet(size, dark, cx)).ok().unwrap_or(())
+                            w.update(cx, |p, cx| p.make_snippet(size, dark, cx))
+                                .ok()
+                                .unwrap_or(())
                         }));
                     }
                     menu
@@ -490,19 +566,31 @@ impl EditorPanel {
             Button::new("meta-versions")
                 .ghost()
                 .xsmall()
-                .label(if count == 0 { "Versions".to_string() } else { format!("Versions ({count})") })
+                .label(if count == 0 {
+                    "Versions".to_string()
+                } else {
+                    format!("Versions ({count})")
+                })
                 .tooltip("Saved versions of this body")
                 .dropdown_menu(move |menu, window, cx| {
                     let w0 = w.clone();
-                    let mut menu = menu.item(PopupMenuItem::new("Save version…").on_click(move |_, window, cx| {
-                        w0.update(cx, |p, cx| p.begin_save_version(window, cx)).ok().unwrap_or(())
-                    }));
+                    let mut menu = menu.item(PopupMenuItem::new("Save version…").on_click(
+                        move |_, window, cx| {
+                            w0.update(cx, |p, cx| p.begin_save_version(window, cx))
+                                .ok()
+                                .unwrap_or(())
+                        },
+                    ));
                     if !versions.is_empty() {
                         menu = menu.separator();
                     }
                     for v in versions.iter().cloned() {
                         let when = wordy_doc::chrono::DateTime::from_timestamp_millis(v.created)
-                            .map(|d| d.with_timezone(&wordy_doc::chrono::Local).format("%b %-d, %H:%M").to_string())
+                            .map(|d| {
+                                d.with_timezone(&wordy_doc::chrono::Local)
+                                    .format("%b %-d, %H:%M")
+                                    .to_string()
+                            })
                             .unwrap_or_default();
                         let label = format!("{} · {when}", v.label);
                         let w = w.clone();
@@ -510,17 +598,25 @@ impl EditorPanel {
                             let (v1, v2, v3) = (v.clone(), v.clone(), v.clone());
                             let (w1, w2, w3) = (w.clone(), w.clone(), w.clone());
                             menu.item(PopupMenuItem::new("View").on_click(move |_, _, cx| {
-                                w1.update(cx, |_, cx| cx.emit(EditorPanelEvent::ViewVersion(v1.clone())))
+                                w1.update(cx, |_, cx| {
+                                    cx.emit(EditorPanelEvent::ViewVersion(v1.clone()))
+                                })
+                                .ok()
+                                .unwrap_or(())
+                            }))
+                            .item(PopupMenuItem::new("Restore").on_click(move |_, _, cx| {
+                                w2.update(cx, |p, cx| p.restore_version(&v2, cx))
                                     .ok()
                                     .unwrap_or(())
                             }))
-                            .item(PopupMenuItem::new("Restore").on_click(move |_, _, cx| {
-                                w2.update(cx, |p, cx| p.restore_version(&v2, cx)).ok().unwrap_or(())
-                            }))
                             .separator()
-                            .item(PopupMenuItem::new("Delete").on_click(
-                                move |_, _, cx| w3.update(cx, |p, cx| p.delete_version(&v3.id, cx)).ok().unwrap_or(()),
-                            ))
+                            .item(
+                                PopupMenuItem::new("Delete").on_click(move |_, _, cx| {
+                                    w3.update(cx, |p, cx| p.delete_version(&v3.id, cx))
+                                        .ok()
+                                        .unwrap_or(())
+                                }),
+                            )
                         });
                     }
                     menu
@@ -541,17 +637,21 @@ impl EditorPanel {
                     .border_color(theme.border)
                     .child(div().text_color(muted).child("Save version as"))
                     .child(div().w(px(260.)).child(Input::new(input).small()))
-                    .child(Button::new("ver-save").primary().xsmall().label("Save").on_click(cx.listener(
-                        |this, _, _, cx| {
-                            let label = this
-                                .meta
-                                .as_ref()
-                                .and_then(|m| m.version_label.as_ref())
-                                .map(|(i, _)| i.read(cx).value().trim().to_string())
-                                .unwrap_or_default();
-                            this.save_version(&label, cx);
-                        },
-                    )))
+                    .child(
+                        Button::new("ver-save")
+                            .primary()
+                            .xsmall()
+                            .label("Save")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let label = this
+                                    .meta
+                                    .as_ref()
+                                    .and_then(|m| m.version_label.as_ref())
+                                    .map(|(i, _)| i.read(cx).value().trim().to_string())
+                                    .unwrap_or_default();
+                                this.save_version(&label, cx);
+                            })),
+                    )
                     .child(
                         Button::new("ver-cancel")
                             .ghost()
@@ -582,7 +682,10 @@ impl EditorPanel {
     }
 
     pub fn word_count(&self, cx: &App) -> usize {
-        self.editor.as_ref().map(|e| e.read(cx).word_count()).unwrap_or(0)
+        self.editor
+            .as_ref()
+            .map(|e| e.read(cx).word_count())
+            .unwrap_or(0)
     }
 
     pub fn title(&self) -> SharedString {
@@ -631,33 +734,54 @@ impl EditorPanel {
                     String::new()
                 }
             };
-            let find = cx.new(|cx| InputState::new(window, cx).default_value(seed.clone()).placeholder("Find"));
+            let find = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .default_value(seed.clone())
+                    .placeholder("Find")
+            });
             let replace = cx.new(|cx| InputState::new(window, cx).placeholder("Replace"));
             let ed = editor.clone();
-            let s1 = cx.subscribe_in(&find, window, move |this, input, ev: &InputEvent, _window, cx| match ev {
-                InputEvent::Change => {
-                    let q = input.read(cx).value().to_string();
-                    ed.update(cx, |e, cx| e.set_search(Some(q), cx));
-                    cx.notify();
-                }
-                InputEvent::PressEnter { shift, .. } => {
-                    this.step(if *shift { -1 } else { 1 }, cx);
-                }
-                _ => {}
-            });
-            let s2 = cx.subscribe_in(&replace, window, move |this, _, ev: &InputEvent, _window, cx| {
-                if let InputEvent::PressEnter { .. } = ev {
-                    this.replace_current(cx);
-                }
-            });
+            let s1 = cx.subscribe_in(
+                &find,
+                window,
+                move |this, input, ev: &InputEvent, _window, cx| match ev {
+                    InputEvent::Change => {
+                        let q = input.read(cx).value().to_string();
+                        ed.update(cx, |e, cx| e.set_search(Some(q), cx));
+                        cx.notify();
+                    }
+                    InputEvent::PressEnter { shift, .. } => {
+                        this.step(if *shift { -1 } else { 1 }, cx);
+                    }
+                    _ => {}
+                },
+            );
+            let s2 = cx.subscribe_in(
+                &replace,
+                window,
+                move |this, _, ev: &InputEvent, _window, cx| {
+                    if let InputEvent::PressEnter { .. } = ev {
+                        this.replace_current(cx);
+                    }
+                },
+            );
             if !seed.is_empty() {
                 editor.update(cx, |e, cx| e.set_search(Some(seed), cx));
             }
-            self.find = Some(FindBar { find, replace, show_replace: with_replace, _subs: vec![s1, s2] });
+            self.find = Some(FindBar {
+                find,
+                replace,
+                show_replace: with_replace,
+                _subs: vec![s1, s2],
+            });
         }
         let bar = self.find.as_mut().unwrap();
         bar.show_replace |= with_replace;
-        let target = if with_replace { bar.replace.clone() } else { bar.find.clone() };
+        let target = if with_replace {
+            bar.replace.clone()
+        } else {
+            bar.find.clone()
+        };
         target.update(cx, |s, cx| {
             s.focus(window, cx);
             s.select_all(window, cx);
@@ -683,7 +807,10 @@ impl EditorPanel {
     }
 
     fn replacement(&self, cx: &App) -> String {
-        self.find.as_ref().map(|b| b.replace.read(cx).value().to_string()).unwrap_or_default()
+        self.find
+            .as_ref()
+            .map(|b| b.replace.read(cx).value().to_string())
+            .unwrap_or_default()
     }
 
     fn replace_current(&mut self, cx: &mut Context<Self>) {
@@ -713,38 +840,53 @@ impl EditorPanel {
             (None, n) => format!("{n} matches"),
         };
         let row = |children: Vec<AnyElement>| h_flex().gap_1().items_center().children(children);
-        let mut rows =
-            v_flex().gap_1().px_2().py_1().bg(cx.theme().secondary).border_b_1().border_color(cx.theme().border).child(
-                row(vec![
-                    div().w(px(260.)).child(Input::new(&bar.find).small()).into_any_element(),
-                    div().w(px(90.)).text_xs().text_color(cx.theme().muted_foreground).child(status).into_any_element(),
-                    Button::new("find-prev")
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::ChevronUp)
-                        .tooltip("Previous match")
-                        .on_click(cx.listener(|this, _, _, cx| this.step(-1, cx)))
-                        .into_any_element(),
-                    Button::new("find-next")
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::ChevronDown)
-                        .tooltip("Next match")
-                        .on_click(cx.listener(|this, _, _, cx| this.step(1, cx)))
-                        .into_any_element(),
-                    div().flex_1().into_any_element(),
-                    Button::new("find-close")
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Close)
-                        .tooltip("Close")
-                        .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx)))
-                        .into_any_element(),
-                ]),
-            );
+        let mut rows = v_flex()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .bg(cx.theme().secondary)
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(row(vec![
+                div()
+                    .w(px(260.))
+                    .child(Input::new(&bar.find).small())
+                    .into_any_element(),
+                div()
+                    .w(px(90.))
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(status)
+                    .into_any_element(),
+                Button::new("find-prev")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::ChevronUp)
+                    .tooltip("Previous match")
+                    .on_click(cx.listener(|this, _, _, cx| this.step(-1, cx)))
+                    .into_any_element(),
+                Button::new("find-next")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::ChevronDown)
+                    .tooltip("Next match")
+                    .on_click(cx.listener(|this, _, _, cx| this.step(1, cx)))
+                    .into_any_element(),
+                div().flex_1().into_any_element(),
+                Button::new("find-close")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .tooltip("Close")
+                    .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx)))
+                    .into_any_element(),
+            ]));
         if bar.show_replace {
             rows = rows.child(row(vec![
-                div().w(px(260.)).child(Input::new(&bar.replace).small()).into_any_element(),
+                div()
+                    .w(px(260.))
+                    .child(Input::new(&bar.replace).small())
+                    .into_any_element(),
                 Button::new("replace-one")
                     .ghost()
                     .xsmall()
@@ -807,11 +949,17 @@ impl Render for EditorPanel {
                 .key_context(EDITOR_PANEL_CONTEXT)
                 .size_full()
                 .bg(cx.theme().background)
-                .on_action(cx.listener(|this, _: &Find, window, cx| this.open_find(false, window, cx)))
-                .on_action(cx.listener(|this, _: &Replace, window, cx| this.open_find(true, window, cx)))
+                .on_action(
+                    cx.listener(|this, _: &Find, window, cx| this.open_find(false, window, cx)),
+                )
+                .on_action(
+                    cx.listener(|this, _: &Replace, window, cx| this.open_find(true, window, cx)),
+                )
                 .on_action(cx.listener(|this, _: &FindNext, _, cx| this.step(1, cx)))
                 .on_action(cx.listener(|this, _: &FindPrev, _, cx| this.step(-1, cx)))
-                .on_action(cx.listener(|this, _: &CloseFind, window, cx| this.close_find(window, cx)))
+                .on_action(
+                    cx.listener(|this, _: &CloseFind, window, cx| this.close_find(window, cx)),
+                )
                 .children(self.render_find_bar(cx))
                 .children(self.render_meta_bar(cx))
                 .children(self.sheet.clone())
@@ -842,15 +990,29 @@ fn copy_png(png: Vec<u8>, cx: &mut App) {
         use std::process::{Command, Stdio};
         let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
         let candidates: &[(&str, &[&str])] = if wayland {
-            &[("wl-copy", &["--type", "image/png"]), ("xclip", &["-selection", "clipboard", "-t", "image/png"])]
+            &[
+                ("wl-copy", &["--type", "image/png"]),
+                ("xclip", &["-selection", "clipboard", "-t", "image/png"]),
+            ]
         } else {
-            &[("xclip", &["-selection", "clipboard", "-t", "image/png"]), ("wl-copy", &["--type", "image/png"])]
+            &[
+                ("xclip", &["-selection", "clipboard", "-t", "image/png"]),
+                ("wl-copy", &["--type", "image/png"]),
+            ]
         };
         for (bin, args) in candidates {
-            let child =
-                Command::new(bin).args(*args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+            let child = Command::new(bin)
+                .args(*args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
             if let Ok(mut child) = child {
-                let ok = child.stdin.take().map(|mut stdin| stdin.write_all(&png).is_ok()).unwrap_or(false);
+                let ok = child
+                    .stdin
+                    .take()
+                    .map(|mut stdin| stdin.write_all(&png).is_ok())
+                    .unwrap_or(false);
                 // wl-copy forks and serves the selection; xclip likewise stays alive.
                 let _ = child.wait();
                 if ok {
@@ -860,5 +1022,8 @@ fn copy_png(png: Vec<u8>, cx: &mut App) {
         }
         tracing::warn!("no wl-copy or xclip found; image left in gpui clipboard only");
     }
-    cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, png)));
+    cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
+        ImageFormat::Png,
+        png,
+    )));
 }

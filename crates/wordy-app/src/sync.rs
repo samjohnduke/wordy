@@ -8,7 +8,9 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
 use gpui_kit::*;
-use wordy_sync::{Advertiser, Discovery, LocalState, Peer, Server, ServerEvent, SyncConfig, SyncOutcome};
+use wordy_sync::{
+    Advertiser, Discovery, LocalState, Peer, Server, ServerEvent, SyncConfig, SyncOutcome,
+};
 
 use crate::app::SharedProject;
 
@@ -23,7 +25,11 @@ pub enum SyncEvent {
 pub enum SyncStatus {
     Idle,
     Busy(String),
-    Done { peer: String, summary: String, when: String },
+    Done {
+        peer: String,
+        summary: String,
+        when: String,
+    },
     Failed(String),
 }
 
@@ -60,7 +66,10 @@ impl SyncManager {
         };
         tasks.push(cx.spawn(async move |this, cx| {
             while let Some(ev) = rx.next().await {
-                if this.update(cx, |m, cx| m.handle_server_event(ev, cx)).is_err() {
+                if this
+                    .update(cx, |m, cx| m.handle_server_event(ev, cx))
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -71,7 +80,9 @@ impl SyncManager {
             Ok(d) => Some(d),
             Err(e) => {
                 tracing::error!("mdns: {e:#}");
-                discovery_error = Some(format!("Peer discovery is off ({e:#}). Enter an address by hand."));
+                discovery_error = Some(format!(
+                    "Peer discovery is off ({e:#}). Enter an address by hand."
+                ));
                 None
             }
         };
@@ -164,7 +175,11 @@ impl SyncManager {
     fn local_state(&self) -> Result<LocalState> {
         let p = &self.project.project;
         p.save().context("saving before sync")?;
-        let dir = self.project.dir().cloned().context("this project has no folder")?;
+        let dir = self
+            .project
+            .dir()
+            .cloned()
+            .context("this project has no folder")?;
         Ok(LocalState {
             project_id: p.id(),
             peer_name: self.config.peer_name.clone(),
@@ -181,7 +196,8 @@ impl SyncManager {
             return;
         }
         if !self.config.ready() {
-            self.status = SyncStatus::Failed("Set a pairing code first (the same on both machines).".into());
+            self.status =
+                SyncStatus::Failed("Set a pairing code first (the same on both machines).".into());
             cx.notify();
             return;
         }
@@ -196,7 +212,9 @@ impl SyncManager {
         self.status = SyncStatus::Busy(format!("Syncing with {label}…"));
         cx.notify();
         let label = label.to_string();
-        let work = cx.background_executor().spawn(async move { wordy_sync::sync_with(addr, &state) });
+        let work = cx
+            .background_executor()
+            .spawn(async move { wordy_sync::sync_with(addr, &state) });
         self._tasks.push(cx.spawn(async move |this, cx| {
             let result = work.await;
             this.update(cx, |m, cx| m.finish(result, &label, cx)).ok();
@@ -234,7 +252,8 @@ impl SyncManager {
                 let p = &self.project.project;
                 if !outcome.incoming_updates.is_empty() {
                     if let Err(e) = p.import_bytes(&outcome.incoming_updates) {
-                        self.status = SyncStatus::Failed(format!("applying changes from {label}: {e:#}"));
+                        self.status =
+                            SyncStatus::Failed(format!("applying changes from {label}: {e:#}"));
                         cx.notify();
                         return;
                     }
@@ -245,7 +264,11 @@ impl SyncManager {
                 if let Err(e) = p.save() {
                     tracing::error!("save after sync: {e:#}");
                 }
-                let peer = if outcome.peer.is_empty() { label.to_string() } else { outcome.peer.clone() };
+                let peer = if outcome.peer.is_empty() {
+                    label.to_string()
+                } else {
+                    outcome.peer.clone()
+                };
                 tracing::info!("synced with {peer}: {}", outcome.summary());
                 self.status = SyncStatus::Done {
                     peer,

@@ -20,19 +20,28 @@ pub struct SyncConfig {
 
 impl Default for SyncConfig {
     fn default() -> Self {
-        Self { peer_name: default_peer_name(), pairing_code: String::new(), port: 0 }
+        Self {
+            peer_name: default_peer_name(),
+            pairing_code: String::new(),
+            port: 0,
+        }
     }
 }
 
 pub fn default_peer_name() -> String {
-    gethostname::gethostname().to_string_lossy().trim_end_matches(".local").to_string()
+    gethostname::gethostname()
+        .to_string_lossy()
+        .trim_end_matches(".local")
+        .to_string()
 }
 
 pub fn config_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("WORDY_CONFIG_DIR") {
         return PathBuf::from(dir);
     }
-    dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("wordy")
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("wordy")
 }
 
 pub fn config_path() -> PathBuf {
@@ -55,7 +64,8 @@ impl SyncConfig {
     pub fn save(&self) -> Result<()> {
         let path = config_path();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
         }
         let json = serde_json::to_vec_pretty(self)?;
         let tmp = path.with_extension("json.tmp");

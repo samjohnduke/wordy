@@ -82,7 +82,11 @@ impl ProjectHandle {
                 Index::in_memory().expect("in-memory sqlite")
             }
         };
-        let handle = Self { project, index: RefCell::new(index), matcher: RefCell::new(Rc::new(Matcher::empty())) };
+        let handle = Self {
+            project,
+            index: RefCell::new(index),
+            matcher: RefCell::new(Rc::new(Matcher::empty())),
+        };
         handle.refresh_matcher();
         handle.rebuild_index();
         handle
@@ -110,7 +114,11 @@ impl ProjectHandle {
 
     pub fn update_index_node(&self, id: TreeID) {
         let matcher = self.matcher();
-        if let Err(e) = self.index.borrow_mut().update_node(&self.project, id, &matcher) {
+        if let Err(e) = self
+            .index
+            .borrow_mut()
+            .update_node(&self.project, id, &matcher)
+        {
             tracing::error!("update index: {e:#}");
         }
     }
@@ -121,7 +129,11 @@ impl ProjectHandle {
             .entities()
             .into_iter()
             .filter_map(|id| self.project.node(id).ok())
-            .map(|n| LinkTarget { id: n.id, title: n.title(), aliases: n.aliases() })
+            .map(|n| LinkTarget {
+                id: n.id,
+                title: n.title(),
+                aliases: n.aliases(),
+            })
             .collect()
     }
 
@@ -133,10 +145,13 @@ impl ProjectHandle {
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
-        self.index.borrow().search(query, limit).unwrap_or_else(|e| {
-            tracing::error!("search: {e:#}");
-            Vec::new()
-        })
+        self.index
+            .borrow()
+            .search(query, limit)
+            .unwrap_or_else(|e| {
+                tracing::error!("search: {e:#}");
+                Vec::new()
+            })
     }
 
     pub fn nodes_with_tag(&self, tag: &str) -> Vec<TreeID> {
@@ -156,7 +171,12 @@ impl ProjectHandle {
             return Vec::new();
         };
         match std::fs::read_to_string(&path) {
-            Ok(s) => s.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect(),
+            Ok(s) => s
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => {
                 tracing::error!("read dictionary: {e:#}");
@@ -242,7 +262,11 @@ pub fn open_or_create_default_project() -> Result<Project> {
             tracing::info!("opening {}", dir.display());
             return Project::open(&dir);
         }
-        let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("My Novel").to_string();
+        let name = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("My Novel")
+            .to_string();
         tracing::info!("creating {}", dir.display());
         return Project::create(&dir, &name);
     }
@@ -278,9 +302,9 @@ pub fn open_main_window(cx: &mut App) {
         ..TitleBar::window_options()
     };
 
-    if let Err(e) =
-        gpui_kit::open_window(options, cx, move |window, cx| cx.new(|cx| Workspace::new(shared, window, cx)))
-    {
+    if let Err(e) = gpui_kit::open_window(options, cx, move |window, cx| {
+        cx.new(|cx| Workspace::new(shared, window, cx))
+    }) {
         tracing::error!("open window: {e:#}");
         cx.quit();
     }
@@ -288,6 +312,10 @@ pub fn open_main_window(cx: &mut App) {
 }
 
 pub fn toggle_theme(window: &mut Window, cx: &mut App) {
-    let next = if cx.theme().mode.is_dark() { ThemeMode::Light } else { ThemeMode::Dark };
+    let next = if cx.theme().mode.is_dark() {
+        ThemeMode::Light
+    } else {
+        ThemeMode::Dark
+    };
     Theme::change(next, Some(window), cx);
 }

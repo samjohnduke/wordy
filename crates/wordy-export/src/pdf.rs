@@ -23,7 +23,10 @@ use crate::fonts;
 fn fonts() -> &'static (LazyHash<FontBook>, Vec<Font>) {
     static FONTS: OnceLock<(LazyHash<FontBook>, Vec<Font>)> = OnceLock::new();
     FONTS.get_or_init(|| {
-        let fonts: Vec<Font> = fonts::ALL.iter().filter_map(|data| Font::new(Bytes::new(*data), 0)).collect();
+        let fonts: Vec<Font> = fonts::ALL
+            .iter()
+            .filter_map(|data| Font::new(Bytes::new(*data), 0))
+            .collect();
         (LazyHash::new(FontBook::from_fonts(&fonts)), fonts)
     })
 }
@@ -75,7 +78,9 @@ pub fn render(c: &Compiled) -> Result<Vec<u8>> {
 pub fn compile_typst(markup: &str) -> Result<Vec<u8>> {
     let vpath = VirtualPath::new("main.typ").map_err(|e| anyhow!("typst path: {e}"))?;
     let id = FileId::new(RootedPath::new(VirtualRoot::Project, vpath));
-    let world = ExportWorld { main: Source::new(id, markup.to_string()) };
+    let world = ExportWorld {
+        main: Source::new(id, markup.to_string()),
+    };
     let Warned { output, warnings } = typst::compile::<PagedDocument>(&world);
     for w in &warnings {
         tracing::debug!("typst warning: {}", w.message);
@@ -97,7 +102,11 @@ pub fn typst_source(c: &Compiled) -> String {
     s.push_str(&format!(
         "#set document(title: {t}{a})\n",
         t = lit(&c.title),
-        a = if c.author.is_empty() { String::new() } else { format!(", author: {}", lit(&c.author)) }
+        a = if c.author.is_empty() {
+            String::new()
+        } else {
+            format!(", author: {}", lit(&c.author))
+        }
     ));
     s.push_str(&format!(
         r##"#set page(paper: "a5", margin: (x: 18mm, top: 20mm, bottom: 22mm), numbering: "1",
@@ -143,7 +152,9 @@ pub fn typst_source(c: &Compiled) -> String {
                         s.push_str("\n\n");
                     }
                     Block::H1 => s.push_str(&format!("#heading(level: 3)[{inner}]\n\n")),
-                    Block::H2 | Block::H3 => s.push_str(&format!("#heading(level: 4)[{inner}]\n\n")),
+                    Block::H2 | Block::H3 => {
+                        s.push_str(&format!("#heading(level: 4)[{inner}]\n\n"))
+                    }
                     Block::Quote => s.push_str(&format!("#bq[{inner}]\n\n")),
                     Block::Break => s.push_str("#sep\n\n"),
                 }
@@ -184,7 +195,11 @@ fn styled(text: &str, m: &Marks) -> String {
     if m.italic {
         args.push("style: \"italic\"");
     }
-    let mut expr = if args.is_empty() { format!("text({})", lit(text)) } else { format!("text({}, {})", args.join(", "), lit(text)) };
+    let mut expr = if args.is_empty() {
+        format!("text({})", lit(text))
+    } else {
+        format!("text({}, {})", args.join(", "), lit(text))
+    };
     if m.smallcaps {
         expr = format!("smallcaps({expr})");
     }
@@ -211,9 +226,16 @@ mod tests {
 
     #[test]
     fn runs_are_contiguous_expressions() {
-        let m = Marks { bold: true, ..Default::default() };
+        let m = Marks {
+            bold: true,
+            ..Default::default()
+        };
         assert_eq!(styled("x", &m), r#"#text(weight: "bold", "x")"#);
-        let m = Marks { italic: true, smallcaps: true, ..Default::default() };
+        let m = Marks {
+            italic: true,
+            smallcaps: true,
+            ..Default::default()
+        };
         assert_eq!(styled("y", &m), r#"#smallcaps(text(style: "italic", "y"))"#);
     }
 
@@ -227,7 +249,8 @@ mod tests {
     #[test]
     fn markup_characters_in_prose_are_inert() {
         let mut c = crate::docx::tests::sample();
-        c.chapters[0].scenes[0].paragraphs[0].runs[0].text = "*not bold* _not italic_ #not-code $x$ // no [brackets] \\ \"quotes\"".into();
+        c.chapters[0].scenes[0].paragraphs[0].runs[0].text =
+            "*not bold* _not italic_ #not-code $x$ // no [brackets] \\ \"quotes\"".into();
         let bytes = render(&c).expect("pdf with hostile text");
         assert!(bytes.starts_with(b"%PDF-"));
     }

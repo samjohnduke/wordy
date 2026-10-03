@@ -66,7 +66,10 @@ impl Comments {
             Some(ValueOrContainer::Value(LoroValue::I64(n))) => n,
             _ => 0,
         };
-        let resolved = matches!(m.get(keys::RESOLVED), Some(ValueOrContainer::Value(LoroValue::Bool(true))));
+        let resolved = matches!(
+            m.get(keys::RESOLVED),
+            Some(ValueOrContainer::Value(LoroValue::Bool(true)))
+        );
         Some(Comment {
             id: id.to_string(),
             text: str_of(keys::TEXT).unwrap_or_default(),

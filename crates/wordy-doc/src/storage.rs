@@ -29,7 +29,9 @@ pub fn json_path(dir: &Path) -> PathBuf {
 
 /// Default projects folder: `~/Wordy`.
 pub fn projects_root() -> PathBuf {
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join("Wordy")
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Wordy")
 }
 
 /// List project folders under the root (anything containing project.loro).
@@ -54,9 +56,12 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write as _;
     let tmp = path.with_extension("tmp");
     {
-        let mut f = std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
-        f.write_all(bytes).with_context(|| format!("writing {}", tmp.display()))?;
-        f.sync_all().with_context(|| format!("syncing {}", tmp.display()))?;
+        let mut f =
+            std::fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+        f.write_all(bytes)
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        f.sync_all()
+            .with_context(|| format!("syncing {}", tmp.display()))?;
     }
     std::fs::rename(&tmp, path).with_context(|| format!("renaming into {}", path.display()))?;
     Ok(())
@@ -98,7 +103,12 @@ pub fn backups(dir: &Path) -> Vec<PathBuf> {
 /// recovery save does not destroy the evidence.
 pub fn quarantine(path: &Path) -> Result<PathBuf> {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    let name = format!("{}.corrupt-{stamp}", path.file_name().and_then(|n| n.to_str()).unwrap_or("project.loro"));
+    let name = format!(
+        "{}.corrupt-{stamp}",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("project.loro")
+    );
     let dst = path.with_file_name(name);
     std::fs::rename(path, &dst).with_context(|| format!("moving {} aside", path.display()))?;
     Ok(dst)
@@ -132,8 +142,7 @@ fn prune_backups(bdir: &Path) -> Result<()> {
     for (i, f) in files.iter().enumerate() {
         let name = f.file_name().unwrap().to_string_lossy().to_string();
         let day = name.get(8..16).unwrap_or("").to_string();
-        let keep = i < MAX_RECENT_BACKUPS
-            || (keep_days.len() < 30 && !keep_days.contains(&day));
+        let keep = i < MAX_RECENT_BACKUPS || (keep_days.len() < 30 && !keep_days.contains(&day));
         if keep {
             if !keep_days.contains(&day) {
                 keep_days.push(day);
