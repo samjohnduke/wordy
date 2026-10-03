@@ -10,7 +10,7 @@ use wordy_doc::{storage, Project};
 
 use crate::workspace::Workspace;
 
-gpui_kit::actions!(wordy, [Quit, ToggleTheme, Save]);
+gpui_kit::actions!(wordy, [Quit, ToggleTheme, Save, NewItem]);
 
 /// The open project, shared by every view in the window.
 ///
@@ -36,6 +36,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-q", Quit, None),
         KeyBinding::new("cmd-s", Save, None),
         KeyBinding::new("ctrl-s", Save, None),
+        KeyBinding::new("secondary-n", NewItem, None),
         KeyBinding::new("cmd-shift-t", ToggleTheme, None),
         KeyBinding::new("ctrl-shift-t", ToggleTheme, None),
     ]);

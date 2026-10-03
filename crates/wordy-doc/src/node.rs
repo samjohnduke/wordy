@@ -262,8 +262,18 @@ impl Node {
         }
     }
 
+    /// Plain text of the body without the terminating newline.
     pub fn plain_text(&self) -> String {
-        self.body_if_exists().map(|t| t.to_string()).unwrap_or_default()
+        let mut s = self.body_if_exists().map(|t| t.to_string()).unwrap_or_default();
+        if s.ends_with('\n') {
+            s.pop();
+        }
+        s
+    }
+
+    /// Word count of the body.
+    pub fn word_count(&self) -> usize {
+        crate::paragraphs::count_words(&self.plain_text())
     }
 
     pub fn tags(&self) -> Vec<String> {

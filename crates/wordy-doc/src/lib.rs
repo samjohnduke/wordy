@@ -4,11 +4,14 @@
 //! accessors over it, and save/load. Nothing here knows about the UI.
 
 pub mod node;
+pub mod paragraphs;
 pub mod project;
 pub mod schema;
 pub mod storage;
 
+pub use chrono;
 pub use loro;
 pub use loro::TreeID;
 pub use node::{Node, NodeKind, Space, Status};
+pub use paragraphs::{count_words, Block, Marks, Paragraph, Paragraphs, Run};
 pub use project::Project;

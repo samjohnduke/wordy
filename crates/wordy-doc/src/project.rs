@@ -180,7 +180,11 @@ impl Project {
             m.insert(meta::INCLUDE_IN_COMPILE, true)?;
         }
         if kind.has_body() {
-            self.tree().get_meta(id)?.ensure_mergeable_text(meta::BODY)?;
+            let body = self.tree().get_meta(id)?.ensure_mergeable_text(meta::BODY)?;
+            if body.is_empty() {
+                // Quill convention: a body always ends with a newline.
+                body.insert(0, "\n")?;
+            }
         }
         Ok(id)
     }
@@ -198,6 +202,25 @@ impl Project {
 
     pub fn move_node(&self, id: TreeID, new_parent: TreeID, index: usize) -> Result<()> {
         self.tree().mov_to(id, new_parent, index)?;
+        Ok(())
+    }
+
+    /// Move `id` directly before `sibling` (same parent as `sibling`).
+    pub fn move_before(&self, id: TreeID, sibling: TreeID) -> Result<()> {
+        self.tree().mov_before(id, sibling)?;
+        Ok(())
+    }
+
+    /// Move `id` directly after `sibling` (same parent as `sibling`).
+    pub fn move_after(&self, id: TreeID, sibling: TreeID) -> Result<()> {
+        self.tree().mov_after(id, sibling)?;
+        Ok(())
+    }
+
+    /// Bring a trashed node back to the end of its space's root.
+    pub fn restore_node(&self, id: TreeID) -> Result<()> {
+        let space = self.node(id)?.space();
+        self.tree().mov(id, self.root(space))?;
         Ok(())
     }
 
@@ -282,8 +305,9 @@ mod tests {
         assert_eq!(scene.space(), Space::Manuscript);
         assert_eq!(scene.status(), Status::Draft);
         assert!(scene.include_in_compile());
-        scene.body().unwrap().insert(0, "It was a dark night.\n").unwrap();
-        assert_eq!(scene.plain_text(), "It was a dark night.\n");
+        scene.body().unwrap().insert(0, "It was a dark night.").unwrap();
+        assert_eq!(scene.plain_text(), "It was a dark night.");
+        assert_eq!(scene.word_count(), 5);
         assert_eq!(p.manuscript_scenes(), vec![sc]);
         assert!(p.node(ch).unwrap().body_if_exists().is_none());
     }
@@ -365,6 +389,7 @@ mod tests {
             vec![
                 ("ab".to_string(), vec!["bold".to_string(), "link".to_string()]),
                 ("Zcd".to_string(), vec!["bold".to_string()]),
+                ("\n".to_string(), vec![]),
             ]
         );
     }
