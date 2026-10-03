@@ -1,5 +1,7 @@
 //! Home tab: dashboard (goals, streak, pace), reports (words per day),
-//! tasks, and the placeholder scan.
+//! tasks, the placeholder scan, and export.
+
+use std::path::PathBuf;
 
 use gpui_kit::base::StyledExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -8,12 +10,14 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dock::Panel;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::progress::Progress;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use wordy_doc::chrono::{Duration, NaiveDate};
+use wordy_doc::loro::{LoroValue, ValueOrContainer};
 use wordy_doc::momentum::{date_str, parse_date, today};
-use wordy_doc::{Goals, NodeKind, Space, Status, TreeID};
+use wordy_doc::{storage, Goals, NodeKind, Space, Status, TreeID};
+use wordy_export::{CompileOptions, Format};
 
 use crate::app::SharedProject;
 
@@ -36,16 +40,18 @@ enum Page {
     Reports,
     Tasks,
     Placeholders,
+    Export,
 }
 
 impl Page {
-    const ALL: [Page; 4] = [Page::Dashboard, Page::Reports, Page::Tasks, Page::Placeholders];
+    const ALL: [Page; 5] = [Page::Dashboard, Page::Reports, Page::Tasks, Page::Placeholders, Page::Export];
     fn label(self) -> &'static str {
         match self {
             Page::Dashboard => "Dashboard",
             Page::Reports => "Reports",
             Page::Tasks => "Tasks",
             Page::Placeholders => "Placeholders",
+            Page::Export => "Export",
         }
     }
     fn id(self) -> &'static str {
@@ -54,6 +60,7 @@ impl Page {
             Page::Reports => "home-reports",
             Page::Tasks => "home-tasks",
             Page::Placeholders => "home-placeholders",
+            Page::Export => "home-export",
         }
     }
 }
@@ -63,6 +70,20 @@ struct Day {
     words: f64,
 }
 
+/// Settings keys for the export page (project settings map).
+mod export_keys {
+    pub const TITLE: &str = "export.title";
+    pub const AUTHOR: &str = "export.author";
+    pub const SCENE_TITLES: &str = "export.scene_titles";
+}
+
+/// Outcome of the last export, shown under the buttons.
+struct ExportStatus {
+    message: String,
+    path: Option<PathBuf>,
+    ok: bool,
+}
+
 pub struct HomePanel {
     project: SharedProject,
     page: Page,
@@ -70,6 +91,11 @@ pub struct HomePanel {
     manuscript: Entity<InputState>,
     deadline: Entity<InputState>,
     task: Entity<InputState>,
+    export_title: Entity<InputState>,
+    export_author: Entity<InputState>,
+    export_status: Option<ExportStatus>,
+    exporting: bool,
+    _export_task: Option<Task<()>>,
     pub focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -87,6 +113,18 @@ impl HomePanel {
                 .placeholder("YYYY-MM-DD")
         });
         let task = cx.new(|cx| InputState::new(window, cx).placeholder("Add a task and press Enter"));
+        let settings = project.project.settings_map();
+        let project_name = project.project.name();
+        let export_title = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(setting_str(&settings, export_keys::TITLE).unwrap_or_default())
+                .placeholder(project_name)
+        });
+        let export_author = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(setting_str(&settings, export_keys::AUTHOR).unwrap_or_default())
+                .placeholder("Author name")
+        });
 
         let mut subs = Vec::new();
         for input in [&daily, &manuscript, &deadline] {
@@ -109,7 +147,247 @@ impl HomePanel {
             }
         }));
 
-        Self { project, page: Page::Dashboard, daily, manuscript, deadline, task, focus: cx.focus_handle(), _subs: subs }
+        for (input, key) in [(&export_title, export_keys::TITLE), (&export_author, export_keys::AUTHOR)] {
+            subs.push(cx.subscribe_in(input, window, move |this, input, ev: &InputEvent, _, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    let v = input.read(cx).value().trim().to_string();
+                    let map = this.project.project.settings_map();
+                    let r = if v.is_empty() { map.delete(key) } else { map.insert(key, v).map(|_| ()) };
+                    if let Err(e) = r {
+                        tracing::error!("export setting: {e:#}");
+                    }
+                    this.changed(cx);
+                }
+            }));
+        }
+
+        Self {
+            project,
+            page: Page::Dashboard,
+            daily,
+            manuscript,
+            deadline,
+            task,
+            export_title,
+            export_author,
+            export_status: None,
+            exporting: false,
+            _export_task: None,
+            focus: cx.focus_handle(),
+            _subs: subs,
+        }
+    }
+
+    fn compile_options(&self, cx: &App) -> CompileOptions {
+        let settings = self.project.project.settings_map();
+        CompileOptions {
+            title: self.export_title.read(cx).value().trim().to_string(),
+            author: self.export_author.read(cx).value().trim().to_string(),
+            scene_titles: setting_bool(&settings, export_keys::SCENE_TITLES).unwrap_or(false),
+            ..Default::default()
+        }
+    }
+
+    /// Folder the save dialog opens in: next to the project, else home.
+    fn export_dir(&self) -> PathBuf {
+        self.project
+            .dir()
+            .and_then(|d| d.parent().map(|p| p.to_path_buf()))
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    fn set_status(&mut self, message: String, path: Option<PathBuf>, ok: bool, cx: &mut Context<Self>) {
+        self.exporting = false;
+        self.export_status = Some(ExportStatus { message, path, ok });
+        cx.notify();
+    }
+
+    /// Compile the manuscript and write it in `format` to a path the user picks.
+    fn export(&mut self, format: Format, cx: &mut Context<Self>) {
+        if self.exporting {
+            return;
+        }
+        let opts = self.compile_options(cx);
+        let compiled = wordy_export::compile(&self.project.project, &opts);
+        if compiled.chapters.is_empty() {
+            self.set_status("Nothing to export: the manuscript has no included scenes with text.".into(), None, false, cx);
+            return;
+        }
+        let name = format!("{}.{}", wordy_export::file_stem(&compiled.title), format.extension());
+        let rx = cx.prompt_for_new_path(&self.export_dir(), Some(&name));
+        self.exporting = true;
+        self.export_status = None;
+        cx.notify();
+        self._export_task = Some(cx.spawn(async move |this, cx| {
+            let path = match rx.await {
+                Ok(Ok(Some(path))) => path,
+                Ok(Ok(None)) | Err(_) => {
+                    this.update(cx, |t, cx| {
+                        t.exporting = false;
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+                Ok(Err(e)) => {
+                    this.update(cx, |t, cx| t.set_status(format!("Could not open a save dialog: {e:#}"), None, false, cx)).ok();
+                    return;
+                }
+            };
+            let out = path.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let bytes = wordy_export::render(&compiled, format)?;
+                    storage::write_atomic(&out, &bytes)?;
+                    Ok::<usize, anyhow::Error>(bytes.len())
+                })
+                .await;
+            this.update(cx, |t, cx| match result {
+                Ok(n) => t.set_status(
+                    format!("Exported {} ({}) to {}", format.label(), human_size(n), path.display()),
+                    Some(path),
+                    true,
+                    cx,
+                ),
+                Err(e) => t.set_status(format!("Export failed: {e:#}"), None, false, cx),
+            })
+            .ok();
+        }));
+    }
+
+    /// Zip the whole project folder as a backup.
+    fn backup(&mut self, cx: &mut Context<Self>) {
+        if self.exporting {
+            return;
+        }
+        let Some(dir) = self.project.dir().cloned() else {
+            self.set_status("This project is not saved to disk yet.".into(), None, false, cx);
+            return;
+        };
+        // Flush pending edits so the archive is current.
+        if let Err(e) = self.project.project.save() {
+            tracing::error!("save before backup: {e:#}");
+        }
+        let name = format!("{}-{}.zip", wordy_export::file_stem(&self.project.project.name()), today().format("%Y-%m-%d"));
+        let rx = cx.prompt_for_new_path(&self.export_dir(), Some(&name));
+        self.exporting = true;
+        self.export_status = None;
+        cx.notify();
+        self._export_task = Some(cx.spawn(async move |this, cx| {
+            let path = match rx.await {
+                Ok(Ok(Some(path))) => path,
+                Ok(Err(e)) => {
+                    this.update(cx, |t, cx| t.set_status(format!("Could not open a save dialog: {e:#}"), None, false, cx)).ok();
+                    return;
+                }
+                _ => {
+                    this.update(cx, |t, cx| {
+                        t.exporting = false;
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            let out = path.clone();
+            let result = cx.background_executor().spawn(async move { wordy_export::archive::zip_project(&dir, &out) }).await;
+            this.update(cx, |t, cx| match result {
+                Ok(n) => t.set_status(format!("Backed up {n} files to {}", path.display()), Some(path), true, cx),
+                Err(e) => t.set_status(format!("Backup failed: {e:#}"), None, false, cx),
+            })
+            .ok();
+        }));
+    }
+
+    fn render_export(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let opts = self.compile_options(cx);
+        let compiled = wordy_export::compile(&self.project.project, &opts);
+        let scene_titles = opts.scene_titles;
+
+        let field = |label: &str, input: &Entity<InputState>| {
+            h_flex()
+                .items_center()
+                .gap_3()
+                .child(div().w(px(70.)).text_xs().text_color(muted).child(label.to_string()))
+                .child(div().w(px(360.)).child(Input::new(input).small()))
+        };
+        let manuscript = Self::section("Manuscript", cx)
+            .child(field("Title", &self.export_title))
+            .child(field("Author", &self.export_author))
+            .child(
+                Checkbox::new("export-scene-titles")
+                    .checked(scene_titles)
+                    .label("Show scene titles (otherwise scenes are separated by #)")
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        if let Err(e) = this.project.project.settings_map().insert(export_keys::SCENE_TITLES, *checked) {
+                            tracing::error!("export setting: {e:#}");
+                        }
+                        this.changed(cx);
+                    })),
+            )
+            .child(div().text_xs().text_color(muted).child(format!(
+                "{} chapters · {} scenes · {} words. Scenes and folders with “include in compile” off are skipped.",
+                compiled.chapters.len(),
+                compiled.scene_count(),
+                compiled.word_count()
+            )));
+
+        let mut formats = h_flex().gap_2().flex_wrap();
+        for f in Format::ALL {
+            formats = formats.child(
+                Button::new(ElementId::Name(format!("export-{}", f.extension()).into()))
+                    .primary()
+                    .small()
+                    .label(f.label())
+                    .disabled(self.exporting)
+                    .on_click(cx.listener(move |this, _, _, cx| this.export(f, cx))),
+            );
+        }
+        let mut export_box = Self::section("Export manuscript", cx)
+            .child(div().text_sm().text_color(muted).child(
+                "Standard manuscript format for Word, a reflowable EPUB for e-readers, a typeset A5 PDF, or plain Markdown.",
+            ))
+            .child(formats);
+
+        let backup_box = Self::section("Backup", cx)
+            .child(div().text_sm().text_color(muted).child(
+                "A zip of the whole project folder (document, assets, dictionary, saved snapshots). Unzip it anywhere and open it as a project.",
+            ))
+            .child(
+                h_flex().child(
+                    Button::new("export-zip")
+                        .small()
+                        .label("Project backup (.zip)")
+                        .disabled(self.exporting)
+                        .on_click(cx.listener(|this, _, _, cx| this.backup(cx))),
+                ),
+            );
+
+        if self.exporting {
+            export_box = export_box.child(div().text_xs().text_color(muted).child("Exporting…"));
+        }
+        let mut status = v_flex().gap_2();
+        if let Some(st) = &self.export_status {
+            let color = if st.ok { theme.foreground } else { theme.danger };
+            let mut row = h_flex().items_center().gap_3().text_sm().child(div().text_color(color).child(st.message.clone()));
+            if let Some(path) = st.path.clone() {
+                let p2 = path.clone();
+                row = row
+                    .child(Button::new("export-reveal").ghost().xsmall().label("Show in folder").on_click(
+                        move |_, _, cx| cx.reveal_path(&path),
+                    ))
+                    .child(Button::new("export-open").ghost().xsmall().label("Open").on_click(move |_, _, cx| {
+                        cx.open_with_system(&p2)
+                    }));
+            }
+            status = status.child(row);
+        }
+
+        v_flex().gap_3().w_full().child(manuscript).child(export_box).child(backup_box).child(status).into_any_element()
     }
 
     fn changed(&mut self, cx: &mut Context<Self>) {
@@ -548,6 +826,7 @@ impl Render for HomePanel {
             Page::Reports => self.render_reports(cx),
             Page::Tasks => self.render_tasks(cx),
             Page::Placeholders => self.render_placeholders(cx),
+            Page::Export => self.render_export(cx),
         };
         v_flex()
             .size_full()
@@ -562,5 +841,29 @@ impl Render for HomePanel {
                     .overflow_y_scroll()
                     .child(div().max_w(px(820.)).w_full().mx_auto().p_4().child(body)),
             )
+    }
+}
+
+fn setting_str(map: &wordy_doc::loro::LoroMap, key: &str) -> Option<String> {
+    match map.get(key) {
+        Some(ValueOrContainer::Value(LoroValue::String(s))) => Some(s.to_string()),
+        _ => None,
+    }
+}
+
+fn setting_bool(map: &wordy_doc::loro::LoroMap, key: &str) -> Option<bool> {
+    match map.get(key) {
+        Some(ValueOrContainer::Value(LoroValue::Bool(b))) => Some(b),
+        _ => None,
+    }
+}
+
+fn human_size(n: usize) -> String {
+    if n < 1024 {
+        format!("{n} B")
+    } else if n < 1024 * 1024 {
+        format!("{:.0} KB", n as f64 / 1024.)
+    } else {
+        format!("{:.1} MB", n as f64 / (1024. * 1024.))
     }
 }

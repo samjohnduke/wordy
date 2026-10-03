@@ -27,12 +27,7 @@ fn main() {
 
 /// The one bundled serif, used by the editor and (later) the PDF export.
 fn load_fonts(cx: &mut gpui_kit::App) {
-    let fonts: Vec<Cow<'static, [u8]>> = vec![
-        Cow::Borrowed(include_bytes!("../assets/fonts/LibertinusSerif-Regular.otf")),
-        Cow::Borrowed(include_bytes!("../assets/fonts/LibertinusSerif-Italic.otf")),
-        Cow::Borrowed(include_bytes!("../assets/fonts/LibertinusSerif-Bold.otf")),
-        Cow::Borrowed(include_bytes!("../assets/fonts/LibertinusSerif-BoldItalic.otf")),
-    ];
+    let fonts: Vec<Cow<'static, [u8]>> = wordy_export::fonts::ALL.iter().map(|b| Cow::Borrowed(*b)).collect();
     if let Err(e) = cx.text_system().add_fonts(fonts) {
         tracing::error!("could not load bundled fonts: {e:#}");
     }

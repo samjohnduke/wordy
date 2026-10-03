@@ -442,7 +442,7 @@ impl Workspace {
                     .small()
                     .w(px(48.))
                     .label("⌂")
-                    .tooltip("Home: dashboard, reports, tasks, placeholders")
+                    .tooltip("Home: dashboard, reports, tasks, placeholders, export")
                     .toggled(self.home.is_some() && self.active.is_none())
                     .on_click(cx.listener(|this, _, window, cx| this.show_home(window, cx))),
             )

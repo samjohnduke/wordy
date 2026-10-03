@@ -9,8 +9,9 @@ use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_fl
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use wordy_doc::loro::LoroText;
-use wordy_doc::{NodeKind, Status, TreeID, Version};
+use wordy_doc::{storage, NodeKind, Status, TreeID, Version};
 use wordy_editor::{EditorEvent, LinkTarget, ProseEditor};
+use wordy_export::{SnippetOptions, SnippetSize};
 
 use crate::app::{CloseFind, Find, FindNext, FindPrev, Replace, SharedProject, EDITOR_PANEL_CONTEXT};
 use crate::panels::sheet::{EntitySheet, SheetEvent};
@@ -57,6 +58,9 @@ pub struct EditorPanel {
     sheet: Option<Entity<EntitySheet>>,
     meta: Option<MetaBar>,
     find: Option<FindBar>,
+    /// Transient message in the meta bar (e.g. "Snippet copied").
+    notice: Option<String>,
+    _notice_task: Option<Task<()>>,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -70,6 +74,8 @@ impl EditorPanel {
             sheet: None,
             meta: None,
             find: None,
+            notice: None,
+            _notice_task: None,
             focus: cx.focus_handle(),
             _subs: Vec::new(),
         }
@@ -147,6 +153,8 @@ impl EditorPanel {
             sheet,
             meta,
             find: None,
+            notice: None,
+            _notice_task: None,
             focus: cx.focus_handle(),
             _subs: subs,
         }
@@ -192,6 +200,91 @@ impl EditorPanel {
             }
         }
         self.meta_changed(cx);
+    }
+
+    /// Show `text` in the meta bar for a few seconds.
+    fn notify_user(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.notice = Some(text.into());
+        cx.notify();
+        self._notice_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_secs(5)).await;
+            this.update(cx, |t, cx| {
+                t.notice = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// The selection, or the paragraph under the caret when nothing is selected.
+    fn snippet_text(&self, cx: &App) -> Option<String> {
+        let editor = self.editor.as_ref()?.read(cx);
+        let selected = editor.selected_text();
+        if !selected.trim().is_empty() {
+            return Some(selected);
+        }
+        let paras = editor.paragraphs();
+        let pos = paras.locate(editor.selection().head);
+        let text = paras.get(pos.para)?.text.clone();
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
+    /// Render the selection (or caret paragraph) as a PNG card, copy it to
+    /// the clipboard and save it under the project's `exports/` folder.
+    fn make_snippet(&mut self, size: SnippetSize, dark: bool, cx: &mut Context<Self>) {
+        let Some(text) = self.snippet_text(cx) else {
+            self.notify_user("Select some text first", cx);
+            return;
+        };
+        let settings = self.project.project.settings_map();
+        let get = |k: &str| match settings.get(k) {
+            Some(wordy_doc::loro::ValueOrContainer::Value(wordy_doc::loro::LoroValue::String(s))) if !s.is_empty() => {
+                Some(s.to_string())
+            }
+            _ => None,
+        };
+        let title = get("export.title").unwrap_or_else(|| self.project.project.name());
+        let attribution = match get("export.author") {
+            Some(a) => format!("{title} · {a}"),
+            None => title,
+        };
+        let opts = SnippetOptions { size, dark, attribution };
+        let out_dir = self.project.dir().map(|d| d.join("exports"));
+        let stamp = wordy_doc::chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+        self.notify_user("Rendering snippet…", cx);
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let png = wordy_export::snippet::render(&text, &opts)?;
+                    let mut saved = None;
+                    if let Some(dir) = out_dir {
+                        std::fs::create_dir_all(&dir)?;
+                        let path = dir.join(format!("snippet-{stamp}.png"));
+                        storage::write_atomic(&path, &png)?;
+                        saved = Some(path);
+                    }
+                    Ok::<_, anyhow::Error>((png, saved))
+                })
+                .await;
+            this.update(cx, |t, cx| match result {
+                Ok((png, saved)) => {
+                    copy_png(png, cx);
+                    let msg = match saved {
+                        Some(p) => format!("Snippet copied and saved to exports/{}", p.file_name().unwrap_or_default().to_string_lossy()),
+                        None => "Snippet copied to clipboard".to_string(),
+                    };
+                    t.notify_user(msg, cx);
+                }
+                Err(e) => t.notify_user(format!("Snippet failed: {e:#}"), cx),
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn begin_save_version(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -331,6 +424,35 @@ impl EditorPanel {
         }
         tags = tags.child(div().w(px(80.)).child(Input::new(&meta.tag).xsmall()));
         bar = bar.child(tags).child(div().flex_1());
+
+        if let Some(notice) = &self.notice {
+            bar = bar.child(div().text_color(muted).child(notice.clone()));
+        }
+
+        // Snippet image of the selection.
+        let ws = weak.clone();
+        bar = bar.child(
+            Button::new("meta-snippet")
+                .ghost()
+                .xsmall()
+                .label("Snippet")
+                .tooltip("Copy the selected text as a shareable PNG card")
+                .dropdown_menu(move |menu, _, _| {
+                    let mut menu = menu;
+                    for (size, dark, label) in [
+                        (SnippetSize::Square, false, "Square · light"),
+                        (SnippetSize::Square, true, "Square · dark"),
+                        (SnippetSize::Wide, false, "Wide · light"),
+                        (SnippetSize::Wide, true, "Wide · dark"),
+                    ] {
+                        let w = ws.clone();
+                        menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                            w.update(cx, |p, cx| p.make_snippet(size, dark, cx)).ok().unwrap_or(())
+                        }));
+                    }
+                    menu
+                }),
+        );
 
         // Versions
         let versions = self.project.project.versions_for(id);
@@ -663,4 +785,33 @@ impl Render for EditorPanel {
             ).into_any_element(),
         }
     }
+}
+
+/// Put a PNG on the system clipboard. gpui's Wayland/X11 backends only offer
+/// text MIME types, so on Linux we hand the bytes to `wl-copy` or `xclip`.
+fn copy_png(png: Vec<u8>, cx: &mut App) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let candidates: &[(&str, &[&str])] = if wayland {
+            &[("wl-copy", &["--type", "image/png"]), ("xclip", &["-selection", "clipboard", "-t", "image/png"])]
+        } else {
+            &[("xclip", &["-selection", "clipboard", "-t", "image/png"]), ("wl-copy", &["--type", "image/png"])]
+        };
+        for (bin, args) in candidates {
+            let child = Command::new(bin).args(*args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+            if let Ok(mut child) = child {
+                let ok = child.stdin.take().map(|mut stdin| stdin.write_all(&png).is_ok()).unwrap_or(false);
+                // wl-copy forks and serves the selection; xclip likewise stays alive.
+                let _ = child.wait();
+                if ok {
+                    return;
+                }
+            }
+        }
+        tracing::warn!("no wl-copy or xclip found; image left in gpui clipboard only");
+    }
+    cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, png)));
 }
