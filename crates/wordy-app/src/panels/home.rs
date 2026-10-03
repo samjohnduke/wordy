@@ -682,6 +682,8 @@ impl HomePanel {
         let account = m.config.cloud.clone();
         let status = m.cloud_status.clone();
         let devices = m.cloud_devices.clone();
+        let remote = m.cloud_projects.clone();
+        let local_ids = m.local_ids.clone();
         let busy = m.cloud_busy();
         let server = m.config.cloud_server();
         let syncable = m.cloud_syncable();
@@ -827,6 +829,43 @@ impl HomePanel {
                                 })),
                         ),
                 );
+                if !remote.is_empty() {
+                    card = card.child(div().mt_2().text_sm().font_semibold().child("On the server"));
+                    card = card.child(div().text_xs().text_color(muted).child(
+                        "Every project this account can reach. A copy lands in your projects folder with cloud sync on, and opens in a new window.",
+                    ));
+                    let mut rows = v_flex().gap_1();
+                    for (i, p) in remote.iter().enumerate() {
+                        let here = local_ids.contains(&p.id);
+                        let mut row = h_flex()
+                            .items_center()
+                            .gap_3()
+                            .child(div().text_sm().font_semibold().w(px(200.)).child(p.name.clone()))
+                            .child(div().text_xs().text_color(muted).w(px(80.)).child(if p.owner {
+                                "yours".to_string()
+                            } else {
+                                format!("shared, {}", p.role)
+                            }));
+                        if here {
+                            row = row.child(div().text_xs().text_color(muted).child("on this machine"));
+                        } else {
+                            let id = p.id.clone();
+                            let name = p.name.clone();
+                            row = row.child(
+                                Button::new(ElementId::Name(format!("cloud-fetch-{i}").into()))
+                                    .small()
+                                    .label("Get a copy")
+                                    .disabled(busy)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        let (id, name) = (id.clone(), name.clone());
+                                        this.sync.update(cx, |m, cx| m.fetch_cloud_project(&id, &name, cx));
+                                    })),
+                            );
+                        }
+                        rows = rows.child(row);
+                    }
+                    card = card.child(rows);
+                }
                 if syncable {
                     card = card.child(div().mt_2().text_sm().font_semibold().child("This project"));
                     let (line, danger) = match &project_status {

@@ -105,6 +105,7 @@ enum Cmd {
 pub struct RoomHandle {
     tx: Sender<Cmd>,
     stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl RoomHandle {
@@ -116,11 +117,15 @@ impl RoomHandle {
             "wordy-room-{}",
             &opts.project_id[opts.project_id.len().saturating_sub(6)..]
         );
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name(name)
             .spawn(move || run(opts, rx, flag, Box::new(on_event)))
             .expect("spawn room thread");
-        Self { tx, stop }
+        Self {
+            tx,
+            stop,
+            thread: Some(thread),
+        }
     }
 
     /// Send one Loro blob (updates since the last push, or a snapshot).
@@ -148,6 +153,15 @@ impl RoomHandle {
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
         let _ = self.tx.send(Cmd::Stop);
+    }
+
+    /// Stop and wait for the thread to wind up, so whatever it was in the
+    /// middle of (an asset download, say) is on disk when this returns.
+    pub fn finish(mut self) {
+        self.stop();
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
     }
 }
 

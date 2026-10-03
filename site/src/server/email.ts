@@ -10,6 +10,11 @@ export interface Mail {
 }
 
 export async function sendEmail(mail: Mail): Promise<void> {
+  if (/^http:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(env.SITE_URL)) {
+    // Local dev: the binding only writes a file, so show the message (and
+    // its link) in the wrangler terminal as well. `pnpm mail` lists them too.
+    console.log(`[mail] to ${mail.to}: ${mail.subject}\n${mail.text}`);
+  }
   await env.EMAIL.send({
     from: env.EMAIL_FROM,
     to: mail.to,

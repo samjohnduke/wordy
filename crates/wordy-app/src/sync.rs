@@ -14,6 +14,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
 use gpui_kit::*;
+use wordy_doc::{storage, Project};
 use wordy_sync::cloud::state::absorb_remote;
 use wordy_sync::cloud::{self, CloudAccount, CloudState, DeviceLink, RoomEvent, RoomHandle, RoomOptions};
 use wordy_sync::loro::{ExportMode, VersionVector};
@@ -157,6 +158,9 @@ enum CloudMsg {
     Code(DeviceLink),
     Linked(Result<CloudAccount>),
     Account(Result<cloud::Account>, bool),
+    Projects(Result<Vec<cloud::RemoteProject>>),
+    /// A copy of a server project landed in the folder (or failed).
+    Fetched(String, Result<PathBuf>),
     Unlinked(Result<()>),
     Removed(Result<()>),
     Room(RoomEvent),
@@ -168,6 +172,10 @@ pub struct SyncManager {
     pub cloud_status: CloudStatus,
     /// Linked machines as of the last refresh.
     pub cloud_devices: Vec<cloud::Device>,
+    /// Projects the account can reach, as of the last refresh.
+    pub cloud_projects: Vec<cloud::RemoteProject>,
+    /// Ids of the projects this machine already has a folder for.
+    pub local_ids: Vec<String>,
     cloud_cancel: Option<Arc<AtomicBool>>,
     /// The project room, while cloud sync is on for this project.
     cloud: Option<CloudSync>,
@@ -235,6 +243,8 @@ impl SyncManager {
             config,
             cloud_status: CloudStatus::Idle,
             cloud_devices: Vec::new(),
+            cloud_projects: Vec::new(),
+            local_ids: Vec::new(),
             cloud_cancel: None,
             cloud: None,
             cloud_enabled,
@@ -526,9 +536,50 @@ impl SyncManager {
             self.cloud_status = CloudStatus::Busy("Checking the account…".into());
             cx.notify();
         }
+        self.local_ids = self.local_project_ids();
         let client = self.cloud_client();
         self.spawn_cloud(cx, move |send| {
-            send(CloudMsg::Account(client.account(&acct.token), quiet))
+            send(CloudMsg::Account(client.account(&acct.token), quiet));
+            send(CloudMsg::Projects(client.list_projects(&acct.token)));
+        });
+    }
+
+    /// The ids of every project folder under the projects root, plus the
+    /// open project (which may live elsewhere).
+    fn local_project_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = storage::list_projects(&storage::projects_root())
+            .iter()
+            .filter_map(|d| storage::mirrored_id(d))
+            .collect();
+        let own = self.project.project.id();
+        if !own.is_empty() && !ids.contains(&own) {
+            ids.push(own);
+        }
+        ids
+    }
+
+    /// Download a copy of a server project into the projects folder and
+    /// open it in a new window. Its cloud sync is on from the start.
+    pub fn fetch_cloud_project(&mut self, id: &str, name: &str, cx: &mut Context<Self>) {
+        let Some(acct) = self.config.cloud.clone() else { return };
+        if self.cloud_busy() {
+            return;
+        }
+        let root = storage::projects_root();
+        if let Err(e) = std::fs::create_dir_all(&root) {
+            self.cloud_status = CloudStatus::Failed(format!("creating {}: {e}", root.display()));
+            cx.notify();
+            return;
+        }
+        let dir = storage::free_project_dir(&root, name);
+        self.cloud_status = CloudStatus::Busy(format!("Downloading “{name}” to {}…", dir.display()));
+        cx.notify();
+        let server = self.config.cloud_server();
+        let id = id.to_string();
+        let name = name.to_string();
+        self.spawn_cloud(cx, move |send| {
+            let result = cloud::fetch_project(&server, &acct.token, &id, &name, &dir).map(|()| dir);
+            send(CloudMsg::Fetched(id, result));
         });
     }
 
@@ -538,6 +589,7 @@ impl SyncManager {
         let Some(acct) = self.config.cloud.take() else { return };
         self.cloud = None;
         self.cloud_devices.clear();
+        self.cloud_projects.clear();
         self.save_config();
         self.cloud_status = CloudStatus::Busy("Unlinking…".into());
         cx.notify();
@@ -565,6 +617,7 @@ impl SyncManager {
         self.config.cloud = None;
         self.cloud = None;
         self.cloud_devices.clear();
+        self.cloud_projects.clear();
         self.save_config();
         self.cloud_status =
             CloudStatus::Failed("This machine was unlinked on the website. Link it again to sign in.".into());
@@ -620,6 +673,31 @@ impl SyncManager {
                         CloudStatus::Failed(format!("Could not reach the server: {e:#}"))
                     };
                 }
+            },
+            CloudMsg::Projects(result) => match result {
+                Ok(list) => self.cloud_projects = list,
+                // An expired token is reported by the account message.
+                Err(e) if cloud::is_unauthorized(&e) => {}
+                Err(e) => tracing::warn!("listing cloud projects failed: {e:#}"),
+            },
+            CloudMsg::Fetched(id, result) => match result {
+                Ok(dir) => {
+                    self.local_ids.push(id);
+                    match Project::open(&dir) {
+                        Ok(project) => {
+                            self.cloud_status = CloudStatus::Idle;
+                            crate::app::open_project_window(project, None, cx);
+                        }
+                        Err(e) => {
+                            self.cloud_status = CloudStatus::Failed(format!(
+                                "Downloaded to {}, but it would not open: {e:#}",
+                                dir.display()
+                            ))
+                        }
+                    }
+                }
+                Err(e) if cloud::is_unauthorized(&e) => self.cloud_revoked(),
+                Err(e) => self.cloud_status = CloudStatus::Failed(format!("Could not get the copy: {e:#}")),
             },
             CloudMsg::Unlinked(result) => {
                 self.cloud_status = match result {

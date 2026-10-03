@@ -28,8 +28,39 @@ pub fn json_path(dir: &Path) -> PathBuf {
 }
 
 /// Default projects folder: `~/Wordy`.
+/// `~/Wordy`, or `WORDY_PROJECTS_DIR` when set (a second instance for
+/// testing keeps its projects apart that way).
 pub fn projects_root() -> PathBuf {
+    if let Some(dir) = std::env::var_os("WORDY_PROJECTS_DIR").filter(|d| !d.is_empty()) {
+        return PathBuf::from(dir);
+    }
     dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join("Wordy")
+}
+
+/// A folder name for a project called `name` under `root` that does not
+/// exist yet: the name itself, then "name 2", "name 3", …
+pub fn free_project_dir(root: &Path, name: &str) -> PathBuf {
+    let base: String = name
+        .chars()
+        .map(|c| {
+            if c.is_control() || "/\\:*?\"<>|".contains(c) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .to_string();
+    let base = if base.is_empty() { "Project".to_string() } else { base };
+    let first = root.join(&base);
+    if !first.exists() {
+        return first;
+    }
+    (2..)
+        .map(|n| root.join(format!("{base} {n}")))
+        .find(|p| !p.exists())
+        .expect("an unused folder name")
 }
 
 /// List project folders under the root (anything containing project.loro).
@@ -89,6 +120,16 @@ pub fn write_json_mirror(doc: &LoroDoc, dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let json = serde_json::to_string_pretty(&doc.get_deep_value())?;
     write_atomic(&json_path(dir), json.as_bytes())
+}
+
+/// The project id as the JSON mirror has it, without loading the project.
+/// Ids never change, so the mirror (rewritten at most every 30 s) is good
+/// enough; `None` for a folder without a mirror or one from before ids.
+pub fn mirrored_id(dir: &Path) -> Option<String> {
+    let bytes = std::fs::read(json_path(dir)).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let id = v.get("project")?.get("id")?.as_str()?;
+    (!id.is_empty()).then(|| id.to_string())
 }
 
 /// Rolling backups under `snapshots/`, newest first.

@@ -300,6 +300,12 @@ pub fn open_main_window(cx: &mut App) {
             None
         }
     };
+    open_project_window(project, notice, cx);
+}
+
+/// Open `project` in its own window. The first call is the main window;
+/// later ones (a copy fetched from the account) sit beside it.
+pub fn open_project_window(project: Project, notice: Option<String>, cx: &mut App) {
     let shared: SharedProject = Rc::new(ProjectHandle::new(project));
     wordy_editor::SpellState::set_custom_words(cx, shared.load_dictionary());
 

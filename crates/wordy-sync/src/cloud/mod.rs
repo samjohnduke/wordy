@@ -13,10 +13,12 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+pub mod fetch;
 pub mod protocol;
 pub mod room;
 pub mod state;
 
+pub use fetch::fetch_project;
 pub use room::{RoomEvent, RoomHandle, RoomOptions};
 pub use state::CloudState;
 
@@ -70,6 +72,25 @@ pub struct Device {
 pub struct Account {
     pub user: User,
     pub devices: Vec<Device>,
+}
+
+/// A project the account can reach on the server: our own, or one that
+/// was shared with us.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteProject {
+    pub id: String,
+    pub name: String,
+    /// `owner`, `editor` or `reader`.
+    pub role: String,
+    #[serde(default)]
+    pub owner: bool,
+    #[serde(default, rename = "updatedAt")]
+    pub updated_at: String,
+}
+
+#[derive(Deserialize)]
+struct ProjectList {
+    projects: Vec<RemoteProject>,
 }
 
 /// A device-code flow in progress.
@@ -318,6 +339,19 @@ impl Client {
             bail!("account request failed: {}", describe(status, &text));
         }
         serde_json::from_str(&text).context("account response")
+    }
+
+    /// Every project the account belongs to, owned or shared.
+    pub fn list_projects(&self, token: &str) -> Result<Vec<RemoteProject>> {
+        let (status, text) = self.get("/api/projects", token)?;
+        if status == 401 {
+            return Err(Unauthorized.into());
+        }
+        if status != 200 {
+            bail!("listing projects failed: {}", describe(status, &text));
+        }
+        let list: ProjectList = serde_json::from_str(&text).context("project list response")?;
+        Ok(list.projects)
     }
 
     /// Remove another linked machine.

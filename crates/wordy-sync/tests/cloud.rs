@@ -127,6 +127,10 @@ fn link_with_browser(url: &str, device_name: &str) -> Option<cloud::CloudAccount
         eprintln!("node or {chrome} missing; skipping the browser approval");
         return None;
     }
+    // The script signs up by email and takes the newest mail wrangler wrote,
+    // so two sign-ups at once would read each other's links: one at a time.
+    static ONE_BROWSER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _turn = ONE_BROWSER.lock().unwrap_or_else(|e| e.into_inner());
     let client = Client::new(url);
     let base = url.to_string();
     let acct = client
@@ -444,4 +448,73 @@ fn room_syncs_two_copies() {
         "{}",
         describe(&fatal)
     );
+}
+
+/// A machine without a copy of a project gets one from its room: the
+/// folder opens as a project with the same id, name, text and assets, and
+/// `cloud.json` says sync is on from the replay's end.
+#[test]
+fn fetch_project_copies_a_room() {
+    let Some(url) = server() else { return };
+    let Some(a) = link_with_browser(&url, "Fetch A") else {
+        return;
+    };
+    let b = link_sibling(&url, &a, "Fetch B");
+    let tmp = tempfile::tempdir().unwrap();
+
+    // A has a real project with text and an attachment, and claims the room.
+    let dir_a = tmp.path().join("Fetch test");
+    let project_a = wordy_doc::Project::create(&dir_a, "Fetch test").unwrap();
+    let id = project_a.id();
+    assert!(!id.is_empty());
+    let root = project_a.root(wordy_doc::Space::Manuscript);
+    let scene = project_a.create_node(root, wordy_doc::NodeKind::Scene, "One").unwrap();
+    project_a
+        .node(scene)
+        .unwrap()
+        .body()
+        .unwrap()
+        .insert(0, "Hello from A")
+        .unwrap();
+    project_a.commit_meta();
+    std::fs::create_dir_all(dir_a.join("assets/img")).unwrap();
+    std::fs::write(dir_a.join("assets/img/pic.png"), b"not really a png").unwrap();
+    let (room_a, ev_a) = room(&url, &a, &id, &dir_a, 0, &[]);
+    assert_eq!(ev_a.wait_synced(), (0, false));
+    // The file was there before connecting, so the first reconcile sends it.
+    ev_a.wait("asset upload", |ev| match ev {
+        RoomEvent::Assets { uploaded, .. } if uploaded == ["img/pic.png"] => Some(()),
+        _ => None,
+    });
+    room_a.push(project_a.doc.export(ExportMode::Snapshot).unwrap());
+    assert_eq!(ev_a.wait_pushed(), 1);
+
+    // The account lists it, under the name the room helper sent with hello.
+    let listed = Client::new(&url).list_projects(&b.token).unwrap();
+    let mine = listed.iter().find(|p| p.id == id).expect("project listed");
+    assert_eq!(
+        (mine.name.as_str(), mine.role.as_str(), mine.owner),
+        ("Room test", "owner", true)
+    );
+
+    // B fetches a copy.
+    let dir_b = tmp.path().join("copy");
+    cloud::fetch_project(&url, &b.token, &id, "Fetch test", &dir_b).unwrap();
+    let project_b = wordy_doc::Project::open(&dir_b).unwrap();
+    assert_eq!(project_b.id(), id);
+    assert_eq!(project_b.name(), "Fetch test");
+    assert_eq!(project_b.node(scene).unwrap().plain_text(), "Hello from A");
+    assert_eq!(
+        std::fs::read(dir_b.join("assets/img/pic.png")).unwrap(),
+        b"not really a png"
+    );
+    let state = cloud::CloudState::load(&dir_b);
+    assert!(state.enabled);
+    assert_eq!(state.last_seq, 1);
+    assert_eq!(state.vv(), project_b.doc.oplog_vv());
+
+    // A folder with something in it is left alone.
+    let err = cloud::fetch_project(&url, &b.token, &id, "Fetch test", &dir_b).unwrap_err();
+    assert!(err.to_string().contains("not empty"), "{err}");
+    drop(room_a);
 }

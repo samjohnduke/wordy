@@ -596,8 +596,7 @@ walk-through goes into `docs/sync-test.md` with the next release.)*
   card per project with the members, their roles, pending invitations, an invite form
   for owners and "Leave" for everyone else.
 - Not done: the app has no sharing UI of its own (it shows role and read-only state; the
-  website does the inviting), shared projects are not offered in the app's Open dialog
-  until the device has a copy, and there is no notification email on removal.
+  website does the inviting), and there is no notification email on removal.
 - *(manual)* Apply migration `0003` remotely before deploying.
 
 **Accept:** an invited address with no account ends up with a passkey and the project on
@@ -605,3 +604,29 @@ its account; a reader sees edits live but its own stay local; an editor's go thr
 removal cuts the connection. *(Done: `site/scripts/e2e-share.mjs` drives the whole thing
 against the local server, with the invitee's sign-up in headless Chromium through
 `e2e-auth.mjs --invite`.)*
+
+### Phase 17b — Copies from the account, and testing on localhost (2026-10-04)
+
+Done. Closes the gap left by Phase 17 (a machine could only sync a project it already
+had a folder for) and makes the whole account/sync/sharing story runnable on one
+computer against `wrangler dev`. `docs/localhost-testing.md` is the procedure.
+
+- `Client::list_projects` (`GET /api/projects`) and `cloud::fetch_project`: join the room
+  with an empty `LoroDoc`, import the replay up to `Synced`, wait for the asset
+  reconcile (`RoomHandle::finish` joins the thread), write `project.loro`, then
+  `cloud.json` with `enabled`, `last_seq = head` and the doc's version vector, and open
+  the folder once to check it and write the mirror. An empty room (nothing pushed yet) is
+  refused and the folder removed. Test: `fetch_project_copies_a_room` in
+  `crates/wordy-sync/tests/cloud.rs`.
+- Account card: "On the server" lists every project the account can reach ("yours" or
+  "shared, editor/reader"), marks the ones with a local folder (ids read from
+  `project.json` mirrors under the projects root, plus the open project) and offers "Get
+  a copy" for the rest. The copy goes to a free folder name under the projects root and
+  opens in a new window (`app::open_project_window`, split out of `open_main_window`).
+- `WORDY_PROJECTS_DIR` overrides `~/Wordy` (`storage::projects_root`), so a second app
+  instance (`WORDY_CONFIG_DIR` for its own account) keeps its projects apart.
+- Site: `pnpm mail` prints the emails `wrangler dev` wrote (with their links), and
+  `sendEmail` logs each message to the wrangler terminal when `SITE_URL` is localhost.
+- Not done: a second window shares the process (one dictionary in the spell checker,
+  Quit closes both); it is meant for testing and for getting a copy, not as a general
+  multi-window mode.

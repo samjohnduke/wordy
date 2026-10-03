@@ -96,13 +96,20 @@ BETTER_AUTH_SECRET`, and verify the sending domain under Email Sending in the Cl
 dashboard. Locally, `wrangler dev` writes outgoing mail under `.wrangler/tmp/email/`
 instead of sending it, and keeps the rooms and the bucket under `.wrangler/state/`.
 
+[`docs/localhost-testing.md`](docs/localhost-testing.md) walks through running all of it
+on one computer: passkeys in the browser, the app pointed at `http://localhost:8787`, a
+second app instance (`WORDY_CONFIG_DIR`, `WORDY_PROJECTS_DIR`) and sharing between two
+accounts; `pnpm mail` prints the emails wrangler wrote.
+
 In the app, Sync → Account → "Link this machine" opens the browser at `/device` with a
 code; approving it there with a passkey gives the app a bearer token, stored in
 `sync.json` (owner-readable only). "Sync this project" then keeps the open project in its
 room on the server: every save sends the new edits, edits from other machines land after
 a short pause in typing without moving the caret, custom words and attachments follow,
 and the project keeps working offline (changes go up on reconnect). `cloud.json` in the
-project folder holds the switch and the sync position. The Rust client is
+project folder holds the switch and the sync position. "On the server" in the same card
+lists every project the account can reach, own or shared; "Get a copy" downloads one this
+machine has no folder for and opens it in a new window, syncing from the start. The Rust client is
 `wordy-sync::cloud`; its tests run against a local `wrangler dev --port 8787` and skip
 when there is none.
 
