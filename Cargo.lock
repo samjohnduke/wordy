@@ -10773,6 +10773,8 @@ dependencies = [
  "futures",
  "gpui-kit",
  "mime_guess",
+ "serde",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
  "wordy-doc",

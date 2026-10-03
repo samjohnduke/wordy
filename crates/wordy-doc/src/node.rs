@@ -203,9 +203,7 @@ fn value_bool(v: Option<ValueOrContainer>) -> Option<bool> {
 
 impl Node {
     pub(crate) fn new(tree: LoroTree, id: TreeID) -> Result<Self> {
-        let meta = tree
-            .get_meta(id)
-            .map_err(|e| anyhow!("node {id} has no meta: {e}"))?;
+        let meta = tree.get_meta(id).map_err(|e| anyhow!("node {id} has no meta: {e}"))?;
         Ok(Self { id, tree, meta })
     }
 
@@ -285,10 +283,7 @@ impl Node {
 
     /// Plain text of the body without the terminating newline.
     pub fn plain_text(&self) -> String {
-        let mut s = self
-            .body_if_exists()
-            .map(|t| t.to_string())
-            .unwrap_or_default();
+        let mut s = self.body_if_exists().map(|t| t.to_string()).unwrap_or_default();
         if s.ends_with('\n') {
             s.pop();
         }
@@ -415,9 +410,7 @@ impl Node {
         self.record_list(meta::RELATIONS)
             .into_iter()
             .filter_map(|m| {
-                let to = m
-                    .get("to")
-                    .and_then(|v| v.as_string().map(|s| s.to_string()))?;
+                let to = m.get("to").and_then(|v| v.as_string().map(|s| s.to_string()))?;
                 let to = TreeID::try_from(to.as_str()).ok()?;
                 Some(Relation {
                     to,
@@ -476,8 +469,7 @@ impl Node {
         m.insert("name".into(), LoroValue::from(name));
         m.insert("path".into(), LoroValue::from(path));
         m.insert("mime".into(), LoroValue::from(mime));
-        self.list(meta::ATTACHMENTS)?
-            .push(LoroValue::Map(m.into()))?;
+        self.list(meta::ATTACHMENTS)?.push(LoroValue::Map(m.into()))?;
         Ok(())
     }
 
@@ -505,6 +497,40 @@ impl Node {
             },
             _ => vec![],
         }
+    }
+
+    /// Copy every piece of metadata and the body from `src` into this node
+    /// (kind, space, title and `created` are left as they are).
+    pub(crate) fn copy_from(&self, src: &Node) -> Result<()> {
+        for key in [meta::STATUS, meta::WORD_GOAL, meta::INCLUDE_IN_COMPILE, meta::TEMPLATE] {
+            if let Some(ValueOrContainer::Value(v)) = src.meta.get(key) {
+                self.meta.insert(key, v)?;
+            }
+        }
+        for tag in src.tags() {
+            self.add_tag(&tag)?;
+        }
+        for alias in src.aliases() {
+            self.add_alias(&alias)?;
+        }
+        for (k, v) in src.fields() {
+            self.set_field(&k, &v)?;
+        }
+        for r in src.relations() {
+            self.add_relation(r.to, &r.kind, &r.note)?;
+        }
+        for a in src.attachments() {
+            self.add_attachment(&a.name, &a.path, &a.mime)?;
+        }
+        if let Some(src_body) = src.body_if_exists() {
+            let body = self.body()?;
+            let len = body.len_unicode();
+            if len > 0 {
+                body.delete(0, len)?;
+            }
+            body.apply_delta(&src_body.to_delta())?;
+        }
+        Ok(())
     }
 
     pub fn parent(&self) -> Option<TreeID> {

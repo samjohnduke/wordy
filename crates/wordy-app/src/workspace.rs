@@ -7,9 +7,7 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::base::dock::PanelId;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::dock::{
-    panel_handle, DockArea, DockLayout, DockPlacement, DockSkin, PanelStyle,
-};
+use gpui_kit::component::dock::{panel_handle, DockArea, DockLayout, DockPlacement, DockSkin, PanelStyle};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Sizable as _, TitleBar};
@@ -20,11 +18,11 @@ use wordy_doc::{storage, Space, TreeID, Version};
 use wordy_editor::SpellState;
 
 use crate::app::{
-    self, CloseQuickOpen, CloseTab, FocusSidebar, NewItem, NextDocument, NextTab, PrevDocument,
-    PrevTab, QuickOpen, QuickOpenDown, QuickOpenUp, Quit, Save, SearchProject, SharedProject,
-    ShowHome, SpaceManuscript, SpaceNotes, SpaceWorld, ToggleFocusMode, ToggleReference,
-    ToggleTheme, ToggleTypewriter, QUICK_OPEN_CONTEXT,
+    self, CloseQuickOpen, CloseTab, FocusSidebar, NewItem, NextDocument, NextTab, PrevDocument, PrevTab, QuickOpen,
+    QuickOpenDown, QuickOpenUp, Quit, Save, SearchProject, SharedProject, ShowHome, SpaceManuscript, SpaceNotes,
+    SpaceWorld, ToggleFocusMode, ToggleReference, ToggleTheme, ToggleTypewriter, QUICK_OPEN_CONTEXT,
 };
+use crate::layout::Layout;
 use crate::panels::editor::{EditorPanel, EditorPanelEvent};
 use crate::panels::home::{HomeEvent, HomePanel};
 use crate::panels::reference::{ReferenceEvent, ReferencePanel};
@@ -32,6 +30,8 @@ use crate::panels::sidebar::{SidebarEvent, SidebarPanel};
 use crate::sync::{SyncEvent, SyncManager};
 
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(1500);
+/// Layout changes (tabs, docks, collapse state) are written after this pause.
+const LAYOUT_DELAY: Duration = Duration::from_millis(400);
 /// Gaps between edits longer than this do not count as writing time.
 const SESSION_IDLE: Duration = Duration::from_secs(60);
 /// A snapshot copy goes to `snapshots/` on the first save of a session and
@@ -85,6 +85,9 @@ pub struct Workspace {
     dirty_nodes: HashSet<TreeID>,
     last_saved: Option<String>,
     save_task: Option<Task<()>>,
+    layout_task: Option<Task<()>>,
+    /// Set once `restore_layout` has run; layout writes before that are noise.
+    restoring: bool,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -95,8 +98,7 @@ impl Workspace {
         skin.set_panel_style(PanelStyle::TabBar, cx);
         skin.set_close_button_visible(true, cx);
 
-        let sidebar =
-            cx.new(|cx| SidebarPanel::new(project.clone(), Space::Manuscript, window, cx));
+        let sidebar = cx.new(|cx| SidebarPanel::new(project.clone(), Space::Manuscript, window, cx));
         let placeholder = cx.new(|cx| EditorPanel::placeholder(project.clone(), cx));
         let reference = cx.new(|cx| ReferencePanel::new(project.clone(), cx));
 
@@ -123,16 +125,13 @@ impl Workspace {
             dock.toggle_dock(DockPlacement::Right, window, cx);
         });
 
-        let sub = cx.subscribe_in(
-            &sidebar,
-            window,
-            |this, _, ev: &SidebarEvent, window, cx| match ev {
-                SidebarEvent::Open(id) => this.open_node(*id, window, cx),
-                SidebarEvent::Changed => this.on_tree_changed(cx),
-                SidebarEvent::Removed(id) => this.close_node(*id, window, cx),
-                SidebarEvent::FocusEditor => this.focus_active(window, cx),
-            },
-        );
+        let sub = cx.subscribe_in(&sidebar, window, |this, _, ev: &SidebarEvent, window, cx| match ev {
+            SidebarEvent::Open(id) => this.open_node(*id, window, cx),
+            SidebarEvent::Changed => this.on_tree_changed(cx),
+            SidebarEvent::Removed(id) => this.close_node(*id, window, cx),
+            SidebarEvent::FocusEditor => this.focus_active(window, cx),
+            SidebarEvent::LayoutChanged => this.layout_changed(cx),
+        });
         let ref_sub = cx.subscribe_in(
             &reference,
             window,
@@ -159,7 +158,9 @@ impl Workspace {
             tracing::error!("begin session: {e:#}");
         }
 
-        Self {
+        let dock_sub = cx.observe(&dock, |this, _, cx| this.layout_changed(cx));
+
+        let mut this = Self {
             project,
             space: Space::Manuscript,
             dock,
@@ -182,9 +183,120 @@ impl Workspace {
             dirty_nodes: HashSet::new(),
             last_saved: None,
             save_task: None,
+            layout_task: None,
+            restoring: true,
             focus,
-            _subs: vec![sub, ref_sub, sync_sub],
+            _subs: vec![sub, ref_sub, sync_sub, dock_sub],
+        };
+        this.restore_layout(window, cx);
+        this.restoring = false;
+        this
+    }
+
+    // ----- layout persistence ---------------------------------------------
+
+    /// Everything about the window worth putting back on the next launch.
+    fn capture_layout(&self, cx: &App) -> Layout {
+        let dock = self.dock.read(cx);
+        let sidebar = self.sidebar.read(cx);
+        Layout {
+            space: self.space.as_str().to_string(),
+            tabs: self.tab_order.iter().map(|id| id.to_string()).collect(),
+            active: self.active.map(|id| id.to_string()),
+            home_open: self.home.is_some(),
+            reference_open: dock.is_dock_open(DockPlacement::Right),
+            reference_pinned: self.reference.read(cx).pinned_id().map(|id| id.to_string()),
+            sidebar_open: dock.is_dock_open(DockPlacement::Left),
+            sidebar_width: dock.dock_size(DockPlacement::Left).map(f32::from),
+            reference_width: dock.dock_size(DockPlacement::Right).map(f32::from),
+            typewriter: self.typewriter,
+            focus_mode: self.focus_mode,
+            collapsed: sidebar.collapsed_ids().iter().map(|id| id.to_string()).collect(),
         }
+    }
+
+    /// Something layout-ish changed: write `layout.json` after a short pause.
+    fn layout_changed(&mut self, cx: &mut Context<Self>) {
+        if self.restoring {
+            return;
+        }
+        self.layout_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(LAYOUT_DELAY).await;
+            this.update(cx, |ws, cx| ws.save_layout(cx)).ok();
+        }));
+    }
+
+    fn save_layout(&mut self, cx: &mut Context<Self>) {
+        self.layout_task = None;
+        let Some(dir) = self.project.dir().cloned() else {
+            return;
+        };
+        if let Err(e) = self.capture_layout(cx).save(&dir) {
+            tracing::warn!("layout save failed: {e:#}");
+        }
+    }
+
+    /// Put the window back the way it was when the project was last open.
+    fn restore_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(layout) = self.project.dir().and_then(|d| Layout::load(d)) else {
+            return;
+        };
+        let p = self.project.clone();
+        let p = &p.project;
+        let space = match layout.space.as_str() {
+            "world" => Space::World,
+            "notes" => Space::Notes,
+            _ => Space::Manuscript,
+        };
+        self.set_space(space, cx);
+        self.dock.update(cx, |dock, cx| {
+            if let Some(w) = layout.sidebar_width.filter(|w| *w >= 120.) {
+                dock.set_dock_size(DockPlacement::Left, px(w), window, cx);
+            }
+            if let Some(w) = layout.reference_width.filter(|w| *w >= 160.) {
+                dock.set_dock_size(DockPlacement::Right, px(w), window, cx);
+            }
+            if dock.is_dock_open(DockPlacement::Left) != layout.sidebar_open {
+                dock.toggle_dock(DockPlacement::Left, window, cx);
+            }
+            if dock.is_dock_open(DockPlacement::Right) != layout.reference_open {
+                dock.toggle_dock(DockPlacement::Right, window, cx);
+            }
+        });
+        if let Some(id) = layout
+            .reference_pinned
+            .as_deref()
+            .and_then(|s| TreeID::try_from(s).ok())
+        {
+            if p.is_live(id) {
+                self.reference.update(cx, |r, cx| r.pin(id, cx));
+            }
+        }
+        let collapsed: Vec<TreeID> = Layout::ids(&layout.collapsed)
+            .into_iter()
+            .filter(|id| p.is_live(*id))
+            .collect();
+        self.sidebar.update(cx, |s, cx| s.set_collapsed(collapsed, cx));
+        self.typewriter = layout.typewriter;
+        if layout.home_open {
+            self.show_home(window, cx);
+        }
+        let active = layout.active.as_deref().and_then(|s| TreeID::try_from(s).ok());
+        for id in Layout::ids(&layout.tabs) {
+            if self.project.project.is_live(id) {
+                self.open_node(id, window, cx);
+            }
+        }
+        match active {
+            Some(id) if self.editors.contains_key(&id) => self.open_node(id, window, cx),
+            _ if layout.home_open => self.show_home(window, cx),
+            _ => {}
+        }
+        if layout.focus_mode {
+            self.set_focus_mode(true, window, cx);
+        }
+        self.sidebar.update(cx, |s, cx| s.select(self.active, cx));
+        cx.notify();
     }
 
     /// Show `id` in the reference pane, opening the pane if it is hidden.
@@ -195,16 +307,11 @@ impl Workspace {
                 dock.toggle_dock(DockPlacement::Right, window, cx);
             }
         });
+        self.layout_changed(cx);
         cx.notify();
     }
 
-    fn follow_link(
-        &mut self,
-        id: TreeID,
-        navigate: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn follow_link(&mut self, id: TreeID, navigate: bool, window: &mut Window, cx: &mut Context<Self>) {
         if navigate {
             self.open_node(id, window, cx);
         } else {
@@ -237,51 +344,44 @@ impl Workspace {
     fn show_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(home) = self.home.clone() {
             let pid = PanelId::from(home.entity_id());
-            self.dock
-                .update(cx, |dock, cx| dock.select_panel(pid, window, cx));
+            self.dock.update(cx, |dock, cx| dock.select_panel(pid, window, cx));
             home.update(cx, |_, cx| cx.notify());
+            self.layout_changed(cx);
             return;
         }
         let home = cx.new(|cx| HomePanel::new(self.project.clone(), self.sync.clone(), window, cx));
-        let sub = cx.subscribe_in(
-            &home,
-            window,
-            |this, _, ev: &HomeEvent, window, cx| match ev {
-                HomeEvent::Open(id) => this.open_node(*id, window, cx),
-                HomeEvent::Reveal { id, offset, len } => {
-                    this.open_node(*id, window, cx);
-                    if let Some(panel) = this.editors.get(id).cloned() {
-                        panel.update(cx, |p, cx| p.reveal(*offset, *len, window, cx));
-                    }
+        let sub = cx.subscribe_in(&home, window, |this, _, ev: &HomeEvent, window, cx| match ev {
+            HomeEvent::Open(id) => this.open_node(*id, window, cx),
+            HomeEvent::Reveal { id, offset, len } => {
+                this.open_node(*id, window, cx);
+                if let Some(panel) = this.editors.get(id).cloned() {
+                    panel.update(cx, |p, cx| p.reveal(*offset, *len, window, cx));
                 }
-                HomeEvent::Changed => this.on_edited(cx),
-                HomeEvent::Activated => {
-                    this.active = None;
-                    cx.notify();
-                }
-                HomeEvent::Closed => {
-                    this.home = None;
-                    cx.notify();
-                }
-            },
-        );
+            }
+            HomeEvent::Changed => this.on_edited(cx),
+            HomeEvent::Activated => {
+                this.active = None;
+                this.layout_changed(cx);
+                cx.notify();
+            }
+            HomeEvent::Closed => {
+                this.home = None;
+                this.layout_changed(cx);
+                cx.notify();
+            }
+        });
         self._subs.push(sub);
         let placeholder = self.placeholder.take();
         let pid = PanelId::from(home.entity_id());
         self.dock.update(cx, |dock, cx| {
-            dock.add_panel_view(
-                panel_handle(home.clone()),
-                DockPlacement::Center,
-                None,
-                window,
-                cx,
-            );
+            dock.add_panel_view(panel_handle(home.clone()), DockPlacement::Center, None, window, cx);
             if let Some(ph) = placeholder {
                 dock.remove_panel(ph, window, cx);
             }
             dock.select_panel(pid, window, cx);
         });
         self.home = Some(home);
+        self.layout_changed(cx);
         cx.notify();
     }
 
@@ -329,15 +429,9 @@ impl Workspace {
         }
     }
 
-    fn toggle_reference(
-        &mut self,
-        _: &ToggleReference,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.dock.update(cx, |dock, cx| {
-            dock.toggle_dock(DockPlacement::Right, window, cx)
-        });
+    fn toggle_reference(&mut self, _: &ToggleReference, window: &mut Window, cx: &mut Context<Self>) {
+        self.dock
+            .update(cx, |dock, cx| dock.toggle_dock(DockPlacement::Right, window, cx));
     }
 
     fn search_project(&mut self, _: &SearchProject, window: &mut Window, cx: &mut Context<Self>) {
@@ -355,6 +449,7 @@ impl Workspace {
         }
         self.space = space;
         self.sidebar.update(cx, |s, cx| s.set_space(space, cx));
+        self.layout_changed(cx);
         cx.notify();
     }
 
@@ -362,10 +457,10 @@ impl Workspace {
     fn open_node(&mut self, id: TreeID, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(panel) = self.editors.get(&id).cloned() {
             let pid = PanelId::from(panel.entity_id());
-            self.dock
-                .update(cx, |dock, cx| dock.select_panel(pid, window, cx));
+            self.dock.update(cx, |dock, cx| dock.select_panel(pid, window, cx));
             panel.update(cx, |p, cx| p.focus_editor(window, cx));
             self.active = Some(id);
+            self.layout_changed(cx);
             cx.notify();
             return;
         }
@@ -402,9 +497,7 @@ impl Workspace {
                     this.on_edited(cx);
                 }
                 EditorPanelEvent::NamesChanged => this.on_tree_changed(cx),
-                EditorPanelEvent::OpenLink { id, navigate } => {
-                    this.follow_link(*id, *navigate, window, cx)
-                }
+                EditorPanelEvent::OpenLink { id, navigate } => this.follow_link(*id, *navigate, window, cx),
                 EditorPanelEvent::DictionaryChanged(w) => this.on_dictionary_changed(w, cx),
                 EditorPanelEvent::MetaChanged => {
                     this.dirty_nodes.insert(id);
@@ -415,6 +508,7 @@ impl Workspace {
                 EditorPanelEvent::Activated => {
                     this.active = Some(id);
                     this.sidebar.update(cx, |s, cx| s.select(Some(id), cx));
+                    this.layout_changed(cx);
                     cx.notify();
                 }
                 EditorPanelEvent::Closed => {
@@ -423,6 +517,7 @@ impl Workspace {
                     if this.active == Some(id) {
                         this.active = None;
                     }
+                    this.layout_changed(cx);
                     cx.notify();
                 }
             },
@@ -439,13 +534,7 @@ impl Workspace {
         let placeholder = self.placeholder.take();
         let pid = PanelId::from(panel.entity_id());
         self.dock.update(cx, |dock, cx| {
-            dock.add_panel_view(
-                panel_handle(panel.clone()),
-                DockPlacement::Center,
-                None,
-                window,
-                cx,
-            );
+            dock.add_panel_view(panel_handle(panel.clone()), DockPlacement::Center, None, window, cx);
             if let Some(ph) = placeholder {
                 dock.remove_panel(ph, window, cx);
             }
@@ -453,14 +542,14 @@ impl Workspace {
         });
         panel.update(cx, |p, cx| p.focus_editor(window, cx));
         self.active = Some(id);
+        self.layout_changed(cx);
         cx.notify();
     }
 
     fn close_node(&mut self, id: TreeID, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(panel) = self.editors.remove(&id) {
             self.tab_order.retain(|t| *t != id);
-            self.dock
-                .update(cx, |dock, cx| dock.remove_panel(panel, window, cx));
+            self.dock.update(cx, |dock, cx| dock.remove_panel(panel, window, cx));
         }
         if self.active == Some(id) {
             self.active = None;
@@ -470,14 +559,16 @@ impl Workspace {
 
     // ----- focus mode, typewriter ------------------------------------------
 
-    fn toggle_focus_mode(
-        &mut self,
-        _: &ToggleFocusMode,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.focus_mode = !self.focus_mode;
-        let on = self.focus_mode;
+    fn toggle_focus_mode(&mut self, _: &ToggleFocusMode, window: &mut Window, cx: &mut Context<Self>) {
+        let on = !self.focus_mode;
+        self.set_focus_mode(on, window, cx);
+    }
+
+    fn set_focus_mode(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus_mode == on {
+            return;
+        }
+        self.focus_mode = on;
         let (left, right) = {
             let d = self.dock.read(cx);
             (
@@ -503,6 +594,7 @@ impl Workspace {
             panel.update(cx, |p, cx| p.set_focus_mode(on, cx));
         }
         self.focus_active(window, cx);
+        self.layout_changed(cx);
         cx.notify();
     }
 
@@ -512,6 +604,7 @@ impl Workspace {
         for panel in self.editors.values() {
             panel.update(cx, |p, cx| p.set_typewriter(on, cx));
         }
+        self.layout_changed(cx);
         cx.notify();
     }
 
@@ -559,9 +652,7 @@ impl Workspace {
         if items.is_empty() {
             return;
         }
-        let cur = self
-            .current_tab()
-            .and_then(|c| items.iter().position(|i| *i == c));
+        let cur = self.current_tab().and_then(|c| items.iter().position(|i| *i == c));
         let next = match cur {
             Some(ix) => (ix as isize + delta).rem_euclid(items.len() as isize) as usize,
             None => 0,
@@ -588,15 +679,13 @@ impl Workspace {
             Some(id) => {
                 if let Some(panel) = self.editors.remove(&id) {
                     self.tab_order.retain(|t| *t != id);
-                    self.dock
-                        .update(cx, |dock, cx| dock.remove_panel(panel, window, cx));
+                    self.dock.update(cx, |dock, cx| dock.remove_panel(panel, window, cx));
                 }
                 self.active = None;
             }
             None => {
                 if let Some(home) = self.home.take() {
-                    self.dock
-                        .update(cx, |dock, cx| dock.remove_panel(home, window, cx));
+                    self.dock.update(cx, |dock, cx| dock.remove_panel(home, window, cx));
                 }
             }
         }
@@ -697,23 +786,18 @@ impl Workspace {
             });
             return;
         }
-        let input = cx
-            .new(|cx| InputState::new(window, cx).placeholder("Jump to a scene, entity, or note…"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Jump to a scene, entity, or note…"));
         input.update(cx, |s, cx| s.focus(window, cx));
-        let sub = cx.subscribe_in(
-            &input,
-            window,
-            |this, _, ev: &InputEvent, window, cx| match ev {
-                InputEvent::Change => {
-                    if let Some(q) = &mut this.quick_open {
-                        q.selected = 0;
-                    }
-                    cx.notify();
+        let sub = cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, window, cx| match ev {
+            InputEvent::Change => {
+                if let Some(q) = &mut this.quick_open {
+                    q.selected = 0;
                 }
-                InputEvent::PressEnter { .. } => this.quick_open_confirm(window, cx),
-                _ => {}
-            },
-        );
+                cx.notify();
+            }
+            InputEvent::PressEnter { .. } => this.quick_open_confirm(window, cx),
+            _ => {}
+        });
         self.quick_open = Some(QuickOpenState {
             input,
             selected: 0,
@@ -722,12 +806,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn close_quick_open(
-        &mut self,
-        _: &CloseQuickOpen,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn close_quick_open(&mut self, _: &CloseQuickOpen, window: &mut Window, cx: &mut Context<Self>) {
         if self.quick_open.take().is_some() {
             self.focus_active(window, cx);
             cx.notify();
@@ -812,13 +891,7 @@ impl Workspace {
         let selected = q.selected.min(hits.len().saturating_sub(1));
         let (accent, secondary, muted, border, popover) = {
             let t = cx.theme();
-            (
-                t.accent,
-                t.secondary,
-                t.muted_foreground,
-                t.border,
-                t.popover,
-            )
+            (t.accent, t.secondary, t.muted_foreground, t.border, t.popover)
         };
         let empty = hits.is_empty();
         let rows: Vec<AnyElement> = hits
@@ -847,13 +920,11 @@ impl Workspace {
                             .whitespace_nowrap()
                             .child(hit.title),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .flex_shrink_0()
-                            .child(format!("{} · {}", hit.space.label(), hit.kind)),
-                    )
+                    .child(div().text_xs().text_color(muted).flex_shrink_0().child(format!(
+                        "{} · {}",
+                        hit.space.label(),
+                        hit.kind
+                    )))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if let Some(q) = &mut this.quick_open {
                             q.selected = ix;
@@ -875,9 +946,7 @@ impl Workspace {
                 .key_context(QUICK_OPEN_CONTEXT)
                 .on_action(cx.listener(Self::close_quick_open))
                 .on_action(cx.listener(|this, _: &QuickOpenUp, _, cx| this.quick_open_move(-1, cx)))
-                .on_action(
-                    cx.listener(|this, _: &QuickOpenDown, _, cx| this.quick_open_move(1, cx)),
-                )
+                .on_action(cx.listener(|this, _: &QuickOpenDown, _, cx| this.quick_open_move(1, cx)))
                 // The input swallows plain up/down, so steer the list from the
                 // raw key event before bindings are consulted.
                 .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
@@ -892,9 +961,7 @@ impl Workspace {
                 }))
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, _, window, cx| {
-                        this.close_quick_open(&CloseQuickOpen, window, cx)
-                    }),
+                    cx.listener(|this, _, window, cx| this.close_quick_open(&CloseQuickOpen, window, cx)),
                 )
                 .child(
                     v_flex()
@@ -914,14 +981,7 @@ impl Workspace {
                         .child(Input::new(&q.input).small())
                         .children(rows)
                         .when(empty, |d| {
-                            d.child(
-                                div()
-                                    .px_2()
-                                    .py_1()
-                                    .text_sm()
-                                    .text_color(muted)
-                                    .child("No matches."),
-                            )
+                            d.child(div().px_2().py_1().text_sm().text_color(muted).child("No matches."))
                         }),
                 )
                 .into_any_element(),
@@ -937,8 +997,7 @@ impl Workspace {
         for panel in self.editors.values() {
             panel.update(cx, |p, cx| p.set_link_targets(targets.clone(), cx));
         }
-        self.reference
-            .update(cx, |r, cx| r.set_link_targets(targets, cx));
+        self.reference.update(cx, |r, cx| r.set_link_targets(targets, cx));
         self.dock.update(cx, |_, cx| cx.notify());
         self.on_edited(cx);
     }
@@ -976,11 +1035,7 @@ impl Workspace {
                     panel.update(cx, |_, cx| cx.notify());
                 }
                 tracing::info!("saved");
-                if self
-                    .last_backup
-                    .map(|t| t.elapsed() >= BACKUP_INTERVAL)
-                    .unwrap_or(true)
-                {
+                if self.last_backup.map(|t| t.elapsed() >= BACKUP_INTERVAL).unwrap_or(true) {
                     self.backup_now();
                 }
             }
@@ -989,6 +1044,7 @@ impl Workspace {
         if let Some(home) = &self.home {
             home.update(cx, |_, cx| cx.notify());
         }
+        self.save_layout(cx);
         cx.notify();
     }
 
@@ -1037,6 +1093,8 @@ impl Workspace {
     fn quit(&mut self, _: &Quit, _: &mut Window, cx: &mut Context<Self>) {
         if self.dirty {
             self.save_now(cx);
+        } else {
+            self.save_layout(cx);
         }
         cx.quit();
     }
@@ -1131,11 +1189,7 @@ impl Focusable for Workspace {
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let name = self.project.project.name();
-        let dir = self
-            .project
-            .dir()
-            .map(|d| d.display().to_string())
-            .unwrap_or_default();
+        let dir = self.project.dir().map(|d| d.display().to_string()).unwrap_or_default();
         let save_state = if self.dirty {
             "unsaved".to_string()
         } else {
@@ -1176,15 +1230,11 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::next_document))
             .on_action(cx.listener(Self::prev_document))
             .on_action(cx.listener(Self::focus_sidebar))
-            .on_action(cx.listener(|this, _: &SpaceManuscript, window, cx| {
-                this.space_shortcut(Space::Manuscript, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &SpaceWorld, window, cx| {
-                this.space_shortcut(Space::World, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &SpaceNotes, window, cx| {
-                this.space_shortcut(Space::Notes, window, cx)
-            }))
+            .on_action(
+                cx.listener(|this, _: &SpaceManuscript, window, cx| this.space_shortcut(Space::Manuscript, window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &SpaceWorld, window, cx| this.space_shortcut(Space::World, window, cx)))
+            .on_action(cx.listener(|this, _: &SpaceNotes, window, cx| this.space_shortcut(Space::Notes, window, cx)))
             .on_action(|_: &ToggleTheme, window, cx| app::toggle_theme(window, cx))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -1200,11 +1250,7 @@ impl Render for Workspace {
                             Button::new("theme")
                                 .ghost()
                                 .xsmall()
-                                .label(if cx.theme().mode.is_dark() {
-                                    "Light"
-                                } else {
-                                    "Dark"
-                                })
+                                .label(if cx.theme().mode.is_dark() { "Light" } else { "Dark" })
                                 .on_click(|_, window, cx| app::toggle_theme(window, cx)),
                         ),
                 ),
@@ -1248,9 +1294,7 @@ impl Render for Workspace {
                                     .text_color(cx.theme().muted_foreground)
                                     .child(save_state),
                             )
-                            .children(recovered.map(|r| {
-                                div().flex_shrink_0().text_color(cx.theme().danger).child(r)
-                            }))
+                            .children(recovered.map(|r| div().flex_shrink_0().text_color(cx.theme().danger).child(r)))
                             .child(div().flex_shrink_0().whitespace_nowrap().child(right)),
                     ),
                 )

@@ -1,5 +1,5 @@
 //! The space sidebar: tree of nodes for the current space, with creation,
-//! rename, reorder, status, compile toggle, and trash.
+//! rename, drag-and-drop reorder, duplicate, status, compile toggle, and trash.
 
 use std::collections::HashSet;
 
@@ -14,8 +14,8 @@ use gpui_kit::*;
 use wordy_doc::{NodeKind, Space, Status, TreeID};
 
 use crate::app::{
-    SharedProject, SidebarActivate, SidebarBack, SidebarDown, SidebarLeft, SidebarRename,
-    SidebarRight, SidebarTrash, SidebarUp, SIDEBAR_CONTEXT,
+    SharedProject, SidebarActivate, SidebarBack, SidebarDown, SidebarLeft, SidebarRename, SidebarRight, SidebarTrash,
+    SidebarUp, SIDEBAR_CONTEXT,
 };
 
 pub enum SidebarEvent {
@@ -27,6 +27,39 @@ pub enum SidebarEvent {
     Removed(TreeID),
     /// Escape: hand focus back to the active editor.
     FocusEditor,
+    /// Collapse state changed (persisted in layout.json).
+    LayoutChanged,
+}
+
+/// The dragged row's floating preview.
+#[derive(Clone)]
+struct DragNode {
+    id: TreeID,
+    title: SharedString,
+}
+
+impl Render for DragNode {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .text_sm()
+            .bg(cx.theme().popover)
+            .text_color(cx.theme().popover_foreground)
+            .border_1()
+            .border_color(cx.theme().border)
+            .shadow_md()
+            .child(self.title.clone())
+    }
+}
+
+/// Where a dragged row would land relative to the row under the pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DropZone {
+    Before,
+    Into,
+    After,
 }
 
 struct Rename {
@@ -41,6 +74,8 @@ pub struct SidebarPanel {
     selected: Option<TreeID>,
     collapsed: HashSet<TreeID>,
     rename: Option<Rename>,
+    /// Row under a dragged node and where it would drop.
+    drop_hint: Option<(TreeID, DropZone)>,
     show_trash: bool,
     search: Entity<InputState>,
     query: String,
@@ -50,29 +85,21 @@ pub struct SidebarPanel {
 }
 
 impl SidebarPanel {
-    pub fn new(
-        project: SharedProject,
-        space: Space,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(project: SharedProject, space: Space, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search project… (#tag)"));
-        let sub = cx.subscribe_in(
-            &search,
-            window,
-            |this, input, ev: &InputEvent, _window, cx| {
-                if matches!(ev, InputEvent::Change) {
-                    this.query = input.read(cx).value().trim().to_string();
-                    cx.notify();
-                }
-            },
-        );
+        let sub = cx.subscribe_in(&search, window, |this, input, ev: &InputEvent, _window, cx| {
+            if matches!(ev, InputEvent::Change) {
+                this.query = input.read(cx).value().trim().to_string();
+                cx.notify();
+            }
+        });
         Self {
             project,
             space,
             selected: None,
             collapsed: HashSet::new(),
             rename: None,
+            drop_hint: None,
             show_trash: false,
             search,
             query: String::new(),
@@ -148,11 +175,7 @@ impl SidebarPanel {
             .enumerate()
             .map(|(ix, hit)| {
                 let id = hit.node;
-                let snippet: String = hit
-                    .snippet
-                    .chars()
-                    .filter(|c| *c != '\u{1}' && *c != '\u{2}')
-                    .collect();
+                let snippet: String = hit.snippet.chars().filter(|c| *c != '\u{1}' && *c != '\u{2}').collect();
                 v_flex()
                     .id(ElementId::Name(format!("hit-{ix}").into()))
                     .w_full()
@@ -185,6 +208,32 @@ impl SidebarPanel {
     pub fn select(&mut self, id: Option<TreeID>, cx: &mut Context<Self>) {
         self.selected = id;
         cx.notify();
+    }
+
+    pub fn collapsed_ids(&self) -> Vec<TreeID> {
+        self.collapsed.iter().copied().collect()
+    }
+
+    pub fn set_collapsed(&mut self, ids: Vec<TreeID>, cx: &mut Context<Self>) {
+        self.collapsed = ids.into_iter().collect();
+        cx.notify();
+    }
+
+    fn set_folded(&mut self, id: TreeID, folded: bool, cx: &mut Context<Self>) {
+        let changed = if folded {
+            self.collapsed.insert(id)
+        } else {
+            self.collapsed.remove(&id)
+        };
+        if changed {
+            cx.emit(SidebarEvent::LayoutChanged);
+        }
+        cx.notify();
+    }
+
+    fn toggle_folded(&mut self, id: TreeID, cx: &mut Context<Self>) {
+        let folded = !self.collapsed.contains(&id);
+        self.set_folded(id, folded, cx);
     }
 
     // ----- keyboard navigation --------------------------------------------
@@ -233,9 +282,7 @@ impl SidebarPanel {
         if rows.is_empty() {
             return;
         }
-        let ix = self
-            .selected
-            .and_then(|s| rows.iter().position(|r| *r == s));
+        let ix = self.selected.and_then(|s| rows.iter().position(|r| *r == s));
         let next = match ix {
             Some(i) => (i as isize + delta).clamp(0, rows.len() as isize - 1) as usize,
             None if delta > 0 => 0,
@@ -262,9 +309,8 @@ impl SidebarPanel {
         let Some(id) = self.selected else { return };
         let p = &self.project.project;
         let Ok(node) = p.node(id) else { return };
-        if node.kind().is_container() && !self.collapsed.contains(&id) && !p.children(id).is_empty()
-        {
-            self.collapsed.insert(id);
+        if node.kind().is_container() && !self.collapsed.contains(&id) && !p.children(id).is_empty() {
+            self.set_folded(id, true, cx);
         } else if let Some(parent) = node.parent() {
             let parent_is_root = p
                 .node(parent)
@@ -289,8 +335,8 @@ impl SidebarPanel {
         if !node.kind().is_container() {
             return;
         }
-        if self.collapsed.remove(&id) {
-            cx.notify();
+        if self.collapsed.contains(&id) {
+            self.set_folded(id, false, cx);
             return;
         }
         if let Some(first) = p.children(id).first().copied() {
@@ -310,10 +356,7 @@ impl SidebarPanel {
             return;
         };
         if node.kind().is_container() {
-            if !self.collapsed.remove(&id) {
-                self.collapsed.insert(id);
-            }
-            cx.notify();
+            self.toggle_folded(id, cx);
         } else {
             self.activate(id, cx);
         }
@@ -376,27 +419,18 @@ impl SidebarPanel {
     /// Create the space's leaf kind next to the selection (or at the root).
     pub fn new_leaf(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (leaf, _) = self.kinds();
-        let anchor = self
-            .selected
-            .unwrap_or_else(|| self.project.project.root(self.space));
+        let anchor = self.selected.unwrap_or_else(|| self.project.project.root(self.space));
         self.create(anchor, leaf, window, cx);
     }
 
     /// Create `kind` inside `anchor` if it is a container, else after it.
-    fn create(
-        &mut self,
-        anchor: TreeID,
-        kind: NodeKind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn create(&mut self, anchor: TreeID, kind: NodeKind, window: &mut Window, cx: &mut Context<Self>) {
         let p = &self.project.project;
-        let is_container = p
-            .node(anchor)
-            .map(|n| n.kind().is_container())
-            .unwrap_or(true);
+        let is_container = p.node(anchor).map(|n| n.kind().is_container()).unwrap_or(true);
         let result = if is_container {
-            self.collapsed.remove(&anchor);
+            if self.collapsed.remove(&anchor) {
+                cx.emit(SidebarEvent::LayoutChanged);
+            }
             p.create_node(anchor, kind, kind.default_title())
         } else {
             p.create_node_after(anchor, kind, kind.default_title())
@@ -422,19 +456,11 @@ impl SidebarPanel {
             s.focus(window, cx);
             s.select_all(window, cx);
         });
-        let sub = cx.subscribe_in(
-            &input,
-            window,
-            |this, _, ev: &InputEvent, window, cx| match ev {
-                InputEvent::PressEnter { .. } | InputEvent::Blur => this.commit_rename(window, cx),
-                _ => {}
-            },
-        );
-        self.rename = Some(Rename {
-            id,
-            input,
-            _sub: sub,
+        let sub = cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, window, cx| match ev {
+            InputEvent::PressEnter { .. } | InputEvent::Blur => this.commit_rename(window, cx),
+            _ => {}
         });
+        self.rename = Some(Rename { id, input, _sub: sub });
         cx.notify();
     }
 
@@ -490,6 +516,87 @@ impl SidebarPanel {
             tracing::error!("move: {e:#}");
         }
         self.changed(cx);
+    }
+
+    fn duplicate(&mut self, id: TreeID, cx: &mut Context<Self>) {
+        match self.project.project.duplicate_node(id) {
+            Ok(new_id) => self.selected = Some(new_id),
+            Err(e) => tracing::error!("duplicate: {e:#}"),
+        }
+        self.changed(cx);
+    }
+
+    /// Finish a drag: put `dragged` before/after/inside `target`.
+    fn drop_node(&mut self, dragged: TreeID, target: TreeID, zone: DropZone, cx: &mut Context<Self>) {
+        self.drop_hint = None;
+        let p = &self.project.project;
+        if dragged == target || p.is_descendant(target, dragged) || !p.is_live(dragged) {
+            cx.notify();
+            return;
+        }
+        let result = match zone {
+            DropZone::Before => p.move_before(dragged, target),
+            DropZone::After => p.move_after(dragged, target),
+            DropZone::Into => p.move_into(dragged, target),
+        };
+        if let Err(e) = result {
+            tracing::error!("drop: {e:#}");
+        }
+        if zone == DropZone::Into && self.collapsed.remove(&target) {
+            cx.emit(SidebarEvent::LayoutChanged);
+        }
+        self.selected = Some(dragged);
+        self.changed(cx);
+    }
+
+    /// Drop on the empty space under the tree: append to the space root.
+    fn drop_at_end(&mut self, dragged: TreeID, cx: &mut Context<Self>) {
+        self.drop_hint = None;
+        let root = self.project.project.root(self.space);
+        if let Err(e) = self.project.project.move_into(dragged, root) {
+            tracing::error!("drop: {e:#}");
+        }
+        self.selected = Some(dragged);
+        self.changed(cx);
+    }
+
+    /// Track where a drag would land over row `id`.
+    fn drag_over_row(&mut self, id: TreeID, is_container: bool, ev: &DragMoveEvent<DragNode>, cx: &mut Context<Self>) {
+        let b = ev.bounds;
+        let pos = ev.event.position;
+        if !b.contains(&pos) {
+            if self.drop_hint.map(|h| h.0) == Some(id) {
+                self.drop_hint = None;
+                cx.notify();
+            }
+            return;
+        }
+        let dragged = ev.drag(cx).id;
+        if dragged == id || self.project.project.is_descendant(id, dragged) {
+            if self.drop_hint.is_some() {
+                self.drop_hint = None;
+                cx.notify();
+            }
+            return;
+        }
+        let frac = f32::from((pos.y - b.origin.y) / b.size.height);
+        let zone = if is_container {
+            if frac < 0.25 {
+                DropZone::Before
+            } else if frac > 0.75 {
+                DropZone::After
+            } else {
+                DropZone::Into
+            }
+        } else if frac < 0.5 {
+            DropZone::Before
+        } else {
+            DropZone::After
+        };
+        if self.drop_hint != Some((id, zone)) {
+            self.drop_hint = Some((id, zone));
+            cx.notify();
+        }
     }
 
     fn trash(&mut self, id: TreeID, cx: &mut Context<Self>) {
@@ -566,30 +673,18 @@ impl SidebarPanel {
             return menu
                 .item(PopupMenuItem::new("Restore").on_click({
                     let this = this.clone();
-                    move |_, _, cx| {
-                        this.update(cx, |s, cx| s.restore(id, cx))
-                            .ok()
-                            .unwrap_or(())
-                    }
+                    move |_, _, cx| this.update(cx, |s, cx| s.restore(id, cx)).ok().unwrap_or(())
                 }))
                 .separator()
                 .item(PopupMenuItem::new("Delete permanently").on_click({
                     let this = this.clone();
-                    move |_, _, cx| {
-                        this.update(cx, |s, cx| s.delete_forever(id, cx))
-                            .ok()
-                            .unwrap_or(())
-                    }
+                    move |_, _, cx| this.update(cx, |s, cx| s.delete_forever(id, cx)).ok().unwrap_or(())
                 }));
         }
 
         let mut menu = menu
             .item(
-                PopupMenuItem::new(format!(
-                    "New {}",
-                    leaf.default_title().trim_start_matches("New ")
-                ))
-                .on_click({
+                PopupMenuItem::new(format!("New {}", leaf.default_title().trim_start_matches("New "))).on_click({
                     let this = this.clone();
                     move |_, window, cx| {
                         this.update(cx, |s, cx| s.create(id, leaf, window, cx))
@@ -599,11 +694,7 @@ impl SidebarPanel {
                 }),
             )
             .item(
-                PopupMenuItem::new(format!(
-                    "New {}",
-                    container.default_title().trim_start_matches("New ")
-                ))
-                .on_click({
+                PopupMenuItem::new(format!("New {}", container.default_title().trim_start_matches("New "))).on_click({
                     let this = this.clone();
                     move |_, window, cx| {
                         this.update(cx, |s, cx| s.create(id, container, window, cx))
@@ -621,21 +712,17 @@ impl SidebarPanel {
                         .unwrap_or(())
                 }
             }))
+            .item(PopupMenuItem::new("Duplicate").on_click({
+                let this = this.clone();
+                move |_, _, cx| this.update(cx, |s, cx| s.duplicate(id, cx)).ok().unwrap_or(())
+            }))
             .item(PopupMenuItem::new("Move Up").on_click({
                 let this = this.clone();
-                move |_, _, cx| {
-                    this.update(cx, |s, cx| s.move_by(id, -1, cx))
-                        .ok()
-                        .unwrap_or(())
-                }
+                move |_, _, cx| this.update(cx, |s, cx| s.move_by(id, -1, cx)).ok().unwrap_or(())
             }))
             .item(PopupMenuItem::new("Move Down").on_click({
                 let this = this.clone();
-                move |_, _, cx| {
-                    this.update(cx, |s, cx| s.move_by(id, 1, cx))
-                        .ok()
-                        .unwrap_or(())
-                }
+                move |_, _, cx| this.update(cx, |s, cx| s.move_by(id, 1, cx)).ok().unwrap_or(())
             }));
 
         if kind == NodeKind::Scene {
@@ -647,47 +734,26 @@ impl SidebarPanel {
                     let mut menu = menu;
                     for st in Status::ALL {
                         let this = this.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(st.label())
-                                .checked(st == current)
-                                .on_click(move |_, _, cx| {
-                                    this.update(cx, |s, cx| s.set_status(id, st, cx))
-                                        .ok()
-                                        .unwrap_or(())
-                                }),
-                        );
+                        menu = menu.item(PopupMenuItem::new(st.label()).checked(st == current).on_click(
+                            move |_, _, cx| this.update(cx, |s, cx| s.set_status(id, st, cx)).ok().unwrap_or(()),
+                        ));
                     }
                     menu
                 }
             });
-            menu = menu.item(
-                PopupMenuItem::new("Include in compile")
-                    .checked(include)
-                    .on_click({
-                        let this = this.clone();
-                        move |_, _, cx| {
-                            this.update(cx, |s, cx| s.toggle_compile(id, cx))
-                                .ok()
-                                .unwrap_or(())
-                        }
-                    }),
-            );
+            menu = menu.item(PopupMenuItem::new("Include in compile").checked(include).on_click({
+                let this = this.clone();
+                move |_, _, cx| this.update(cx, |s, cx| s.toggle_compile(id, cx)).ok().unwrap_or(())
+            }));
         }
 
-        menu.separator()
-            .item(PopupMenuItem::new("Move to Trash").on_click({
-                let this = this.clone();
-                move |_, _, cx| this.update(cx, |s, cx| s.trash(id, cx)).ok().unwrap_or(())
-            }))
+        menu.separator().item(PopupMenuItem::new("Move to Trash").on_click({
+            let this = this.clone();
+            move |_, _, cx| this.update(cx, |s, cx| s.trash(id, cx)).ok().unwrap_or(())
+        }))
     }
 
-    fn render_node(
-        &self,
-        id: TreeID,
-        depth: usize,
-        in_trash: bool,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
+    fn render_node(&self, id: TreeID, depth: usize, in_trash: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut out = Vec::new();
         let Ok(node) = self.project.project.node(id) else {
             return out;
@@ -699,11 +765,8 @@ impl SidebarPanel {
         let selected = self.selected == Some(id);
         let theme = cx.theme();
         let dim = kind == NodeKind::Scene && !node.include_in_compile();
-        let renaming = self
-            .rename
-            .as_ref()
-            .filter(|r| r.id == id)
-            .map(|r| r.input.clone());
+        let renaming = self.rename.as_ref().filter(|r| r.id == id).map(|r| r.input.clone());
+        let renaming_none = renaming.is_none();
         let menu_project = self.project.clone();
         let menu_this = self.weak.clone();
         let menu_kinds = self.kinds();
@@ -718,11 +781,8 @@ impl SidebarPanel {
                 .cursor_pointer()
                 .child(if collapsed { "▸" } else { "▾" })
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    if !this.collapsed.remove(&id) {
-                        this.collapsed.insert(id);
-                    }
+                    this.toggle_folded(id, cx);
                     cx.stop_propagation();
-                    cx.notify();
                 }))
                 .into_any_element()
         } else {
@@ -743,6 +803,16 @@ impl SidebarPanel {
                 .into_any_element(),
         };
 
+        // Containers show how much they hold, so a folded chapter is not a mystery.
+        let count: Option<AnyElement> = (is_container && !children.is_empty()).then(|| {
+            div()
+                .flex_shrink_0()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(children.len().to_string())
+                .into_any_element()
+        });
+
         let status: Option<AnyElement> = (kind == NodeKind::Scene).then(|| {
             let color = match node.status() {
                 Status::Idea => theme.muted_foreground,
@@ -759,8 +829,22 @@ impl SidebarPanel {
                 .into_any_element()
         });
 
+        let hint = self.drop_hint.filter(|h| h.0 == id).map(|h| h.1);
+        let title: SharedString = node.title().into();
+        let marker = |top: bool| {
+            div()
+                .absolute()
+                .left(px(6. + 14. * depth as f32))
+                .right_0()
+                .h(px(2.))
+                .bg(theme.primary)
+                .when(top, |d| d.top_0())
+                .when(!top, |d| d.bottom_0())
+        };
+
         let row = h_flex()
             .id(ElementId::Name(format!("node-{id}").into()))
+            .relative()
             .w_full()
             .items_center()
             .gap_1()
@@ -773,15 +857,39 @@ impl SidebarPanel {
             .cursor_pointer()
             .when(selected, |d| d.bg(theme.accent))
             .when(!selected, |d| d.hover(|s| s.bg(theme.secondary)))
+            .when(hint == Some(DropZone::Into), |d| d.bg(theme.primary.opacity(0.18)))
             .child(chevron)
             .child(label)
+            .children(count)
             .children(status)
+            .children(hint.filter(|h| *h == DropZone::Before).map(|_| marker(true)))
+            .children(hint.filter(|h| *h == DropZone::After).map(|_| marker(false)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.rename.as_ref().map(|r| r.id) == Some(id) {
                     return;
                 }
                 this.activate(id, cx);
             }))
+            .when(!in_trash && renaming_none, |d| {
+                d.on_drag(
+                    DragNode {
+                        id,
+                        title: title.clone(),
+                    },
+                    |drag, _, _, cx| cx.new(|_| drag.clone()),
+                )
+                .on_drag_move(cx.listener(move |this, ev: &DragMoveEvent<DragNode>, _, cx| {
+                    this.drag_over_row(id, is_container, ev, cx)
+                }))
+                .on_drop(cx.listener(move |this, drag: &DragNode, _, cx| {
+                    let zone = this
+                        .drop_hint
+                        .filter(|h| h.0 == id)
+                        .map(|h| h.1)
+                        .unwrap_or(DropZone::After);
+                    this.drop_node(drag.id, id, zone, cx);
+                }))
+            })
             .context_menu(move |menu, window, cx| {
                 Self::node_menu(
                     &menu_project,
@@ -817,6 +925,9 @@ impl EventEmitter<SidebarEvent> for SidebarPanel {}
 
 impl Render for SidebarPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.drop_hint.is_some() && !cx.has_active_drag() {
+            self.drop_hint = None;
+        }
         let root = self.project.project.root(self.space);
         let trash = self.project.project.trash(self.space);
         let (leaf, container) = self.kinds();
@@ -850,10 +961,7 @@ impl Render for SidebarPanel {
                             .ghost()
                             .xsmall()
                             .label("+")
-                            .tooltip(format!(
-                                "New {}",
-                                leaf.default_title().trim_start_matches("New ")
-                            ))
+                            .tooltip(format!("New {}", leaf.default_title().trim_start_matches("New ")))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 let anchor = this.selected.unwrap_or(root);
                                 this.create(anchor, leaf, window, cx)
@@ -864,13 +972,8 @@ impl Render for SidebarPanel {
                             .ghost()
                             .xsmall()
                             .label("▣")
-                            .tooltip(format!(
-                                "New {}",
-                                container.default_title().trim_start_matches("New ")
-                            ))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.create(root, container, window, cx)
-                            })),
+                            .tooltip(format!("New {}", container.default_title().trim_start_matches("New ")))
+                            .on_click(cx.listener(move |this, _, window, cx| this.create(root, container, window, cx))),
                     ),
             );
 
@@ -885,11 +988,7 @@ impl Render for SidebarPanel {
                     .text_xs()
                     .text_color(muted)
                     .cursor_pointer()
-                    .child(format!(
-                        "{} TRASH ({})",
-                        if show { "▾" } else { "▸" },
-                        trashed.len()
-                    ))
+                    .child(format!("{} TRASH ({})", if show { "▾" } else { "▸" }, trashed.len()))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.show_trash = !this.show_trash;
                         cx.notify();
@@ -937,7 +1036,21 @@ impl Render for SidebarPanel {
                         )
                     })
                     .when(!searching, |d| d.children(items))
-                    .children(trash_section),
+                    .children(trash_section)
+                    .when(!searching, |d| {
+                        d.child(
+                            // Dropping below the last row appends to the space root.
+                            div()
+                                .id("tree-tail")
+                                .w_full()
+                                .flex_1()
+                                .min_h(px(32.))
+                                .drag_over::<DragNode>(|style, _, _, cx| {
+                                    style.border_t_2().border_color(cx.theme().primary)
+                                })
+                                .on_drop(cx.listener(|this, drag: &DragNode, _, cx| this.drop_at_end(drag.id, cx))),
+                        )
+                    }),
             )
     }
 }

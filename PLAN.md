@@ -335,7 +335,7 @@ Phases 0–7 shipped. An audit against §5–§9 and the EmberWrite feature list
 below either missing or shallow. The translucent window background (wallpaper visible behind the
 sidebar and editor) is **intentional** and stays.
 
-### Phase 8 — Structure and navigation
+### Phase 8 — Structure and navigation (done 2026-10-03)
 - Visible hierarchy in the sidebar tree: indent per depth, chevrons, collapse/expand state
   remembered per project. Acts/chapters visually distinct from scenes.
 - Dashboard groups scenes under their chapter; root-level scenes go under "Unsorted".
