@@ -4,7 +4,9 @@
 //! accessors over it, and save/load. Nothing here knows about the UI.
 
 pub mod comments;
+pub mod mentions;
 pub mod node;
+pub mod templates;
 pub mod paragraphs;
 pub mod project;
 pub mod schema;
@@ -13,7 +15,8 @@ pub mod storage;
 pub use chrono;
 pub use loro;
 pub use loro::TreeID;
-pub use node::{Node, NodeKind, Space, Status};
+pub use mentions::{EntityNames, Matcher, Mention};
+pub use node::{Attachment, Node, NodeKind, Relation, Space, Status};
 pub use comments::{Comment, Comments};
 pub use paragraphs::{count_words, Block, Marks, Paragraph, Paragraphs, Run};
 pub use project::META_ORIGIN;

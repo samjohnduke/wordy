@@ -10,7 +10,7 @@ mod element;
 mod style;
 mod typography;
 
-pub use editor::{CommentAnchor, EditorEvent, ProseEditor, RichClipboard, RichFragment, Selection};
+pub use editor::{CommentAnchor, EditorEvent, LinkTarget, MentionSpan, ProseEditor, RichClipboard, RichFragment, Selection};
 pub use element::ProseElement;
 pub use style::EditorStyle;
 
@@ -59,6 +59,8 @@ gpui_kit::actions!(
         ToggleSmallCaps,
         ToggleHighlight,
         AddComment,
+        InsertLink,
+        RemoveLink,
         EditCommentAtCaret,
         ToggleResolvedComments,
         Cancel,
@@ -107,6 +109,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-shift-m", AddComment, c),
         KeyBinding::new("secondary-shift-e", EditCommentAtCaret, c),
         KeyBinding::new("escape", Cancel, c),
+        KeyBinding::new("secondary-k", InsertLink, c),
+        KeyBinding::new("secondary-shift-l", RemoveLink, c),
         KeyBinding::new("secondary-alt-0", SetParagraph, c),
         KeyBinding::new("secondary-alt-1", SetHeading1, c),
         KeyBinding::new("secondary-alt-2", SetHeading2, c),

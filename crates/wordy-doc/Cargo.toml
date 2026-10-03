@@ -12,6 +12,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 unicode-segmentation.workspace = true
 ulid.workspace = true
+aho-corasick.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 tracing.workspace = true

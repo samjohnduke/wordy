@@ -15,3 +15,5 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 wordy-doc = { path = "../wordy-doc" }
 wordy-editor = { path = "../wordy-editor" }
+wordy-index = { path = "../wordy-index" }
+mime_guess = "2"

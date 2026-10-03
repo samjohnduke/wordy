@@ -1,5 +1,6 @@
 pub mod editor;
 pub mod reference;
+pub mod sheet;
 pub mod sidebar;
 
 /// Boilerplate shared by every dock panel.

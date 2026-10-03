@@ -6,6 +6,7 @@
 //! movement, mouse clicks, and the IME bridge can all hit-test against the
 //! same numbers the painter used.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use gpui_kit::component::ActiveTheme as _;
@@ -140,6 +141,8 @@ struct Palette {
     card_bg: Hsla,
     card_border: Hsla,
     accent: Hsla,
+    mention: Hsla,
+    ambiguous: Hsla,
 }
 
 impl Palette {
@@ -159,6 +162,8 @@ impl Palette {
             card_bg: t.popover,
             card_border: t.border,
             accent: t.primary,
+            mention: t.primary.opacity(0.75),
+            ambiguous: hsla(0.08, 0.9, 0.5, 0.95),
         }
     }
 }
@@ -237,6 +242,7 @@ impl ProseElement {
         pal: &Palette,
         active_comment: Option<&str>,
         show_resolved_comments: &dyn Fn(&str) -> bool,
+        mentions: &[(Range<usize>, bool)],
     ) -> (SharedString, Vec<TextRun>) {
         let family = style.font_family.clone();
         let base_weight = if para.block.is_heading() { FontWeight::BOLD } else { FontWeight::NORMAL };
@@ -294,7 +300,48 @@ impl ProseElement {
                 strikethrough: m.strike.then_some(StrikethroughStyle { thickness: px(1.), color: Some(color) }),
             });
         }
+        if !mentions.is_empty() {
+            runs = Self::decorate_mentions(runs, mentions, pal);
+        }
         (SharedString::from(para.text.clone()), runs)
+    }
+
+    /// Split runs at mention boundaries and underline the mentioned spans.
+    fn decorate_mentions(runs: Vec<TextRun>, mentions: &[(Range<usize>, bool)], pal: &Palette) -> Vec<TextRun> {
+        let mut cuts: Vec<usize> = mentions.iter().flat_map(|(r, _)| [r.start, r.end]).collect();
+        cuts.sort_unstable();
+        cuts.dedup();
+        let mut out = Vec::with_capacity(runs.len() + cuts.len());
+        let mut start = 0usize;
+        for run in runs {
+            let end = start + run.len;
+            let mut piece_start = start;
+            for &c in cuts.iter().filter(|&&c| c > start && c < end) {
+                let mut piece = run.clone();
+                piece.len = c - piece_start;
+                out.push(piece);
+                piece_start = c;
+            }
+            let mut last = run.clone();
+            last.len = end - piece_start;
+            out.push(last);
+            start = end;
+        }
+        let mut pos = 0usize;
+        for run in &mut out {
+            let r = pos..pos + run.len;
+            if let Some((_, ambiguous)) = mentions.iter().find(|(m, _)| m.start <= r.start && r.end <= m.end) {
+                if run.underline.is_none() {
+                    run.underline = Some(UnderlineStyle {
+                        thickness: px(1.),
+                        color: Some(if *ambiguous { pal.ambiguous } else { pal.mention }),
+                        wavy: *ambiguous,
+                    });
+                }
+            }
+            pos = r.end;
+        }
+        out
     }
 }
 
@@ -360,6 +407,19 @@ impl Element for ProseElement {
         };
         let paras = self.editor.read(cx).paragraphs().clone();
         let visible_comment = |id: &str| anchors.iter().any(|a| a.id == id);
+        // Mentions as byte ranges within their paragraph.
+        let mut para_mentions: Vec<Vec<(Range<usize>, bool)>> = vec![Vec::new(); paras.len()];
+        for m in self.editor.read(cx).mentions() {
+            let pos = paras.locate(m.range.start);
+            if let Some(p) = paras.get(pos.para) {
+                let end_cp = m.range.end.min(p.end_cp()).max(m.range.start);
+                let a = p.cp_to_byte(m.range.start - p.start_cp);
+                let b = p.cp_to_byte(end_cp - p.start_cp);
+                if b > a {
+                    para_mentions[pos.para].push((a..b, m.is_ambiguous()));
+                }
+            }
+        }
 
         let wrap_width = (bounds.size.width - style.padding_x * 2.)
             .min(style.max_width)
@@ -370,10 +430,11 @@ impl Element for ProseElement {
         let mut layouts: Vec<ParaLayout> = Vec::with_capacity(paras.len());
         let mut y = px(0.);
         let mut prev: Option<Block> = None;
-        for para in paras.iter() {
+        for (pix, para) in paras.iter().enumerate() {
             let font_size = style.font_size_for(para.block);
             let line_height = style.line_height_for(para.block);
-            let (text, runs) = Self::runs_for(para, &style, &pal, active_comment.as_deref(), &visible_comment);
+            let (text, runs) =
+                Self::runs_for(para, &style, &pal, active_comment.as_deref(), &visible_comment, &para_mentions[pix]);
             y += style.space_before(para.block, prev);
             let line = text_system
                 .shape_text(text, font_size, &runs, Some(wrap_width), None)
@@ -590,7 +651,7 @@ impl Element for ProseElement {
                 Some(id) => editor.update(cx, |e, cx| e.begin_comment_edit(&id, window, cx)),
                 None => {
                     window.focus(&focus_for_down, cx);
-                    editor.update(cx, |e, cx| e.on_mouse_down(ev, cx));
+                    editor.update(cx, |e, cx| e.on_mouse_down(ev, window, cx));
                 }
             }
             cx.stop_propagation();

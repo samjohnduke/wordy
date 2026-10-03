@@ -6,3 +6,6 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+rusqlite.workspace = true
+tracing.workspace = true
+wordy-doc = { path = "../wordy-doc" }

@@ -1,7 +1,7 @@
 //! The main window: title bar, space rail, dock area, status bar.
 //! Owns the open editor tabs and the autosave timer.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use gpui_kit::base::dock::PanelId;
@@ -13,9 +13,9 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use wordy_doc::{storage, Space, TreeID};
 
-use crate::app::{self, NewItem, Quit, Save, SharedProject, ToggleTheme};
+use crate::app::{self, NewItem, Quit, Save, SearchProject, SharedProject, ToggleReference, ToggleTheme};
 use crate::panels::editor::{EditorPanel, EditorPanelEvent};
-use crate::panels::reference::ReferencePanel;
+use crate::panels::reference::{ReferenceEvent, ReferencePanel};
 use crate::panels::sidebar::{SidebarEvent, SidebarPanel};
 
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(1500);
@@ -25,10 +25,13 @@ pub struct Workspace {
     space: Space,
     dock: Entity<DockArea>,
     sidebar: Entity<SidebarPanel>,
+    reference: Entity<ReferencePanel>,
     placeholder: Option<Entity<EditorPanel>>,
     editors: HashMap<TreeID, Entity<EditorPanel>>,
     active: Option<TreeID>,
     dirty: bool,
+    /// Nodes edited since the last save; re-indexed on save.
+    dirty_nodes: HashSet<TreeID>,
     last_saved: Option<String>,
     save_task: Option<Task<()>>,
     focus: FocusHandle,
@@ -41,9 +44,9 @@ impl Workspace {
         skin.set_panel_style(PanelStyle::TabBar, cx);
         skin.set_close_button_visible(true, cx);
 
-        let sidebar = cx.new(|cx| SidebarPanel::new(project.clone(), Space::Manuscript, cx));
+        let sidebar = cx.new(|cx| SidebarPanel::new(project.clone(), Space::Manuscript, window, cx));
         let placeholder = cx.new(|cx| EditorPanel::placeholder(project.clone(), cx));
-        let reference = cx.new(|cx| ReferencePanel::new(cx));
+        let reference = cx.new(|cx| ReferencePanel::new(project.clone(), cx));
 
         dock.update(cx, |dock, cx| {
             dock.set_dock(
@@ -60,7 +63,7 @@ impl Workspace {
             );
             dock.set_dock(
                 DockPlacement::Right,
-                DockLayout::tabs().panel_view(panel_handle(reference), cx),
+                DockLayout::tabs().panel_view(panel_handle(reference.clone()), cx),
                 window,
                 cx,
             );
@@ -73,6 +76,10 @@ impl Workspace {
             SidebarEvent::Changed => this.on_tree_changed(cx),
             SidebarEvent::Removed(id) => this.close_node(*id, window, cx),
         });
+        let ref_sub = cx.subscribe_in(&reference, window, |this, _, ev: &ReferenceEvent, window, cx| match ev {
+            ReferenceEvent::Open(id) => this.open_node(*id, window, cx),
+            ReferenceEvent::Pin(id) => this.pin_reference(*id, window, cx),
+        });
 
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -82,15 +89,49 @@ impl Workspace {
             space: Space::Manuscript,
             dock,
             sidebar,
+            reference,
             placeholder: Some(placeholder),
             editors: HashMap::new(),
             active: None,
             dirty: false,
+            dirty_nodes: HashSet::new(),
             last_saved: None,
             save_task: None,
             focus,
-            _subs: vec![sub],
+            _subs: vec![sub, ref_sub],
         }
+    }
+
+    /// Show `id` in the reference pane, opening the pane if it is hidden.
+    fn pin_reference(&mut self, id: TreeID, window: &mut Window, cx: &mut Context<Self>) {
+        self.reference.update(cx, |r, cx| r.pin(id, cx));
+        self.dock.update(cx, |dock, cx| {
+            if !dock.is_dock_open(DockPlacement::Right) {
+                dock.toggle_dock(DockPlacement::Right, window, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    fn follow_link(&mut self, id: TreeID, navigate: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if navigate {
+            self.open_node(id, window, cx);
+        } else {
+            self.pin_reference(id, window, cx);
+        }
+    }
+
+    fn toggle_reference(&mut self, _: &ToggleReference, window: &mut Window, cx: &mut Context<Self>) {
+        self.dock.update(cx, |dock, cx| dock.toggle_dock(DockPlacement::Right, window, cx));
+    }
+
+    fn search_project(&mut self, _: &SearchProject, window: &mut Window, cx: &mut Context<Self>) {
+        self.dock.update(cx, |dock, cx| {
+            if !dock.is_dock_open(DockPlacement::Left) {
+                dock.toggle_dock(DockPlacement::Left, window, cx);
+            }
+        });
+        self.sidebar.update(cx, |s, cx| s.focus_search(window, cx));
     }
 
     fn set_space(&mut self, space: Space, cx: &mut Context<Self>) {
@@ -119,7 +160,7 @@ impl Workspace {
                 return;
             }
         };
-        let panel = cx.new(|cx| EditorPanel::open(self.project.clone(), id, body, cx));
+        let panel = cx.new(|cx| EditorPanel::open(self.project.clone(), id, body, window, cx));
         // Keep each editor's undo stack to its own body: exclude every other
         // open editor's commit origin, in both directions.
         if let Some(new_editor) = panel.read(cx).editor().cloned() {
@@ -132,8 +173,14 @@ impl Workspace {
                 other.update(cx, |e, _| e.exclude_origin(&new_origin));
             }
         }
-        let sub = cx.subscribe_in(&panel, window, move |this, _, ev: &EditorPanelEvent, _window, cx| match ev {
-            EditorPanelEvent::Edited => this.on_edited(cx),
+        let sub = cx.subscribe_in(&panel, window, move |this, _, ev: &EditorPanelEvent, window, cx| match ev {
+            EditorPanelEvent::Edited => {
+                this.dirty_nodes.insert(id);
+                this.reference.update(cx, |r, cx| r.refresh_if(id, cx));
+                this.on_edited(cx);
+            }
+            EditorPanelEvent::NamesChanged => this.on_tree_changed(cx),
+            EditorPanelEvent::OpenLink { id, navigate } => this.follow_link(*id, *navigate, window, cx),
             EditorPanelEvent::Activated => {
                 this.active = Some(id);
                 this.sidebar.update(cx, |s, cx| s.select(Some(id), cx));
@@ -174,10 +221,16 @@ impl Workspace {
         self.on_edited(cx);
     }
 
+    /// Titles, aliases, or structure changed: refresh names everywhere and
+    /// rebuild the index so backlinks and search see the new titles.
     fn on_tree_changed(&mut self, cx: &mut Context<Self>) {
+        self.project.refresh_matcher();
+        self.project.rebuild_index();
+        let targets = self.project.link_targets();
         for panel in self.editors.values() {
-            panel.update(cx, |_, cx| cx.notify());
+            panel.update(cx, |p, cx| p.set_link_targets(targets.clone(), cx));
         }
+        self.reference.update(cx, |r, cx| r.set_link_targets(targets, cx));
         self.dock.update(cx, |_, cx| cx.notify());
         self.on_edited(cx);
     }
@@ -198,6 +251,13 @@ impl Workspace {
             Ok(()) => {
                 self.dirty = false;
                 self.last_saved = Some(chrono_time());
+                for id in std::mem::take(&mut self.dirty_nodes) {
+                    self.project.update_index_node(id);
+                }
+                self.reference.update(cx, |_, cx| cx.notify());
+                for panel in self.editors.values() {
+                    panel.update(cx, |_, cx| cx.notify());
+                }
                 tracing::info!("saved");
             }
             Err(e) => tracing::error!("save failed: {e:#}"),
@@ -310,6 +370,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::save))
             .on_action(cx.listener(Self::quit))
             .on_action(cx.listener(Self::new_item))
+            .on_action(cx.listener(Self::toggle_reference))
+            .on_action(cx.listener(Self::search_project))
             .on_action(|_: &ToggleTheme, window, cx| app::toggle_theme(window, cx))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)

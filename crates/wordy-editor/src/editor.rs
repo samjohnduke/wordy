@@ -12,6 +12,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use unicode_segmentation::UnicodeSegmentation;
 use wordy_doc::loro::{CommitOptions, ContainerTrait as _, LoroDoc, LoroText, LoroValue, UndoItemMeta, UndoManager};
+use wordy_doc::{EntityNames, Matcher, TreeID};
 use wordy_doc::{Block, Comments, Marks, Paragraphs, Run, META_ORIGIN};
 
 use crate::element::{FrameLayout, ProseElement};
@@ -45,6 +46,42 @@ pub enum EditorEvent {
     /// The text changed (and was committed to the Loro doc).
     Edited,
     SelectionChanged,
+    /// A link or unique mention was clicked. `navigate` (secondary-click)
+    /// asks for the target to open in the editor rather than the reference pane.
+    OpenLink { id: TreeID, navigate: bool },
+}
+
+/// An entity the editor can link to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkTarget {
+    pub id: TreeID,
+    pub title: String,
+    pub aliases: Vec<String>,
+}
+
+/// An auto-detected entity mention, in code points.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MentionSpan {
+    pub range: Range<usize>,
+    pub candidates: Vec<TreeID>,
+}
+
+impl MentionSpan {
+    pub fn is_ambiguous(&self) -> bool {
+        self.candidates.len() > 1
+    }
+}
+
+/// The floating entity picker for inserting or pinning a link.
+struct LinkPicker {
+    /// Text the link will cover; empty means insert the entity's title here.
+    range: Range<usize>,
+    input: Entity<InputState>,
+    query: String,
+    /// Only these entities (pinning an ambiguous mention).
+    restrict: Option<Vec<TreeID>>,
+    selected: usize,
+    _sub: Subscription,
 }
 
 type SelSnapshot = Arc<Mutex<(usize, usize)>>;
@@ -142,6 +179,12 @@ pub struct ProseEditor {
     search: Option<String>,
     pub(crate) matches: Vec<Range<usize>>,
     pub(crate) match_ix: Option<usize>,
+    link_targets: Vec<LinkTarget>,
+    matcher: Matcher,
+    /// The node this body belongs to; its own mentions are not decorated.
+    self_id: Option<TreeID>,
+    pub(crate) mentions: Vec<MentionSpan>,
+    link_picker: Option<LinkPicker>,
 }
 
 impl EventEmitter<EditorEvent> for ProseEditor {}
@@ -222,6 +265,11 @@ impl ProseEditor {
             search: None,
             matches: Vec::new(),
             match_ix: None,
+            link_targets: Vec::new(),
+            matcher: Matcher::empty(),
+            self_id: None,
+            mentions: Vec::new(),
+            link_picker: None,
         };
         this.restart_blink(cx);
         this
@@ -245,6 +293,253 @@ impl ProseEditor {
     }
 
     // ----- accessors -------------------------------------------------------
+
+    /// Entities available for linking and mention detection.
+    pub fn set_link_targets(&mut self, targets: Vec<LinkTarget>, cx: &mut Context<Self>) {
+        let entries: Vec<EntityNames> = targets
+            .iter()
+            .map(|t| {
+                let mut names = vec![t.title.clone()];
+                names.extend(t.aliases.iter().cloned());
+                EntityNames { id: t.id, names }
+            })
+            .collect();
+        self.matcher = Matcher::new(&entries);
+        self.link_targets = targets;
+        self.rescan_mentions();
+        cx.notify();
+    }
+
+    pub fn set_self_id(&mut self, id: Option<TreeID>) {
+        self.self_id = id;
+        self.rescan_mentions();
+    }
+
+    pub fn link_targets(&self) -> &[LinkTarget] {
+        &self.link_targets
+    }
+
+    pub fn mentions(&self) -> &[MentionSpan] {
+        &self.mentions
+    }
+
+    /// Re-read the text after another editor changed it.
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
+        self.refresh(cx);
+        self.scroll_to_cursor = false;
+    }
+
+    fn rescan_mentions(&mut self) {
+        self.mentions.clear();
+        if self.matcher.is_empty() {
+            return;
+        }
+        // Byte → code point table for the whole text.
+        let mut cp_at_byte: Vec<usize> = Vec::with_capacity(self.plain.len() + 1);
+        for (i, (b, _)) in self.plain.char_indices().enumerate() {
+            while cp_at_byte.len() < b {
+                cp_at_byte.push(i);
+            }
+            cp_at_byte.push(i);
+        }
+        let total = self.plain.chars().count();
+        while cp_at_byte.len() <= self.plain.len() {
+            cp_at_byte.push(total);
+        }
+        let links = self.link_ranges();
+        for m in self.matcher.scan_excluding(&self.plain, self.self_id) {
+            let r = cp_at_byte[m.range.start]..cp_at_byte[m.range.end];
+            if links.iter().any(|(l, _)| l.start < r.end && r.start < l.end) {
+                continue;
+            }
+            self.mentions.push(MentionSpan { range: r, candidates: m.candidates });
+        }
+    }
+
+    /// Code point ranges of every explicit link run.
+    fn link_ranges(&self) -> Vec<(Range<usize>, String)> {
+        let mut out: Vec<(Range<usize>, String)> = Vec::new();
+        for p in self.paras.iter() {
+            let mut cp = p.start_cp;
+            for r in &p.runs {
+                let n = r.text.chars().count();
+                if let Some(l) = &r.marks.link {
+                    if let Some((last, id)) = out.last_mut() {
+                        if *id == *l && (*last).end == cp {
+                            last.end = cp + n;
+                            cp += n;
+                            continue;
+                        }
+                    }
+                    out.push((cp..cp + n, l.clone()));
+                }
+                cp += n;
+            }
+        }
+        out
+    }
+
+    /// The explicit link covering `cp`, with its range.
+    pub fn link_at(&self, cp: usize) -> Option<(Range<usize>, TreeID)> {
+        self.link_ranges()
+            .into_iter()
+            .find(|(r, _)| r.start <= cp && cp < r.end)
+            .and_then(|(r, id)| TreeID::try_from(id.as_str()).ok().map(|t| (r, t)))
+    }
+
+    pub fn mention_at(&self, cp: usize) -> Option<&MentionSpan> {
+        self.mentions.iter().find(|m| m.range.start <= cp && cp < m.range.end)
+    }
+
+    pub fn is_picking_link(&self) -> bool {
+        self.link_picker.is_some()
+    }
+
+    /// Open the entity picker (⌘K / `[[`). With a selection the link covers
+    /// it; otherwise the chosen entity's title is inserted at the caret.
+    pub fn open_link_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        let range = self.sel.range();
+        self.begin_link_picker(range, None, window, cx);
+    }
+
+    /// Pin an ambiguous mention: pick which entity it means.
+    pub fn pin_mention(&mut self, range: Range<usize>, candidates: Vec<TreeID>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        self.begin_link_picker(range, Some(candidates), window, cx);
+    }
+
+    fn begin_link_picker(&mut self, range: Range<usize>, restrict: Option<Vec<TreeID>>, window: &mut Window, cx: &mut Context<Self>) {
+        self.comment_edit = None;
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Link to…"));
+        input.update(cx, |s, cx| s.focus(window, cx));
+        let sub = cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, window, cx| match ev {
+            InputEvent::Change => {
+                let q = input.read(cx).value().to_string();
+                if let Some(p) = &mut this.link_picker {
+                    p.query = q;
+                    p.selected = 0;
+                }
+                cx.notify();
+            }
+            InputEvent::PressEnter { .. } => {
+                let ix = this.link_picker.as_ref().map(|p| p.selected).unwrap_or(0);
+                this.confirm_link_pick(ix, window, cx);
+            }
+            _ => {}
+        });
+        self.link_picker = Some(LinkPicker { range, input, query: String::new(), restrict, selected: 0, _sub: sub });
+        cx.notify();
+    }
+
+    pub fn close_link_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.link_picker.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+        }
+    }
+
+    /// Candidates for the open picker, best first.
+    fn picker_candidates(&self) -> Vec<(usize, &LinkTarget)> {
+        let Some(p) = &self.link_picker else { return Vec::new() };
+        let q = p.query.trim().to_lowercase();
+        let mut scored: Vec<(u8, usize, &LinkTarget)> = self
+            .link_targets
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| p.restrict.as_ref().map(|r| r.contains(&t.id)).unwrap_or(true))
+            .filter_map(|(ix, t)| {
+                if q.is_empty() {
+                    return Some((2, ix, t));
+                }
+                let title = t.title.to_lowercase();
+                if title.starts_with(&q) {
+                    Some((0, ix, t))
+                } else if title.contains(&q) {
+                    Some((1, ix, t))
+                } else if t.aliases.iter().any(|a| a.to_lowercase().contains(&q)) {
+                    Some((2, ix, t))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.title.cmp(&b.2.title)));
+        scored.into_iter().take(8).map(|(_, ix, t)| (ix, t)).collect()
+    }
+
+    fn move_picker_selection(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let n = self.picker_candidates().len();
+        if let Some(p) = &mut self.link_picker {
+            if n > 0 {
+                p.selected = ((p.selected as i32 + delta).rem_euclid(n as i32)) as usize;
+            }
+        }
+        cx.notify();
+    }
+
+    fn confirm_link_pick(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self.picker_candidates().get(ix).map(|(_, t)| (*t).clone());
+        let Some(target) = target else {
+            self.close_link_picker(window, cx);
+            return;
+        };
+        let Some(p) = &self.link_picker else { return };
+        let range = p.range.clone();
+        self.close_link_picker(window, cx);
+        self.apply_link(range, target, cx);
+    }
+
+    fn apply_link(&mut self, range: Range<usize>, target: LinkTarget, cx: &mut Context<Self>) {
+        let max = self.paras.max_cursor();
+        let range = range.start.min(max)..range.end.min(max);
+        self.begin_edit();
+        let r = if range.is_empty() {
+            self.insert_at(range.start, &target.title);
+            range.start..range.start + target.title.chars().count()
+        } else {
+            range
+        };
+        if let Err(e) = self.text.mark(r.clone(), "link", target.id.to_string()) {
+            tracing::warn!("link mark failed: {e}");
+        }
+        self.sel = Selection::caret(r.end);
+        self.commit(cx);
+    }
+
+    /// Remove the explicit link under the caret (or selection start).
+    pub fn remove_link(&mut self, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        let cp = self.sel.range().start;
+        let Some((r, _)) = self.link_at(cp) else { return };
+        self.begin_edit();
+        if let Err(e) = self.text.unmark(r.clone(), "link") {
+            tracing::warn!("unlink failed: {e}");
+        }
+        self.commit(cx);
+    }
+
+    /// Clicking a link opens it; clicking a unique mention opens it too, and an
+    /// ambiguous mention asks which entity it means.
+    fn follow_at(&mut self, cp: usize, navigate: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((_, id)) = self.link_at(cp) {
+            cx.emit(EditorEvent::OpenLink { id, navigate });
+            return;
+        }
+        if let Some(m) = self.mention_at(cp).cloned() {
+            if m.is_ambiguous() {
+                self.pin_mention(m.range, m.candidates, window, cx);
+            } else {
+                cx.emit(EditorEvent::OpenLink { id: m.candidates[0], navigate });
+            }
+        }
+    }
 
     pub fn paragraphs(&self) -> &Paragraphs {
         &self.paras
@@ -391,6 +686,7 @@ impl ProseEditor {
         }
         self.pending = None;
         self.recompute_matches();
+        self.rescan_mentions();
         self.scroll_to_cursor = true;
         self.restart_blink(cx);
         cx.notify();
@@ -1332,9 +1628,10 @@ impl ProseEditor {
         frame.as_ref().map(|f| f.cp_for_point(pt, &self.paras))
     }
 
-    pub(crate) fn on_mouse_down(&mut self, ev: &MouseDownEvent, cx: &mut Context<Self>) {
+    pub(crate) fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(cp) = self.cp_for_window_point(ev.position) else { return };
         self.comment_edit = None;
+        self.link_picker = None;
         self.goal_x = None;
         match ev.click_count {
             1 => {
@@ -1342,6 +1639,7 @@ impl ProseEditor {
                     self.move_to(cp, true, cx);
                 } else {
                     self.set_selection(Selection::caret(cp), cx);
+                    self.follow_at(cp, ev.modifiers.secondary(), window, cx);
                 }
                 self.selecting = true;
             }
@@ -1451,7 +1749,7 @@ impl EntityInputHandler for ProseEditor {
         &mut self,
         range_utf16: Option<Range<usize>>,
         text: &str,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.read_only {
@@ -1463,6 +1761,18 @@ impl EntityInputHandler for ProseEditor {
             .unwrap_or_else(|| self.sel.range());
         let max = self.paras.max_cursor();
         let target = target.start.min(max)..target.end.min(max);
+        // `[[` opens the link picker in place of the brackets.
+        if text == "[" && self.marked.is_none() && target.is_empty() && target == self.sel.range() {
+            let cp = target.start;
+            if cp > 0 && self.plain.chars().nth(cp - 1) == Some('[') {
+                self.begin_edit();
+                self.delete_cp_range(cp - 1..cp);
+                self.sel = Selection::caret(cp - 1);
+                self.commit(cx);
+                self.begin_link_picker(cp - 1..cp - 1, None, window, cx);
+                return;
+            }
+        }
         // Plain typing (no IME composition in flight) goes through
         // `insert_text` so pending marks and smart typography apply.
         if self.marked.is_none() && target == self.sel.range() {
@@ -1636,9 +1946,97 @@ impl ProseEditor {
     }
 }
 
+impl ProseEditor {
+    fn render_link_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let picker = self.link_picker.as_ref()?;
+        let frame = self.frame.borrow();
+        let f = frame.as_ref()?;
+        let (pt, lh) = f.point_for_cp(picker.range.start, &self.paras)?;
+        let width = px(300.).min(f.wrap_width);
+        let left = (pt.x - f.bounds_origin.x).min(f.origin.x + f.wrap_width - width - f.bounds_origin.x).max(px(0.));
+        let top = pt.y + lh + px(4.) - f.bounds_origin.y;
+        let theme = cx.theme();
+        let (bg, border, muted, accent) = (theme.popover, theme.border, theme.muted_foreground, theme.primary);
+        let selected = picker.selected;
+        let linked = self.link_at(picker.range.start).is_some();
+        let pinning = picker.restrict.is_some();
+        let candidates: Vec<(usize, String, String)> = self
+            .picker_candidates()
+            .into_iter()
+            .map(|(_, t)| (t.id.counter as usize, t.title.clone(), t.aliases.join(", ")))
+            .collect();
+        let rows: Vec<AnyElement> = candidates
+            .iter()
+            .enumerate()
+            .map(|(ix, (key, title, aliases))| {
+                let title = title.clone();
+                let aliases = aliases.clone();
+                h_flex()
+                    .id(("link-pick", *key))
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .gap_2()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .when(ix == selected, |d| d.bg(accent.opacity(0.15)))
+                    .hover(|d| d.bg(accent.opacity(0.1)))
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |e, _, window, cx| {
+                        e.confirm_link_pick(ix, window, cx)
+                    }))
+                    .child(div().text_sm().child(title))
+                    .child(div().text_xs().text_color(muted).child(aliases))
+                    .into_any_element()
+            })
+            .collect();
+        Some(
+            v_flex()
+                .id("link-picker")
+                .occlude()
+                .on_action(|_: &NewParagraph, _, _| {})
+                .on_action(cx.listener(|e, _: &MoveUp, _, cx| e.move_picker_selection(-1, cx)))
+                .on_action(cx.listener(|e, _: &MoveDown, _, cx| e.move_picker_selection(1, cx)))
+                .absolute()
+                .left(left)
+                .top(top)
+                .w(width)
+                .p_2()
+                .gap_1()
+                .rounded_md()
+                .bg(bg)
+                .border_1()
+                .border_color(border)
+                .shadow_md()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(if pinning { "Which one?" } else if picker.range.is_empty() { "Insert link" } else { "Link selection to" }),
+                )
+                .child(Input::new(&picker.input).small())
+                .children(rows)
+                .when(candidates.is_empty(), |d| d.child(div().text_xs().text_color(muted).child("No matching entities")))
+                .when(linked && !pinning, |d| {
+                    d.child(
+                        Button::new("remove-link")
+                            .ghost()
+                            .xsmall()
+                            .label("Remove link")
+                            .on_click(cx.listener(|e, _, window, cx| {
+                                e.close_link_picker(window, cx);
+                                e.remove_link(cx);
+                            })),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+}
+
 impl Render for ProseEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let overlay = self.render_comment_overlay(cx);
+        let picker = self.render_link_picker(cx);
         div()
             .id("prose-editor")
             .key_context(KEY_CONTEXT)
@@ -1719,12 +2117,16 @@ impl Render for ProseEditor {
             .on_action(cx.listener(|e, _: &AddComment, window, cx| e.add_comment(window, cx)))
             .on_action(cx.listener(|e, _: &ToggleResolvedComments, _, cx| e.toggle_show_resolved(cx)))
             .on_action(cx.listener(|e, _: &Cancel, window, cx| {
-                if e.comment_edit.is_some() {
+                if e.link_picker.is_some() {
+                    e.close_link_picker(window, cx);
+                } else if e.comment_edit.is_some() {
                     e.end_comment_edit(window, cx);
                 } else {
                     cx.propagate();
                 }
             }))
+            .on_action(cx.listener(|e, _: &InsertLink, window, cx| e.open_link_picker(window, cx)))
+            .on_action(cx.listener(|e, _: &RemoveLink, _, cx| e.remove_link(cx)))
             .on_action(cx.listener(|e, _: &EditCommentAtCaret, window, cx| {
                 if let Some(id) = e.active_comment() {
                     e.begin_comment_edit(&id, window, cx)
@@ -1738,5 +2140,6 @@ impl Render for ProseEditor {
             .on_action(cx.listener(|e, _: &InsertSceneBreak, _, cx| e.insert_scene_break(cx)))
             .child(ProseElement::new(cx.entity().clone()))
             .children(overlay)
+            .children(picker)
     }
 }

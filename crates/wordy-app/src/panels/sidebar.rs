@@ -37,12 +37,22 @@ pub struct SidebarPanel {
     collapsed: HashSet<TreeID>,
     rename: Option<Rename>,
     show_trash: bool,
+    search: Entity<InputState>,
+    query: String,
     weak: WeakEntity<Self>,
     pub focus: FocusHandle,
+    _subs: Vec<Subscription>,
 }
 
 impl SidebarPanel {
-    pub fn new(project: SharedProject, space: Space, cx: &mut Context<Self>) -> Self {
+    pub fn new(project: SharedProject, space: Space, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search project…"));
+        let sub = cx.subscribe_in(&search, window, |this, input, ev: &InputEvent, _window, cx| {
+            if matches!(ev, InputEvent::Change) {
+                this.query = input.read(cx).value().trim().to_string();
+                cx.notify();
+            }
+        });
         Self {
             project,
             space,
@@ -50,9 +60,54 @@ impl SidebarPanel {
             collapsed: HashSet::new(),
             rename: None,
             show_trash: false,
+            search,
+            query: String::new(),
             weak: cx.weak_entity(),
             focus: cx.focus_handle(),
+            _subs: vec![sub],
         }
+    }
+
+    /// Focus the project search box.
+    pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.update(cx, |s, cx| {
+            s.focus(window, cx);
+            s.select_all(window, cx);
+        });
+    }
+
+    fn render_search_results(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let hits = self.project.search(&self.query, 50);
+        let muted = cx.theme().muted_foreground;
+        if hits.is_empty() {
+            return vec![div().p_2().text_sm().text_color(muted).child("No matches.").into_any_element()];
+        }
+        hits.into_iter()
+            .enumerate()
+            .map(|(ix, hit)| {
+                let id = hit.node;
+                let snippet: String = hit.snippet.chars().filter(|c| *c != '\u{1}' && *c != '\u{2}').collect();
+                v_flex()
+                    .id(ElementId::Name(format!("hit-{ix}").into()))
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .gap_0()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(cx.theme().secondary))
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            .child(div().text_sm().font_semibold().child(hit.title))
+                            .child(div().text_xs().text_color(muted).child(hit.space)),
+                    )
+                    .child(div().text_xs().text_color(muted).child(snippet))
+                    .on_click(cx.listener(move |this, _, _, cx| this.activate(id, cx)))
+                    .into_any_element()
+            })
+            .collect()
     }
 
     pub fn set_space(&mut self, space: Space, cx: &mut Context<Self>) {
@@ -456,7 +511,8 @@ impl Render for SidebarPanel {
                     ),
             );
 
-        let trash_section = (!trashed.is_empty()).then(|| {
+        let searching = !self.query.is_empty();
+        let trash_section = (!searching && !trashed.is_empty()).then(|| {
             let show = self.show_trash;
             let mut section = v_flex().w_full().mt_2().child(
                 div()
@@ -485,13 +541,15 @@ impl Render for SidebarPanel {
             .track_focus(&self.focus)
             .p_1()
             .child(header)
+            .child(div().px_1().pb_1().child(Input::new(&self.search).small()))
             .child(
                 div()
                     .id("tree-scroll")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .when(items.is_empty(), |d| {
+                    .when(searching, |d| d.children(self.render_search_results(cx)))
+                    .when(!searching && items.is_empty(), |d| {
                         d.child(
                             div()
                                 .p_2()
@@ -500,7 +558,7 @@ impl Render for SidebarPanel {
                                 .child("Nothing here yet. Use + to add one."),
                         )
                     })
-                    .children(items)
+                    .when(!searching, |d| d.children(items))
                     .children(trash_section),
             )
     }

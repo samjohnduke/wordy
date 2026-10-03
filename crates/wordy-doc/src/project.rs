@@ -78,6 +78,8 @@ impl Project {
     /// Import another copy of this project (e.g. from the other machine). Loro merges.
     pub fn import_bytes(&self, bytes: &[u8]) -> Result<()> {
         self.doc.import(bytes).map_err(|e| anyhow!("import: {e}"))?;
+        self.ensure_roots()?;
+        self.commit_meta();
         Ok(())
     }
 
@@ -92,8 +94,13 @@ impl Project {
         Ok(())
     }
 
-    /// Make sure every space has a root and a trash. Idempotent.
+    /// Make sure every space has exactly one root and one trash. Idempotent.
+    ///
+    /// Two copies of a project that each created their own roots (or a fresh
+    /// doc that imported another) end up with duplicates; those are merged
+    /// into the one with the smallest id so every peer converges on the same.
     fn ensure_roots(&self) -> Result<()> {
+        self.dedupe_roots()?;
         for space in [Space::Manuscript, Space::World, Space::Notes] {
             if self.find_root(space, NodeKind::Root).is_none() {
                 let id = self.tree().create(TreeParentId::Root)?;
@@ -107,12 +114,37 @@ impl Project {
         Ok(())
     }
 
+    fn dedupe_roots(&self) -> Result<()> {
+        let tree = self.tree();
+        for space in [Space::Manuscript, Space::World, Space::Notes] {
+            for kind in [NodeKind::Root, NodeKind::Trash] {
+                let roots = self.roots_matching(space, kind);
+                let Some((keep, extras)) = roots.split_first() else { continue };
+                for extra in extras {
+                    for child in tree.children(*extra).unwrap_or_default() {
+                        tree.mov(child, *keep)?;
+                    }
+                    tree.delete(*extra)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Top-level nodes of the given space and kind, smallest id first.
+    fn roots_matching(&self, space: Space, kind: NodeKind) -> Vec<TreeID> {
+        let mut roots: Vec<TreeID> = self
+            .tree()
+            .roots()
+            .into_iter()
+            .filter(|id| self.node(*id).map(|n| n.kind() == kind && n.space() == space).unwrap_or(false))
+            .collect();
+        roots.sort_by_key(|id| (id.peer, id.counter));
+        roots
+    }
+
     fn find_root(&self, space: Space, kind: NodeKind) -> Option<TreeID> {
-        self.tree().roots().into_iter().find(|id| {
-            self.node(*id)
-                .map(|n| n.kind() == kind && n.space() == space)
-                .unwrap_or(false)
-        })
+        self.roots_matching(space, kind).into_iter().next()
     }
 
     fn write_meta(&self, id: TreeID, kind: NodeKind, space: Space, title: &str) -> Result<()> {
@@ -260,6 +292,48 @@ impl Project {
             });
         }
         out
+    }
+
+    /// Every live entity, in World-tree order.
+    pub fn entities(&self) -> Vec<TreeID> {
+        self.nodes_of_kind(NodeKind::Entity)
+    }
+
+    /// Names for the mention matcher: each entity's title plus aliases.
+    pub fn entity_names(&self) -> Vec<crate::mentions::EntityNames> {
+        self.entities()
+            .into_iter()
+            .filter_map(|id| self.node(id).ok())
+            .map(|n| {
+                let mut names = vec![n.title()];
+                names.extend(n.aliases());
+                crate::mentions::EntityNames { id: n.id, names }
+            })
+            .collect()
+    }
+
+    /// Every live node in every space, depth first.
+    pub fn all_nodes(&self) -> Vec<TreeID> {
+        let mut out = Vec::new();
+        for space in [Space::Manuscript, Space::World, Space::Notes] {
+            self.walk(self.root(space), &mut |id, _| out.push(id));
+        }
+        out
+    }
+
+    /// Whether `id` is live (under a space root rather than a trash root or gone).
+    pub fn is_live(&self, id: TreeID) -> bool {
+        let tree = self.tree();
+        let mut cur = id;
+        loop {
+            match tree.parent(cur) {
+                Some(loro::TreeParentId::Node(p)) => cur = p,
+                Some(loro::TreeParentId::Root) => {
+                    return self.node(cur).map(|n| n.kind() == NodeKind::Root).unwrap_or(false)
+                }
+                _ => return false,
+            }
+        }
     }
 
     /// Depth-first walk of live nodes under `parent` (excluding `parent`).
@@ -433,5 +507,44 @@ mod tests {
         assert!(runs.iter().any(|r| r.marks.bold && r.marks.highlight));
         assert!(runs.iter().any(|r| r.marks.comment.as_deref() == Some("01ABC")));
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod entity_tests {
+    use super::*;
+    use crate::node::Relation;
+
+    #[test]
+    fn fields_relations_attachments_round_trip() {
+        let p = Project::new_in_memory("t").unwrap();
+        let world = p.root(Space::World);
+        let a = p.create_node(world, NodeKind::Entity, "Anna").unwrap();
+        let b = p.create_node(world, NodeKind::Entity, "Bram").unwrap();
+        let na = p.node(a).unwrap();
+        na.set_field("role", "Protagonist").unwrap();
+        na.add_alias("Annie").unwrap();
+        na.add_relation(b, "sibling", "older").unwrap();
+        na.add_attachment("face.png", "abc.png", "image/png").unwrap();
+        p.commit_meta();
+        let bytes = p.export_snapshot().unwrap();
+        let q = Project::new_in_memory("t2").unwrap();
+        q.import_bytes(&bytes).unwrap();
+        let n = q.node(a).unwrap();
+        assert_eq!(n.field("role"), "Protagonist");
+        assert_eq!(n.fields(), vec![("role".to_string(), "Protagonist".to_string())]);
+        assert_eq!(n.relations(), vec![Relation { to: b, kind: "sibling".into(), note: "older".into() }]);
+        assert_eq!(n.attachments()[0].path, "abc.png");
+        n.set_field("role", "").unwrap();
+        assert!(n.fields().is_empty());
+        n.remove_relation(0).unwrap();
+        assert!(n.relations().is_empty());
+        let names = q.entity_names();
+        assert_eq!(names.len(), 2);
+        assert_eq!(names[0].names, vec!["Anna".to_string(), "Annie".to_string()]);
+        assert!(q.is_live(a));
+        q.trash_node(a).unwrap();
+        assert!(!q.is_live(a));
+        assert_eq!(q.entities(), vec![b]);
     }
 }

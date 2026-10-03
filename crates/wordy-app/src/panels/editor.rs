@@ -8,10 +8,11 @@ use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_fl
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use wordy_doc::loro::LoroText;
-use wordy_doc::TreeID;
-use wordy_editor::{EditorEvent, ProseEditor};
+use wordy_doc::{NodeKind, TreeID};
+use wordy_editor::{EditorEvent, LinkTarget, ProseEditor};
 
 use crate::app::{CloseFind, Find, FindNext, FindPrev, Replace, SharedProject, EDITOR_PANEL_CONTEXT};
+use crate::panels::sheet::{EntitySheet, SheetEvent};
 
 pub enum EditorPanelEvent {
     /// The body changed.
@@ -20,6 +21,10 @@ pub enum EditorPanelEvent {
     Activated,
     /// The tab was closed.
     Closed,
+    /// Entity names changed (aliases); the matcher and index must refresh.
+    NamesChanged,
+    /// Follow a link: show `id` in the reference pane, or open it when `navigate`.
+    OpenLink { id: TreeID, navigate: bool },
 }
 
 struct FindBar {
@@ -33,6 +38,7 @@ pub struct EditorPanel {
     project: SharedProject,
     node: Option<TreeID>,
     editor: Option<Entity<ProseEditor>>,
+    sheet: Option<Entity<EntitySheet>>,
     find: Option<FindBar>,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
@@ -40,19 +46,60 @@ pub struct EditorPanel {
 
 impl EditorPanel {
     pub fn placeholder(project: SharedProject, cx: &mut Context<Self>) -> Self {
-        Self { project, node: None, editor: None, find: None, focus: cx.focus_handle(), _subs: Vec::new() }
+        Self {
+            project,
+            node: None,
+            editor: None,
+            sheet: None,
+            find: None,
+            focus: cx.focus_handle(),
+            _subs: Vec::new(),
+        }
     }
 
-    pub fn open(project: SharedProject, id: TreeID, body: LoroText, cx: &mut Context<Self>) -> Self {
+    pub fn open(project: SharedProject, id: TreeID, body: LoroText, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let doc = project.project.doc.clone();
         let editor = cx.new(|cx| ProseEditor::new(doc, body, cx));
-        editor.update(cx, |e, _| e.set_comments(project.project.comments(), id.to_string()));
-        let sub = cx.subscribe(&editor, |_, _, ev: &EditorEvent, cx| {
-            if matches!(ev, EditorEvent::Edited) {
-                cx.emit(EditorPanelEvent::Edited);
-            }
+        editor.update(cx, |e, cx| {
+            e.set_comments(project.project.comments(), id.to_string());
+            e.set_self_id(Some(id));
+            e.set_link_targets(project.link_targets(), cx);
         });
-        Self { project, node: Some(id), editor: Some(editor), find: None, focus: cx.focus_handle(), _subs: vec![sub] }
+        let mut subs = vec![cx.subscribe(&editor, |_, _, ev: &EditorEvent, cx| match ev {
+            EditorEvent::Edited => cx.emit(EditorPanelEvent::Edited),
+            EditorEvent::OpenLink { id, navigate } => {
+                cx.emit(EditorPanelEvent::OpenLink { id: *id, navigate: *navigate })
+            }
+            EditorEvent::SelectionChanged => {}
+        })];
+        let is_entity = project.project.node(id).map(|n| n.kind() == NodeKind::Entity).unwrap_or(false);
+        let sheet = is_entity.then(|| {
+            let sheet = cx.new(|cx| EntitySheet::new(project.clone(), id, window, cx));
+            subs.push(cx.subscribe(&sheet, |_, _, ev: &SheetEvent, cx| match ev {
+                SheetEvent::Changed => cx.emit(EditorPanelEvent::Edited),
+                SheetEvent::NamesChanged => cx.emit(EditorPanelEvent::NamesChanged),
+                SheetEvent::Open(id) => cx.emit(EditorPanelEvent::OpenLink { id: *id, navigate: true }),
+                SheetEvent::Pin(id) => cx.emit(EditorPanelEvent::OpenLink { id: *id, navigate: false }),
+            }));
+            sheet
+        });
+        Self {
+            project,
+            node: Some(id),
+            editor: Some(editor),
+            sheet,
+            find: None,
+            focus: cx.focus_handle(),
+            _subs: subs,
+        }
+    }
+
+    /// Push the current entity list into the editor (names changed somewhere).
+    pub fn set_link_targets(&mut self, targets: Vec<LinkTarget>, cx: &mut Context<Self>) {
+        if let Some(editor) = &self.editor {
+            editor.update(cx, |e, cx| e.set_link_targets(targets, cx));
+        }
+        cx.notify();
     }
 
     #[allow(dead_code)]
@@ -283,6 +330,7 @@ impl Render for EditorPanel {
                 .on_action(cx.listener(|this, _: &FindPrev, _, cx| this.step(-1, cx)))
                 .on_action(cx.listener(|this, _: &CloseFind, window, cx| this.close_find(window, cx)))
                 .children(self.render_find_bar(cx))
+                .children(self.sheet.clone())
                 .child(div().flex_1().min_h_0().w_full().child(editor))
                 .into_any_element(),
             None => div().size_full().child(

@@ -1,6 +1,8 @@
 //! Typed view over one tree node's meta map.
 
 use anyhow::{anyhow, Result};
+use std::collections::HashMap;
+
 use loro::{LoroList, LoroMap, LoroText, LoroTree, LoroValue, TreeID, ValueOrContainer};
 use serde::{Deserialize, Serialize};
 
@@ -142,6 +144,23 @@ impl Status {
             Status::Final => "Final",
         }
     }
+}
+
+/// A typed relation from one entity to another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Relation {
+    pub to: TreeID,
+    pub kind: String,
+    pub note: String,
+}
+
+/// A file stored under the project's `assets/` directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attachment {
+    pub name: String,
+    /// Path relative to `assets/`.
+    pub path: String,
+    pub mime: String,
 }
 
 /// A handle to one node. Cheap to clone; reads go straight to Loro.
@@ -342,6 +361,127 @@ impl Node {
             l.delete(i, 1)?;
         }
         Ok(())
+    }
+
+    /// Template-driven sheet fields (entities). Values are plain strings.
+    pub fn field(&self, key: &str) -> String {
+        match self.meta.get(meta::FIELDS) {
+            Some(ValueOrContainer::Container(c)) => match c.into_map() {
+                Ok(m) => value_str(m.get(key)).unwrap_or_default(),
+                Err(_) => String::new(),
+            },
+            _ => String::new(),
+        }
+    }
+
+    pub fn set_field(&self, key: &str, value: &str) -> Result<()> {
+        let m = self.meta.ensure_mergeable_map(meta::FIELDS)?;
+        if value.is_empty() {
+            if m.get(key).is_some() {
+                m.delete(key)?;
+            }
+        } else {
+            m.insert(key, value)?;
+        }
+        Ok(())
+    }
+
+    /// Every stored field, including ones the current template does not show.
+    pub fn fields(&self) -> Vec<(String, String)> {
+        match self.meta.get(meta::FIELDS) {
+            Some(ValueOrContainer::Container(c)) => match c.into_map() {
+                Ok(m) => {
+                    let mut v: Vec<(String, String)> = Vec::new();
+                    m.for_each(|k, val| {
+                        if let ValueOrContainer::Value(LoroValue::String(s)) = val {
+                            v.push((k.to_string(), s.to_string()));
+                        }
+                    });
+                    v.sort();
+                    v
+                }
+                Err(_) => vec![],
+            },
+            _ => vec![],
+        }
+    }
+
+    pub fn relations(&self) -> Vec<Relation> {
+        self.record_list(meta::RELATIONS)
+            .into_iter()
+            .filter_map(|m| {
+                let to = m.get("to").and_then(|v| v.as_string().map(|s| s.to_string()))?;
+                let to = TreeID::try_from(to.as_str()).ok()?;
+                Some(Relation {
+                    to,
+                    kind: m.get("kind").and_then(|v| v.as_string().map(|s| s.to_string())).unwrap_or_default(),
+                    note: m.get("note").and_then(|v| v.as_string().map(|s| s.to_string())).unwrap_or_default(),
+                })
+            })
+            .collect()
+    }
+
+    pub fn add_relation(&self, to: TreeID, kind: &str, note: &str) -> Result<()> {
+        let mut m: HashMap<String, LoroValue> = HashMap::new();
+        m.insert("to".into(), LoroValue::from(to.to_string()));
+        m.insert("kind".into(), LoroValue::from(kind));
+        m.insert("note".into(), LoroValue::from(note));
+        self.list(meta::RELATIONS)?.push(LoroValue::Map(m.into()))?;
+        Ok(())
+    }
+
+    pub fn remove_relation(&self, ix: usize) -> Result<()> {
+        let l = self.list(meta::RELATIONS)?;
+        if ix < l.len() {
+            l.delete(ix, 1)?;
+        }
+        Ok(())
+    }
+
+    pub fn attachments(&self) -> Vec<Attachment> {
+        self.record_list(meta::ATTACHMENTS)
+            .into_iter()
+            .map(|m| Attachment {
+                name: m.get("name").and_then(|v| v.as_string().map(|s| s.to_string())).unwrap_or_default(),
+                path: m.get("path").and_then(|v| v.as_string().map(|s| s.to_string())).unwrap_or_default(),
+                mime: m.get("mime").and_then(|v| v.as_string().map(|s| s.to_string())).unwrap_or_default(),
+            })
+            .collect()
+    }
+
+    pub fn add_attachment(&self, name: &str, path: &str, mime: &str) -> Result<()> {
+        let mut m: HashMap<String, LoroValue> = HashMap::new();
+        m.insert("name".into(), LoroValue::from(name));
+        m.insert("path".into(), LoroValue::from(path));
+        m.insert("mime".into(), LoroValue::from(mime));
+        self.list(meta::ATTACHMENTS)?.push(LoroValue::Map(m.into()))?;
+        Ok(())
+    }
+
+    pub fn remove_attachment(&self, ix: usize) -> Result<()> {
+        let l = self.list(meta::ATTACHMENTS)?;
+        if ix < l.len() {
+            l.delete(ix, 1)?;
+        }
+        Ok(())
+    }
+
+    /// A list of plain map values (relations, attachments).
+    fn record_list(&self, key: &str) -> Vec<HashMap<String, LoroValue>> {
+        match self.meta.get(key) {
+            Some(ValueOrContainer::Container(c)) => match c.into_list() {
+                Ok(l) => l
+                    .to_vec()
+                    .into_iter()
+                    .filter_map(|v| match v {
+                        LoroValue::Map(m) => Some((*m).clone().into_iter().collect()),
+                        _ => None,
+                    })
+                    .collect(),
+                Err(_) => vec![],
+            },
+            _ => vec![],
+        }
     }
 
     pub fn parent(&self) -> Option<TreeID> {
