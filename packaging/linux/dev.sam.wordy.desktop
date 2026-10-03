@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Wordy
+GenericName=Fiction writing
+Comment=Manuscript, world and notes in one window
+Exec=wordy %f
+Icon=dev.sam.wordy
+Terminal=false
+Categories=Office;WordProcessor;
+Keywords=writing;novel;manuscript;notes;
+StartupWMClass=dev.sam.wordy

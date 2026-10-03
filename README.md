@@ -44,6 +44,24 @@ cargo test --all-targets
    the same path and see the sentence again. Delete `/tmp/launch-check`.
 3. Run the two-host sync checklist in [`docs/sync-test.md`](docs/sync-test.md).
 
+## Install
+
+Linux, per user (no root): builds a release binary if needed and puts the
+command, the launcher entry and the icon under `~/.local`.
+
+```sh
+packaging/linux/install.sh             # add --uninstall to remove it again
+```
+
+macOS: builds `target/release/Wordy.app` (unsigned) from the same sources.
+
+```sh
+packaging/macos/bundle.sh
+```
+
+The icon is `packaging/wordy.svg`; the PNGs next to the scripts are rendered
+from it with `rsvg-convert` and checked in so neither script needs it.
+
 ## Data on disk
 
 Each project is a folder (default under `~/Wordy/`):

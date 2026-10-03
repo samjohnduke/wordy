@@ -257,6 +257,21 @@ impl Workspace {
             dock.toggle_dock(DockPlacement::Right, window, cx);
         });
 
+        // The title-bar close button and the compositor's close request
+        // bypass the `Quit` action, so flush here. The entity is gone by the
+        // time `on_app_quit` runs after the last window closes.
+        let weak = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |_, cx| {
+            let _ = weak.update(cx, |this, cx| this.save_with(true, cx));
+            true
+        });
+        // Every other way out (Quit action, Cmd-Q, the macOS menu, an error
+        // path calling `cx.quit()`) lands here while the window still exists.
+        let quit_sub = cx.on_app_quit(|this, cx| {
+            this.save_with(true, cx);
+            async {}
+        });
+
         let sub = cx.subscribe_in(&sidebar, window, |this, _, ev: &SidebarEvent, window, cx| match ev {
             SidebarEvent::Open(id) => this.open_node(*id, window, cx),
             SidebarEvent::Changed => this.on_tree_changed(cx),
@@ -320,7 +335,7 @@ impl Workspace {
             layout_task: None,
             restoring: true,
             focus,
-            _subs: vec![sub, ref_sub, sync_sub, dock_sub],
+            _subs: vec![sub, ref_sub, sync_sub, dock_sub, quit_sub],
         };
         this.restore_layout(window, cx);
         this.restoring = false;
@@ -676,6 +691,13 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Select `id` in the sidebar of its space, expanding its ancestors.
+    fn reveal_in_sidebar(&mut self, id: TreeID, space: Space, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_left_dock(window, cx);
+        self.set_space(space, cx);
+        self.sidebar.update(cx, |s, cx| s.reveal(id, cx));
+    }
+
     /// Show the editor tab for `id`, creating it on first open.
     fn open_node(&mut self, id: TreeID, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(panel) = self.editors.get(&id).cloned() {
@@ -687,7 +709,20 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let body = match self.project.project.node(id).and_then(|n| n.body()) {
+        let node = match self.project.project.node(id) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::error!("open node: {e:#}");
+                return;
+            }
+        };
+        if !node.kind().has_body() {
+            // A container (chapter): show it where it lives instead of
+            // creating an editor for a body it does not have.
+            self.reveal_in_sidebar(id, node.space(), window, cx);
+            return;
+        }
+        let body = match node.body() {
             Ok(b) => b,
             Err(e) => {
                 tracing::error!("open node: {e:#}");
@@ -1411,8 +1446,8 @@ impl Workspace {
     }
 
     fn quit(&mut self, _: &Quit, _: &mut Window, cx: &mut Context<Self>) {
-        // Always: an autosave may have skipped the JSON mirror.
-        self.save_with(true, cx);
+        // The flush happens in the `on_app_quit` hook registered in `new`, which
+        // also covers the global `Quit` action and the macOS application menu.
         cx.quit();
     }
 

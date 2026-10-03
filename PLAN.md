@@ -392,6 +392,35 @@ sidebar and editor) is **intentional** and stays.
 - Two-host sync checklist in `docs/sync-test.md` (manual, run before each release).
 - **Accept:** CI green on both OSes; a year-old project opens without manual compaction.
 
+### Phase 13 — Loose ends after the gap audit (code done 2026-10-03; *(manual)* items open)
+Found after Phase 12; items marked *(manual)* need another machine or a human and are tracked
+here rather than done in code.
+- Window close saves: the title-bar close button and the window manager's close request go
+  through a `should_close` hook that flushes the snapshot and JSON mirror before the window
+  goes away. The global `Quit` action, Cmd-Q and the Mac menu run the same flush from
+  `on_app_quit`, so the two paths cannot drift.
+- Chapter rows behave the same everywhere: a chapter has no body, so opening it from the
+  dashboard or Reports reveals it in the Manuscript sidebar (space switched, ancestors
+  expanded, row selected) instead of creating an editor tab for an empty container.
+- Linux packaging: `packaging/linux/` holds `dev.sam.wordy.desktop` (the name must equal the
+  window `app_id` so Wayland compositors match the icon), an SVG icon rendered to hicolor PNGs,
+  and `install.sh` for a per-user install under `~/.local` (`--uninstall` reverses it).
+- macOS bundle: `packaging/macos/bundle.sh` builds a release binary and wraps it in
+  `Wordy.app` with `Info.plist` and an `.icns` made with `sips` + `iconutil`. *(manual: run
+  and open on a Mac; this machine cannot.)*
+- *(manual)* First real CI run: the apt package list in `ci.yml` was written blind; fix whatever
+  the first `ubuntu-latest` and `macos-latest` runs reject.
+- *(manual)* Two-host sync checklist (`docs/sync-test.md`) has never been run; sync is plain
+  TCP on the LAN with no TLS, by design for a two-machine private tool.
+- *(manual)* HiDPI and fractional scaling: check text crispness and hit targets at 1.5× and 2×
+  on both OSes.
+- No UI-level tests: gpui's `test-support` feature would rebuild gpui for the test profile, so
+  UI logic stays in gpui-free modules (`wordy_editor::ime`, `wordy_doc`) that are unit-tested.
+- Local disk sits at 97%; `target/` is 1.7 GB per profile. `cargo clean -p wordy-app` before
+  release builds if space runs short. *(manual, this machine only)*
+- **Accept:** closing the window with the mouse loses no text; clicking a chapter anywhere lands
+  on the same sidebar row; `install.sh` puts Wordy in the launcher with its icon.
+
 Rough total: 3–4 months of evenings/weekends; faster if full-time. The editor (Phases 1–2) is
 roughly half the effort.
 

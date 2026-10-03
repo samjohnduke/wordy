@@ -258,6 +258,20 @@ impl SidebarPanel {
         cx.notify();
     }
 
+    /// Select `id`, unfold it and every ancestor so the row and its children show.
+    pub fn reveal(&mut self, id: TreeID, cx: &mut Context<Self>) {
+        let mut changed = self.collapsed.remove(&id);
+        let mut cur = self.project.project.node(id).ok().and_then(|n| n.parent());
+        while let Some(p) = cur {
+            changed |= self.collapsed.remove(&p);
+            cur = self.project.project.node(p).ok().and_then(|n| n.parent());
+        }
+        if changed {
+            cx.emit(SidebarEvent::LayoutChanged);
+        }
+        self.select(Some(id), cx);
+    }
+
     pub fn collapsed_ids(&self) -> Vec<TreeID> {
         self.collapsed.iter().copied().collect()
     }
