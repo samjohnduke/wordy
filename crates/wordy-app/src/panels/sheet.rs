@@ -1,5 +1,7 @@
 //! Entity sheet: template, aliases, template-driven fields, relations,
-//! attachments, and "Appears in". Shown above an entity's description editor.
+//! attachments, and "Appears in", in three tabs above an entity's
+//! description editor. Image attachments show inline at the top; the first
+//! one is the portrait.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -7,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -25,6 +28,35 @@ pub enum SheetEvent {
     Open(TreeID),
     /// Show a node in the reference pane.
     Pin(TreeID),
+    /// Filter the Manuscript sidebar to scenes mentioning this entity.
+    FilterMentions(TreeID),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SheetTab {
+    Fields,
+    Relations,
+    AppearsIn,
+}
+
+impl SheetTab {
+    const ALL: [SheetTab; 3] = [SheetTab::Fields, SheetTab::Relations, SheetTab::AppearsIn];
+
+    fn label(self) -> &'static str {
+        match self {
+            SheetTab::Fields => "Fields",
+            SheetTab::Relations => "Relations",
+            SheetTab::AppearsIn => "Appears in",
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            SheetTab::Fields => "tab-fields",
+            SheetTab::Relations => "tab-relations",
+            SheetTab::AppearsIn => "tab-appears",
+        }
+    }
 }
 
 enum FieldInput {
@@ -48,6 +80,7 @@ pub struct EntitySheet {
     project: SharedProject,
     id: TreeID,
     collapsed: bool,
+    tab: SheetTab,
     aliases: Entity<InputState>,
     fields: Vec<Field>,
     relation_form: Option<RelationForm>,
@@ -76,6 +109,7 @@ impl EntitySheet {
             project,
             id,
             collapsed: false,
+            tab: SheetTab::Fields,
             aliases,
             fields: Vec::new(),
             relation_form: None,
@@ -521,13 +555,36 @@ impl EntitySheet {
 
     fn render_appears_in(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let backlinks = self.project.appears_in(self.id);
-        let mut section = v_flex().gap_0p5().w_full().child(Self::label("Appears in", cx));
+        let me = self.id;
+        let in_manuscript = backlinks
+            .iter()
+            .filter(|b| b.space == wordy_doc::Space::Manuscript.as_str())
+            .count();
+        let mut section = v_flex().gap_0p5().w_full().child(
+            h_flex()
+                .justify_between()
+                .items_center()
+                .child(Self::label("Appears in", cx))
+                .when(in_manuscript > 0, |h| {
+                    h.child(
+                        Button::new("bl-filter")
+                            .ghost()
+                            .xsmall()
+                            .label(format!(
+                                "Show {in_manuscript} scene{} in Manuscript",
+                                if in_manuscript == 1 { "" } else { "s" }
+                            ))
+                            .tooltip("Filter the Manuscript sidebar to scenes mentioning this entity")
+                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(SheetEvent::FilterMentions(me)))),
+                    )
+                }),
+        );
         if backlinks.is_empty() {
             section = section.child(
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Not mentioned anywhere yet."),
+                    .child("Not mentioned anywhere yet. Type this entity's name in a scene, or link it with ⌘K."),
             );
         }
         for (ix, b) in backlinks.iter().enumerate() {
@@ -563,6 +620,90 @@ impl EntitySheet {
             );
         }
         section
+    }
+
+    /// Image attachments, inline: the first is the portrait, the rest thumbnails.
+    fn render_images(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let node = self.project.project.node(self.id).ok()?;
+        let assets = self.assets_dir()?;
+        let images: Vec<(usize, wordy_doc::Attachment)> = node
+            .attachments()
+            .into_iter()
+            .enumerate()
+            .filter(|(_, a)| a.mime.starts_with("image/"))
+            .collect();
+        if images.is_empty() {
+            return None;
+        }
+        let mut row = h_flex().gap_2().items_end().w_full();
+        for (n, (ix, a)) in images.into_iter().enumerate() {
+            let path = assets.join(&a.path);
+            let rel = a.path.clone();
+            let size = if n == 0 { px(160.) } else { px(64.) };
+            row = row.child(
+                div()
+                    .id(ElementId::Name(format!("img-{ix}").into()))
+                    .flex_shrink_0()
+                    .h(size)
+                    .max_w(if n == 0 { px(240.) } else { px(96.) })
+                    .rounded_md()
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .cursor_pointer()
+                    .child(img(path).h(size).object_fit(ObjectFit::Cover))
+                    .tooltip(move |window, cx| Tooltip::new(a.name.clone()).build(window, cx))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_attachment(&rel, cx))),
+            );
+        }
+        Some(row.into_any_element())
+    }
+
+    fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = self.tab;
+        let relations = self
+            .project
+            .project
+            .node(self.id)
+            .map(|n| n.relations().len())
+            .unwrap_or(0);
+        let appears = self.project.appears_in(self.id).len();
+        h_flex()
+            .gap_1()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .children(SheetTab::ALL.iter().map(|t| {
+                let t = *t;
+                let count = match t {
+                    SheetTab::Fields => None,
+                    SheetTab::Relations => Some(relations),
+                    SheetTab::AppearsIn => Some(appears),
+                };
+                let label = match count {
+                    Some(n) if n > 0 => format!("{} · {n}", t.label()),
+                    _ => t.label().to_string(),
+                };
+                let on = current == t;
+                div()
+                    .id(t.id())
+                    .px_2()
+                    .py_1()
+                    .text_xs()
+                    .cursor_pointer()
+                    .border_b_2()
+                    .border_color(if on { cx.theme().primary } else { transparent_black() })
+                    .text_color(if on {
+                        cx.theme().foreground
+                    } else {
+                        cx.theme().muted_foreground
+                    })
+                    .hover(|s| s.text_color(cx.theme().foreground))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.tab = t;
+                        cx.notify();
+                    }))
+            }))
     }
 }
 
@@ -600,18 +741,21 @@ impl Render for EntitySheet {
             .border_color(cx.theme().border)
             .child(header);
         if !collapsed {
-            sheet = sheet
-                .child(self.render_templates(cx))
-                .child(
-                    v_flex()
-                        .gap_0p5()
-                        .child(Self::label("Aliases", cx))
-                        .child(Input::new(&self.aliases).small()),
-                )
-                .children(self.render_fields(cx))
-                .child(self.render_relations(cx))
-                .child(self.render_attachments(cx))
-                .child(self.render_appears_in(cx));
+            sheet = sheet.children(self.render_images(cx)).child(self.render_tabs(cx));
+            sheet = match self.tab {
+                SheetTab::Fields => sheet
+                    .child(self.render_templates(cx))
+                    .child(
+                        v_flex()
+                            .gap_0p5()
+                            .child(Self::label("Aliases", cx))
+                            .child(Input::new(&self.aliases).small()),
+                    )
+                    .children(self.render_fields(cx))
+                    .child(self.render_attachments(cx)),
+                SheetTab::Relations => sheet.child(self.render_relations(cx)),
+                SheetTab::AppearsIn => sheet.child(self.render_appears_in(cx)),
+            };
         }
         sheet
     }

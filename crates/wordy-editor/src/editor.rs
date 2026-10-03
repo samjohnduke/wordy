@@ -15,7 +15,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use unicode_segmentation::UnicodeSegmentation;
 use wordy_doc::loro::{CommitOptions, ContainerTrait as _, LoroDoc, LoroText, LoroValue, UndoItemMeta, UndoManager};
-use wordy_doc::{Block, Comments, Highlight, Marks, Paragraphs, Run, META_ORIGIN};
+use wordy_doc::{Block, Comments, Highlight, Marks, Paragraphs, Run, BULK_ORIGIN, META_ORIGIN};
 use wordy_doc::{EntityNames, Matcher, TreeID};
 
 use crate::element::{FrameLayout, ProseElement};
@@ -239,6 +239,7 @@ impl ProseEditor {
         let mut undo = UndoManager::new(&doc);
         undo.set_merge_interval(700);
         undo.add_exclude_origin_prefix(META_ORIGIN);
+        undo.add_exclude_origin_prefix(BULK_ORIGIN);
         {
             let snap = undo_sel.clone();
             undo.set_on_push(Some(Box::new(move |_kind, _span, _event| {
@@ -442,25 +443,38 @@ impl ProseEditor {
 
     /// Code point ranges of every explicit link run.
     fn link_ranges(&self) -> Vec<(Range<usize>, String)> {
-        let mut out: Vec<(Range<usize>, String)> = Vec::new();
-        for p in self.paras.iter() {
-            let mut cp = p.start_cp;
-            for r in &p.runs {
-                let n = r.text.chars().count();
-                if let Some(l) = &r.marks.link {
-                    if let Some((last, id)) = out.last_mut() {
-                        if *id == *l && (*last).end == cp {
-                            last.end = cp + n;
-                            cp += n;
-                            continue;
-                        }
-                    }
-                    out.push((cp..cp + n, l.clone()));
-                }
-                cp += n;
+        self.paras.link_spans()
+    }
+
+    /// Rewrite the text under every explicit link to `entity` that reads
+    /// `from` so it reads `to`, as one undoable edit. Returns how many changed.
+    pub fn replace_linked_mentions(&mut self, entity: TreeID, from: &str, to: &str, cx: &mut Context<Self>) -> usize {
+        if self.read_only {
+            return 0;
+        }
+        let id = entity.to_string();
+        let want = from.trim().to_lowercase();
+        let spans: Vec<Range<usize>> = self
+            .link_ranges()
+            .into_iter()
+            .filter(|(r, l)| *l == id && self.paras.slice_cp(r.clone()).trim().to_lowercase() == want)
+            .map(|(r, _)| r)
+            .collect();
+        if spans.is_empty() {
+            return 0;
+        }
+        self.begin_edit();
+        let n = to.chars().count();
+        for r in spans.iter().rev() {
+            self.delete_cp_range(r.clone());
+            self.insert_at(r.start, to);
+            if let Err(e) = self.text.mark(r.start..r.start + n, "link", id.as_str()) {
+                tracing::warn!("relink failed: {e}");
             }
         }
-        out
+        self.sel = Selection::caret(self.sel.head.min(self.paras.max_cursor()));
+        self.commit(cx);
+        spans.len()
     }
 
     /// The explicit link covering `cp`, with its range.

@@ -29,6 +29,8 @@ pub enum SidebarEvent {
     FocusEditor,
     /// Collapse state changed (persisted in layout.json).
     LayoutChanged,
+    /// A node's title changed from `from` to `to`.
+    Renamed { id: TreeID, from: String, to: String },
 }
 
 /// The dragged row's floating preview.
@@ -79,6 +81,9 @@ pub struct SidebarPanel {
     show_trash: bool,
     search: Entity<InputState>,
     query: String,
+    /// Only show scenes mentioning this entity (and their chapters).
+    mention_filter: Option<(TreeID, String)>,
+    filter_ids: HashSet<TreeID>,
     weak: WeakEntity<Self>,
     pub focus: FocusHandle,
     _subs: Vec<Subscription>,
@@ -103,6 +108,8 @@ impl SidebarPanel {
             show_trash: false,
             search,
             query: String::new(),
+            mention_filter: None,
+            filter_ids: HashSet::new(),
             weak: cx.weak_entity(),
             focus: cx.focus_handle(),
             _subs: vec![sub],
@@ -202,7 +209,48 @@ impl SidebarPanel {
     pub fn set_space(&mut self, space: Space, cx: &mut Context<Self>) {
         self.space = space;
         self.rename = None;
+        if space != Space::Manuscript {
+            self.mention_filter = None;
+            self.filter_ids.clear();
+        }
         cx.notify();
+    }
+
+    /// Show only Manuscript scenes that mention `entity` (plus their chapters),
+    /// or everything again with `None`.
+    pub fn set_mention_filter(&mut self, entity: Option<TreeID>, cx: &mut Context<Self>) {
+        self.filter_ids.clear();
+        self.mention_filter = None;
+        if let Some(entity) = entity {
+            let title = self.project.project.node(entity).map(|n| n.title()).unwrap_or_default();
+            self.mention_filter = Some((entity, title));
+            self.refresh_filter();
+        }
+        cx.notify();
+    }
+
+    /// Recompute the filtered set from the index (after edits or renames).
+    pub fn refresh_filter(&mut self) {
+        let Some((entity, title)) = self.mention_filter.as_mut() else {
+            return;
+        };
+        if let Ok(n) = self.project.project.node(*entity) {
+            *title = n.title();
+        }
+        let entity = *entity;
+        self.filter_ids.clear();
+        for b in self.project.appears_in(entity) {
+            if b.space != Space::Manuscript.as_str() {
+                continue;
+            }
+            let mut cur = Some(b.node);
+            while let Some(id) = cur {
+                if !self.filter_ids.insert(id) {
+                    break;
+                }
+                cur = self.project.project.node(id).ok().and_then(|n| n.parent());
+            }
+        }
     }
 
     pub fn select(&mut self, id: Option<TreeID>, cx: &mut Context<Self>) {
@@ -471,9 +519,16 @@ impl SidebarPanel {
         let value = rename.input.read(cx).value().trim().to_string();
         if !value.is_empty() {
             if let Ok(node) = self.project.project.node(rename.id) {
-                if node.title() != value {
+                let from = node.title();
+                if from != value {
                     if let Err(e) = node.set_title(&value) {
                         tracing::error!("rename: {e:#}");
+                    } else {
+                        cx.emit(SidebarEvent::Renamed {
+                            id: rename.id,
+                            from,
+                            to: value.clone(),
+                        });
                     }
                 }
             }
@@ -758,6 +813,9 @@ impl SidebarPanel {
         let Ok(node) = self.project.project.node(id) else {
             return out;
         };
+        if self.mention_filter.is_some() && !in_trash && !self.filter_ids.contains(&id) {
+            return out;
+        }
         let kind = node.kind();
         let children = self.project.project.children(id);
         let is_container = kind.is_container();
@@ -978,7 +1036,38 @@ impl Render for SidebarPanel {
             );
 
         let searching = !self.query.is_empty();
-        let trash_section = (!searching && !trashed.is_empty()).then(|| {
+        let filtering = self.mention_filter.is_some();
+        let filter_chip = self.mention_filter.as_ref().map(|(_, title)| {
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .bg(cx.theme().secondary)
+                .text_xs()
+                .child(div().text_color(muted).child("Mentions"))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .font_semibold()
+                        .child(title.clone()),
+                )
+                .child(
+                    Button::new("filter-clear")
+                        .ghost()
+                        .xsmall()
+                        .label("×")
+                        .tooltip("Show every scene again")
+                        .on_click(cx.listener(|this, _, _, cx| this.set_mention_filter(None, cx))),
+                )
+        });
+        let trash_section = (!searching && !filtering && !trashed.is_empty()).then(|| {
             let show = self.show_trash;
             let mut section = v_flex().w_full().mt_2().child(
                 div()
@@ -1018,24 +1107,28 @@ impl Render for SidebarPanel {
             .on_action(cx.listener(Self::on_trash))
             .p_1()
             .child(header)
-            .child(div().px_1().pb_1().child(Input::new(&self.search).small()))
+            .child(
+                div()
+                    .px_1()
+                    .pb_1()
+                    .when(!filtering, |d| d.child(Input::new(&self.search).small()))
+                    .children(filter_chip),
+            )
             .child(
                 div()
                     .id("tree-scroll")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .when(searching, |d| d.children(self.render_search_results(cx)))
+                    .when(searching && !filtering, |d| d.children(self.render_search_results(cx)))
                     .when(!searching && items.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .p_2()
-                                .text_sm()
-                                .text_color(muted)
-                                .child("Nothing here yet. Use + to add one."),
-                        )
+                        d.child(div().p_2().text_sm().text_color(muted).child(if filtering {
+                            "No scene mentions this entity yet."
+                        } else {
+                            "Nothing here yet. Use + to add one."
+                        }))
                     })
-                    .when(!searching, |d| d.children(items))
+                    .when(!searching || filtering, |d| d.children(items))
                     .children(trash_section)
                     .when(!searching, |d| {
                         d.child(

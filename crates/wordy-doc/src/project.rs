@@ -1,6 +1,7 @@
 //! A Wordy project: one LoroDoc plus typed access to its containers.
 
 use std::cell::RefCell;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -11,11 +12,15 @@ use loro::{
 use crate::comments::Comments;
 
 use crate::node::{Node, NodeKind, Space, Status};
+use crate::paragraphs::Paragraphs;
 use crate::schema::{self, meta};
 use crate::storage;
 
 /// Commit origin for everything that is not a body edit. See [`Project::commit_meta`].
 pub const META_ORIGIN: &str = "meta";
+/// Commit origin for project-wide body edits made outside any editor (rename
+/// propagation). Editors exclude it from their undo stacks.
+pub const BULK_ORIGIN: &str = "bulk";
 
 pub struct Project {
     pub doc: LoroDoc,
@@ -508,6 +513,67 @@ impl Project {
                 crate::mentions::EntityNames { id: n.id, names }
             })
             .collect()
+    }
+
+    /// Explicit links to `entity` whose text reads `text` (case-insensitive),
+    /// per live node: what a rename offers to update.
+    pub fn linked_mentions(&self, entity: TreeID, text: &str) -> Vec<(TreeID, usize)> {
+        let id = entity.to_string();
+        let want = text.trim().to_lowercase();
+        if want.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for node in self.all_nodes() {
+            let Some(body) = self.node(node).ok().and_then(|n| n.body_if_exists()) else {
+                continue;
+            };
+            let paras = Paragraphs::from_text(&body);
+            let n = paras
+                .link_spans()
+                .into_iter()
+                .filter(|(r, l)| *l == id && paras.slice_cp(r.clone()).trim().to_lowercase() == want)
+                .count();
+            if n > 0 {
+                out.push((node, n));
+            }
+        }
+        out
+    }
+
+    /// Replace the text under every explicit link to `entity` in `node`'s body
+    /// that reads `from` with `to`, keeping the link, as one commit under
+    /// `origin`. Returns how many spans changed.
+    pub fn replace_linked_mentions(
+        &self,
+        node: TreeID,
+        entity: TreeID,
+        from: &str,
+        to: &str,
+        origin: &str,
+    ) -> Result<usize> {
+        let Some(body) = self.node(node)?.body_if_exists() else {
+            return Ok(0);
+        };
+        let id = entity.to_string();
+        let want = from.trim().to_lowercase();
+        let paras = Paragraphs::from_text(&body);
+        let spans: Vec<Range<usize>> = paras
+            .link_spans()
+            .into_iter()
+            .filter(|(r, l)| *l == id && paras.slice_cp(r.clone()).trim().to_lowercase() == want)
+            .map(|(r, _)| r)
+            .collect();
+        let n = spans.len();
+        for r in spans.into_iter().rev() {
+            body.delete(r.start, r.len())?;
+            body.insert(r.start, to)?;
+            body.mark(r.start..r.start + to.chars().count(), "link", id.as_str())?;
+        }
+        if n > 0 {
+            self.doc.commit_with(CommitOptions::default().origin(origin));
+        }
+        Ok(n)
     }
 
     /// Every live node in every space, depth first.

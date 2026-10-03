@@ -359,7 +359,7 @@ sidebar and editor) is **intentional** and stays.
 - Typewriter and focus mode persisted (via Phase 8 layout.json).
 - **Accept:** every editor command is reachable with the mouse and from the palette.
 
-### Phase 10 — World space depth and versions
+### Phase 10 — World space depth and versions (done 2026-10-03)
 - Entity sheet tabs: Fields / Relations / Appears in. Image attachments render inline at the top
   of the sheet (first image = portrait).
 - "Appears in" rows filter the Manuscript sidebar to scenes mentioning that entity (clear button

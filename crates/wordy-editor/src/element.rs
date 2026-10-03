@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
-use wordy_doc::{Block, Highlight, Paragraph, Paragraphs};
+use wordy_doc::{Block, Diff, Highlight, Paragraph, Paragraphs};
 
 use crate::editor::ProseEditor;
 use crate::style::EditorStyle;
@@ -152,6 +152,9 @@ struct Palette {
     spelling: Hsla,
     /// Paragraphs outside the caret's in focus mode.
     dim: Hsla,
+    /// Version compare: inserted and deleted words.
+    diff_ins: Hsla,
+    diff_del: Hsla,
 }
 
 /// Translucent highlighter colour for a mark; reads on light and dark pages.
@@ -185,6 +188,8 @@ impl Palette {
             ambiguous: hsla(0.08, 0.9, 0.5, 0.95),
             spelling: hsla(0.0, 0.85, 0.55, 0.95),
             dim: t.foreground.opacity(0.35),
+            diff_ins: hsla(0.36, 0.7, 0.5, 0.35),
+            diff_del: hsla(0.0, 0.8, 0.55, 0.3),
         }
     }
 }
@@ -314,7 +319,12 @@ impl ProseElement {
             } else {
                 FontFeatures::default()
             };
-            let background_color = if let Some(h) = m.highlight {
+            let background_color = if let Some(d) = m.diff {
+                Some(match d {
+                    Diff::Ins => pal.diff_ins,
+                    Diff::Del => pal.diff_del,
+                })
+            } else if let Some(h) = m.highlight {
                 Some(highlight_color(h))
             } else {
                 match &m.comment {
@@ -339,7 +349,7 @@ impl ProseElement {
                     color: Some(color),
                     wavy: false,
                 }),
-                strikethrough: m.strike.then_some(StrikethroughStyle {
+                strikethrough: (m.strike || m.diff == Some(Diff::Del)).then_some(StrikethroughStyle {
                     thickness: px(1.),
                     color: Some(color),
                 }),

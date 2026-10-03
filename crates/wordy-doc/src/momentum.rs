@@ -478,6 +478,14 @@ impl Project {
         Ok(text.to_string())
     }
 
+    /// Word-level diff of version `v` against the live body: what changed
+    /// between then and now.
+    pub fn version_diff(&self, v: &Version) -> Result<Vec<crate::diff::DiffSpan>> {
+        let old = self.version_text(v)?;
+        let live = self.node(v.node)?.body()?.to_string();
+        Ok(crate::diff::word_diff(&old, &live))
+    }
+
     /// Replace the node's current body with the version's content, as one
     /// edit committed under `origin` (so the editor can undo it).
     pub fn restore_version(&self, v: &Version, origin: &str) -> Result<()> {

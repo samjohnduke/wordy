@@ -11,6 +11,7 @@
 
 use loro::{LoroText, LoroValue, TextDelta};
 use std::collections::HashMap;
+use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::schema::block as block_keys;
@@ -143,6 +144,8 @@ pub struct Marks {
     pub link: Option<String>,
     /// Comment id (key into the project's `comments` map).
     pub comment: Option<String>,
+    /// Version-compare marker; only ever set on diff documents.
+    pub diff: Option<crate::diff::Diff>,
 }
 
 impl Marks {
@@ -171,6 +174,7 @@ impl Marks {
                 }
                 "link" => m.link = v.as_string().map(|s| s.to_string()),
                 "comment" => m.comment = v.as_string().map(|s| s.to_string()),
+                "diff" => m.diff = v.as_string().and_then(|s| crate::diff::Diff::parse(s)),
                 _ => {}
             }
         }
@@ -358,6 +362,42 @@ impl Paragraphs {
 
     pub fn get(&self, ix: usize) -> Option<&Paragraph> {
         self.paras.get(ix)
+    }
+
+    /// Every explicit link as a code-point range plus its target id string.
+    /// Adjacent runs linking to the same target (bold inside a link, say)
+    /// are merged into one span.
+    pub fn link_spans(&self) -> Vec<(Range<usize>, String)> {
+        let mut out: Vec<(Range<usize>, String)> = Vec::new();
+        for p in &self.paras {
+            let mut cp = p.start_cp;
+            for r in &p.runs {
+                let n = r.text.chars().count();
+                if let Some(l) = &r.marks.link {
+                    if let Some((last, id)) = out.last_mut() {
+                        if *id == *l && last.end == cp {
+                            last.end = cp + n;
+                            cp += n;
+                            continue;
+                        }
+                    }
+                    out.push((cp..cp + n, l.clone()));
+                }
+                cp += n;
+            }
+        }
+        out
+    }
+
+    /// The text within a code-point range (never crosses a newline).
+    pub fn slice_cp(&self, r: Range<usize>) -> String {
+        let pos = self.locate(r.start);
+        let Some(p) = self.paras.get(pos.para) else {
+            return String::new();
+        };
+        let start = r.start.saturating_sub(p.start_cp);
+        let end = r.end.saturating_sub(p.start_cp).min(p.len_cp);
+        p.text.chars().skip(start).take(end.saturating_sub(start)).collect()
     }
 
     pub fn last(&self) -> Option<&Paragraph> {

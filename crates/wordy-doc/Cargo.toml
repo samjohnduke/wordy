@@ -13,6 +13,7 @@ thiserror.workspace = true
 unicode-segmentation.workspace = true
 ulid.workspace = true
 aho-corasick.workspace = true
+diff = "0.1"
 chrono.workspace = true
 dirs.workspace = true
 tracing.workspace = true

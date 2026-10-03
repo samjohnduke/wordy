@@ -37,6 +37,8 @@ pub enum EditorPanelEvent {
     MetaChanged,
     /// Show a saved version read-only in the reference pane.
     ViewVersion(Version),
+    /// Filter the Manuscript sidebar to scenes mentioning an entity.
+    FilterMentions(TreeID),
 }
 
 struct FindBar {
@@ -131,6 +133,7 @@ impl EditorPanel {
                     id: *id,
                     navigate: false,
                 }),
+                SheetEvent::FilterMentions(id) => cx.emit(EditorPanelEvent::FilterMentions(*id)),
             }));
             sheet
         });

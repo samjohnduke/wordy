@@ -14,7 +14,7 @@ use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Sizable as _, TitleB
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use wordy_doc::momentum::today;
-use wordy_doc::{storage, Space, TreeID, Version};
+use wordy_doc::{storage, NodeKind, Space, TreeID, Version, BULK_ORIGIN};
 use wordy_editor::SpellState;
 
 use crate::app::{
@@ -260,6 +260,7 @@ impl Workspace {
             SidebarEvent::Removed(id) => this.close_node(*id, window, cx),
             SidebarEvent::FocusEditor => this.focus_active(window, cx),
             SidebarEvent::LayoutChanged => this.layout_changed(cx),
+            SidebarEvent::Renamed { id, from, to } => this.on_renamed(*id, from.clone(), to.clone(), window, cx),
         });
         let ref_sub = cx.subscribe_in(
             &reference,
@@ -448,6 +449,95 @@ impl Workspace {
         }
     }
 
+    /// Show only the Manuscript scenes that mention `entity` in the sidebar.
+    fn filter_mentions(&mut self, entity: TreeID, cx: &mut Context<Self>) {
+        self.set_space(Space::Manuscript, cx);
+        self.sidebar.update(cx, |s, cx| s.set_mention_filter(Some(entity), cx));
+        cx.notify();
+    }
+
+    /// An entity was renamed: offer to rewrite the text under its explicit
+    /// links so the prose follows the new name.
+    fn on_renamed(&mut self, id: TreeID, from: String, to: String, window: &mut Window, cx: &mut Context<Self>) {
+        let is_entity = self
+            .project
+            .project
+            .node(id)
+            .map(|n| n.kind() == NodeKind::Entity)
+            .unwrap_or(false);
+        if !is_entity || from.trim().is_empty() || to.trim().is_empty() {
+            return;
+        }
+        let hits = self.project.project.linked_mentions(id, &from);
+        let n: usize = hits.iter().map(|(_, c)| c).sum();
+        if n == 0 {
+            return;
+        }
+        let scenes = hits.len();
+        let message = format!(
+            "Also replace {n} linked mention{} in the text?",
+            if n == 1 { "" } else { "s" }
+        );
+        let detail = format!(
+            "“{from}” becomes “{to}” under its links, in {scenes} scene{}.",
+            if scenes == 1 { "" } else { "s" }
+        );
+        let rx = window.prompt(
+            PromptLevel::Info,
+            &message,
+            Some(&detail),
+            &["Replace", "Keep text"],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if rx.await != Ok(0) {
+                return;
+            }
+            this.update(cx, |ws, cx| ws.replace_linked_mentions(id, &hits, &from, &to, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Rewrite linked mentions scene by scene: through the open editor where
+    /// there is one (so it lands on that tab's undo stack), directly on the
+    /// document otherwise.
+    fn replace_linked_mentions(
+        &mut self,
+        entity: TreeID,
+        hits: &[(TreeID, usize)],
+        from: &str,
+        to: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let mut changed = 0;
+        for (node, _) in hits {
+            let node = *node;
+            let editor = self.editors.get(&node).and_then(|p| p.read(cx).editor().cloned());
+            match editor {
+                Some(editor) => {
+                    changed += editor.update(cx, |e, cx| e.replace_linked_mentions(entity, from, to, cx));
+                }
+                None => match self
+                    .project
+                    .project
+                    .replace_linked_mentions(node, entity, from, to, BULK_ORIGIN)
+                {
+                    Ok(n) => {
+                        changed += n;
+                        if n > 0 {
+                            self.dirty_nodes.insert(node);
+                        }
+                    }
+                    Err(e) => tracing::error!("replace linked mentions: {e:#}"),
+                },
+            }
+            self.reference.update(cx, |r, cx| r.refresh_if(node, cx));
+        }
+        tracing::info!("renamed {changed} linked mention(s) of {entity}");
+        self.on_edited(cx);
+    }
+
     /// Show a saved version in the reference pane.
     fn view_version(&mut self, v: Version, window: &mut Window, cx: &mut Context<Self>) {
         self.reference.update(cx, |r, cx| r.pin_version(v, cx));
@@ -634,6 +724,7 @@ impl Workspace {
                     this.on_edited(cx);
                 }
                 EditorPanelEvent::ViewVersion(v) => this.view_version(v.clone(), window, cx),
+                EditorPanelEvent::FilterMentions(id) => this.filter_mentions(*id, cx),
                 EditorPanelEvent::Activated => {
                     this.active = Some(id);
                     this.sidebar.update(cx, |s, cx| s.select(Some(id), cx));
@@ -1200,6 +1291,10 @@ impl Workspace {
             panel.update(cx, |p, cx| p.set_link_targets(targets.clone(), cx));
         }
         self.reference.update(cx, |r, cx| r.set_link_targets(targets, cx));
+        self.sidebar.update(cx, |s, cx| {
+            s.refresh_filter();
+            cx.notify();
+        });
         self.dock.update(cx, |_, cx| cx.notify());
         self.on_edited(cx);
     }
@@ -1232,6 +1327,10 @@ impl Workspace {
                 for id in std::mem::take(&mut self.dirty_nodes) {
                     self.project.update_index_node(id);
                 }
+                self.sidebar.update(cx, |s, cx| {
+                    s.refresh_filter();
+                    cx.notify();
+                });
                 self.reference.update(cx, |_, cx| cx.notify());
                 for panel in self.editors.values() {
                     panel.update(cx, |_, cx| cx.notify());

@@ -8,7 +8,7 @@ use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Sizable as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use wordy_doc::templates;
-use wordy_doc::{NodeKind, TreeID, Version};
+use wordy_doc::{diff, DiffStats, NodeKind, TreeID, Version};
 use wordy_editor::{EditorEvent, ProseEditor};
 
 use crate::app::SharedProject;
@@ -26,6 +26,9 @@ struct Pinned {
     id: TreeID,
     /// Set when showing a saved version of `id` instead of its live body.
     version: Option<Version>,
+    /// Version view: highlight word-level changes against the live body.
+    compare: bool,
+    stats: Option<DiffStats>,
     editor: Entity<ProseEditor>,
     _sub: Subscription,
 }
@@ -49,9 +52,29 @@ impl ReferencePanel {
         self.pinned.as_ref().filter(|p| p.version.is_none()).map(|p| p.id)
     }
 
-    /// Show a saved version of a body, read-only, with a Restore button.
+    /// Show a saved version of a body, read-only, with a Restore button and
+    /// word-level diff highlighting against the live body.
     pub fn pin_version(&mut self, v: Version, cx: &mut Context<Self>) {
-        let (doc, text) = match self.project.project.version_doc(&v) {
+        let compare = self
+            .pinned
+            .as_ref()
+            .filter(|p| p.version.is_some())
+            .map(|p| p.compare)
+            .unwrap_or(true);
+        self.show_version(v, compare, cx);
+    }
+
+    fn show_version(&mut self, v: Version, compare: bool, cx: &mut Context<Self>) {
+        let mut stats = None;
+        let built = if compare {
+            self.project.project.version_diff(&v).map(|spans| {
+                stats = Some(diff::stats(&spans));
+                diff::diff_doc(&spans)
+            })
+        } else {
+            self.project.project.version_doc(&v)
+        };
+        let (doc, text) = match built {
             Ok(x) => x,
             Err(e) => {
                 tracing::error!("version view: {e:#}");
@@ -76,10 +99,19 @@ impl ReferencePanel {
         self.pinned = Some(Pinned {
             id: v.node,
             version: Some(v),
+            compare,
+            stats,
             editor,
             _sub: sub,
         });
         cx.notify();
+    }
+
+    fn toggle_compare(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = self.pinned.as_ref() else { return };
+        let Some(v) = p.version.clone() else { return };
+        let compare = !p.compare;
+        self.show_version(v, compare, cx);
     }
 
     pub fn pin(&mut self, id: TreeID, cx: &mut Context<Self>) {
@@ -111,6 +143,8 @@ impl ReferencePanel {
         self.pinned = Some(Pinned {
             id,
             version: None,
+            compare: false,
+            stats: None,
             editor,
             _sub: sub,
         });
@@ -124,14 +158,21 @@ impl ReferencePanel {
 
     /// Re-read the pinned body and metadata (edited in another tab).
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        if let Some(p) = self.pinned.as_ref().filter(|p| p.version.is_none()) {
-            p.editor.update(cx, |e, cx| e.reload(cx));
+        let Some(p) = self.pinned.as_ref() else {
+            cx.notify();
+            return;
+        };
+        match p.version.clone() {
+            None => p.editor.update(cx, |e, cx| e.reload(cx)),
+            // The live side of the comparison moved: rebuild the diff.
+            Some(v) if p.compare => self.show_version(v, true, cx),
+            Some(_) => {}
         }
         cx.notify();
     }
 
     pub fn refresh_if(&mut self, id: TreeID, cx: &mut Context<Self>) {
-        if self.pinned_id() == Some(id) {
+        if self.pinned.as_ref().map(|p| p.id) == Some(id) {
             self.refresh(cx);
         }
     }
@@ -159,8 +200,29 @@ impl ReferencePanel {
                         .to_string()
                 })
                 .unwrap_or_default();
-            let words = pinned.editor.read(cx).word_count();
+            let words = match pinned.stats {
+                Some(_) => self.project.project.node(id).map(|n| n.word_count()).unwrap_or(0),
+                None => pinned.editor.read(cx).word_count(),
+            };
             let restore = v.clone();
+            let compare = pinned.compare;
+            let changes: Option<AnyElement> = pinned.stats.map(|s| {
+                let chip = |label: String, color: Hsla| div().px_1().rounded_sm().bg(color).text_xs().child(label);
+                h_flex()
+                    .flex_wrap()
+                    .gap_1()
+                    .items_center()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(chip(format!("+{} added", s.inserted), hsla(0.36, 0.7, 0.5, 0.35)))
+                    .child(chip(format!("−{} removed", s.deleted), hsla(0.0, 0.8, 0.55, 0.3)))
+                    .child(if s.inserted == 0 && s.deleted == 0 {
+                        "Live body matches this version."
+                    } else {
+                        "Green: live only. Red: version only."
+                    })
+                    .into_any_element()
+            });
             let header = v_flex()
                 .gap_1()
                 .px_3()
@@ -176,6 +238,14 @@ impl ReferencePanel {
                         .child(
                             h_flex()
                                 .gap_0p5()
+                                .child(
+                                    Button::new("ref-compare")
+                                        .ghost()
+                                        .xsmall()
+                                        .label(if compare { "Hide changes" } else { "Compare" })
+                                        .tooltip("Highlight word-level differences against the live body")
+                                        .on_click(cx.listener(|this, _, _, cx| this.toggle_compare(cx))),
+                                )
                                 .child(
                                     Button::new("ref-restore")
                                         .primary()
@@ -196,12 +266,12 @@ impl ReferencePanel {
                                 ),
                         ),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(format!("Version · {} · {when} · {words} words", v.label)),
-                );
+                .child(div().text_xs().text_color(muted).child(format!(
+                    "Version · {} · {when} · {words} words{}",
+                    v.label,
+                    if compare { " live" } else { "" }
+                )))
+                .children(changes);
             return v_flex()
                 .size_full()
                 .child(header)
