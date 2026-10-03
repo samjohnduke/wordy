@@ -6,3 +6,16 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+dirs.workspace = true
+gethostname = "1.1.0"
+hmac = "0.13.0"
+mdns-sd = "0.21.4"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2 = "0.11.0"
+tracing.workspace = true
+ulid.workspace = true
+wordy-doc = { version = "0.1.0", path = "../wordy-doc" }
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -2,6 +2,7 @@
 
 mod app;
 mod panels;
+mod sync;
 mod workspace;
 
 use std::borrow::Cow;
@@ -14,15 +15,13 @@ fn main() {
         )
         .init();
 
-    gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
-        .run(|cx| {
-            load_fonts(cx);
-            gpui_kit::init(cx);
-            wordy_editor::init(cx);
-            app::init(cx);
-            app::open_main_window(cx);
-        });
+    gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(|cx| {
+        load_fonts(cx);
+        gpui_kit::init(cx);
+        wordy_editor::init(cx);
+        app::init(cx);
+        app::open_main_window(cx);
+    });
 }
 
 /// The one bundled serif, used by the editor and (later) the PDF export.

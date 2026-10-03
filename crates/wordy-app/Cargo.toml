@@ -19,3 +19,5 @@ wordy-index = { path = "../wordy-index" }
 mime_guess = "2"
 dirs.workspace = true
 wordy-export = { path = "../wordy-export" }
+futures = "0.3.34"
+wordy-sync = { version = "0.1.0", path = "../wordy-sync" }

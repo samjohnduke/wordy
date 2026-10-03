@@ -32,6 +32,7 @@ impl Project {
         schema::configure_text_styles(&doc);
         let project = Self { doc, dir: None };
         project.init_schema(name)?;
+        project.ensure_id()?;
         Ok(project)
     }
 
@@ -58,6 +59,11 @@ impl Project {
         doc.import(&bytes).map_err(|e| anyhow!("import snapshot: {e}"))?;
         let p = Self { doc, dir: Some(dir.to_path_buf()) };
         p.ensure_roots()?;
+        if p.ensure_id()? {
+            // A project from before ids: write it down now so a copy made
+            // before the next edit carries the same id.
+            p.save()?;
+        }
         Ok(p)
     }
 
@@ -119,7 +125,9 @@ impl Project {
         for space in [Space::Manuscript, Space::World, Space::Notes] {
             for kind in [NodeKind::Root, NodeKind::Trash] {
                 let roots = self.roots_matching(space, kind);
-                let Some((keep, extras)) = roots.split_first() else { continue };
+                let Some((keep, extras)) = roots.split_first() else {
+                    continue;
+                };
                 for extra in extras {
                     for child in tree.children(*extra).unwrap_or_default() {
                         tree.mov(child, *keep)?;
@@ -177,9 +185,27 @@ impl Project {
         self.doc.get_map(schema::SESSIONS)
     }
     pub fn settings_map(&self) -> LoroMap {
-        self.project_map()
-            .ensure_mergeable_map(schema::project::SETTINGS)
-            .expect("settings map")
+        self.project_map().ensure_mergeable_map(schema::project::SETTINGS).expect("settings map")
+    }
+
+    /// The project's stable id (a ulid minted when it was first opened by a
+    /// version that knows about ids). Copies made by zipping or syncing share it.
+    pub fn id(&self) -> String {
+        match self.project_map().get(schema::project::ID) {
+            Some(ValueOrContainer::Value(LoroValue::String(s))) => s.to_string(),
+            _ => String::new(),
+        }
+    }
+
+    /// Mint an id if this project predates ids. Commits under `meta`.
+    /// Returns whether one was minted.
+    fn ensure_id(&self) -> Result<bool> {
+        if !self.id().is_empty() {
+            return Ok(false);
+        }
+        self.project_map().insert(schema::project::ID, ulid::Ulid::new().to_string())?;
+        self.commit_meta();
+        Ok(true)
     }
 
     pub fn name(&self) -> String {
@@ -235,10 +261,7 @@ impl Project {
 
     /// Create a node right after `sibling`, in the same parent.
     pub fn create_node_after(&self, sibling: TreeID, kind: NodeKind, title: &str) -> Result<TreeID> {
-        let parent = self
-            .node(sibling)?
-            .parent()
-            .ok_or_else(|| anyhow!("sibling has no parent"))?;
+        let parent = self.node(sibling)?.parent().ok_or_else(|| anyhow!("sibling has no parent"))?;
         let id = self.create_node(parent, kind, title)?;
         self.tree().mov_after(id, sibling)?;
         Ok(id)
@@ -461,11 +484,7 @@ mod tests {
         let mut runs = Vec::new();
         for d in delta {
             if let loro::TextDelta::Insert { insert, attributes } = d {
-                let mut keys: Vec<String> = attributes
-                    .unwrap_or_default()
-                    .keys()
-                    .cloned()
-                    .collect();
+                let mut keys: Vec<String> = attributes.unwrap_or_default().keys().cloned().collect();
                 keys.sort();
                 runs.push((insert, keys));
             }

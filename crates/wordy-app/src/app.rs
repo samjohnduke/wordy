@@ -127,7 +127,9 @@ impl ProjectHandle {
     }
 
     pub fn load_dictionary(&self) -> Vec<String> {
-        let Some(path) = self.dictionary_path() else { return Vec::new() };
+        let Some(path) = self.dictionary_path() else {
+            return Vec::new();
+        };
         match std::fs::read_to_string(&path) {
             Ok(s) => s.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
@@ -139,7 +141,9 @@ impl ProjectHandle {
     }
 
     pub fn append_dictionary_word(&self, word: &str) {
-        let Some(path) = self.dictionary_path() else { return };
+        let Some(path) = self.dictionary_path() else {
+            return;
+        };
         let mut words = self.load_dictionary();
         if words.iter().any(|w| w == word) {
             return;
@@ -178,8 +182,20 @@ pub fn init(cx: &mut App) {
     Theme::sync_system_appearance(None, cx);
 }
 
-/// Open the most recent project under `~/Wordy`, or create "My Novel".
+/// Open the project folder given on the command line (`wordy <dir>`,
+/// created if it does not exist yet), else the most recent project under
+/// `~/Wordy`, else create "My Novel".
 pub fn open_or_create_default_project() -> Result<Project> {
+    if let Some(arg) = std::env::args_os().nth(1) {
+        let dir = PathBuf::from(arg);
+        if storage::snapshot_path(&dir).exists() {
+            tracing::info!("opening {}", dir.display());
+            return Project::open(&dir);
+        }
+        let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("My Novel").to_string();
+        tracing::info!("creating {}", dir.display());
+        return Project::create(&dir, &name);
+    }
     let root = storage::projects_root();
     std::fs::create_dir_all(&root)?;
     let mut projects = storage::list_projects(&root);
@@ -212,9 +228,9 @@ pub fn open_main_window(cx: &mut App) {
         ..TitleBar::window_options()
     };
 
-    if let Err(e) = gpui_kit::open_window(options, cx, move |window, cx| {
-        cx.new(|cx| Workspace::new(shared, window, cx))
-    }) {
+    if let Err(e) =
+        gpui_kit::open_window(options, cx, move |window, cx| cx.new(|cx| Workspace::new(shared, window, cx)))
+    {
         tracing::error!("open window: {e:#}");
         cx.quit();
     }

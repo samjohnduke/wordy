@@ -1,6 +1,7 @@
 //! Home tab: dashboard (goals, streak, pace), reports (words per day),
-//! tasks, the placeholder scan, and export.
+//! tasks, the placeholder scan, export, and LAN sync.
 
+use std::net::{SocketAddr, ToSocketAddrs as _};
 use std::path::PathBuf;
 
 use gpui_kit::base::StyledExt as _;
@@ -10,7 +11,7 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dock::Panel;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::progress::Progress;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Disableable as _, Sizable as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use wordy_doc::chrono::{Duration, NaiveDate};
@@ -20,6 +21,7 @@ use wordy_doc::{storage, Goals, NodeKind, Space, Status, TreeID};
 use wordy_export::{CompileOptions, Format};
 
 use crate::app::SharedProject;
+use crate::sync::{SyncManager, SyncStatus};
 
 pub enum HomeEvent {
     /// Open a node in an editor tab.
@@ -41,10 +43,11 @@ enum Page {
     Tasks,
     Placeholders,
     Export,
+    Sync,
 }
 
 impl Page {
-    const ALL: [Page; 5] = [Page::Dashboard, Page::Reports, Page::Tasks, Page::Placeholders, Page::Export];
+    const ALL: [Page; 6] = [Page::Dashboard, Page::Reports, Page::Tasks, Page::Placeholders, Page::Export, Page::Sync];
     fn label(self) -> &'static str {
         match self {
             Page::Dashboard => "Dashboard",
@@ -52,6 +55,7 @@ impl Page {
             Page::Tasks => "Tasks",
             Page::Placeholders => "Placeholders",
             Page::Export => "Export",
+            Page::Sync => "Sync",
         }
     }
     fn id(self) -> &'static str {
@@ -61,6 +65,7 @@ impl Page {
             Page::Tasks => "home-tasks",
             Page::Placeholders => "home-placeholders",
             Page::Export => "home-export",
+            Page::Sync => "home-sync",
         }
     }
 }
@@ -86,6 +91,7 @@ struct ExportStatus {
 
 pub struct HomePanel {
     project: SharedProject,
+    sync: Entity<SyncManager>,
     page: Page,
     daily: Entity<InputState>,
     manuscript: Entity<InputState>,
@@ -96,12 +102,16 @@ pub struct HomePanel {
     export_status: Option<ExportStatus>,
     exporting: bool,
     _export_task: Option<Task<()>>,
+    sync_name: Entity<InputState>,
+    sync_code: Entity<InputState>,
+    sync_addr: Entity<InputState>,
+    sync_addr_error: Option<String>,
     pub focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
 
 impl HomePanel {
-    pub fn new(project: SharedProject, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(project: SharedProject, sync: Entity<SyncManager>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let goals = project.project.goals();
         let opt = |v: Option<i64>| v.map(|x| x.to_string()).unwrap_or_default();
         let daily = cx.new(|cx| InputState::new(window, cx).default_value(opt(goals.daily)).placeholder("words / day"));
@@ -161,8 +171,38 @@ impl HomePanel {
             }));
         }
 
+        let (peer_name, pairing_code) = {
+            let m = sync.read(cx);
+            (m.config.peer_name.clone(), m.config.pairing_code.clone())
+        };
+        let sync_name =
+            cx.new(|cx| InputState::new(window, cx).default_value(peer_name).placeholder("This machine's name"));
+        let sync_code = cx.new(|cx| {
+            InputState::new(window, cx).default_value(pairing_code).placeholder("Same code on both machines")
+        });
+        let sync_addr = cx.new(|cx| InputState::new(window, cx).placeholder("host:port, e.g. 192.168.1.20:40123"));
+        subs.push(cx.subscribe_in(&sync_name, window, |this, input, ev: &InputEvent, _, cx| {
+            if matches!(ev, InputEvent::Change) {
+                let v = input.read(cx).value().to_string();
+                this.sync.update(cx, |m, cx| m.set_peer_name(&v, cx));
+            }
+        }));
+        subs.push(cx.subscribe_in(&sync_code, window, |this, input, ev: &InputEvent, _, cx| {
+            if matches!(ev, InputEvent::Change) {
+                let v = input.read(cx).value().to_string();
+                this.sync.update(cx, |m, cx| m.set_pairing_code(&v, cx));
+            }
+        }));
+        subs.push(cx.subscribe_in(&sync_addr, window, |this, _, ev: &InputEvent, _, cx| {
+            if matches!(ev, InputEvent::PressEnter { .. }) {
+                this.sync_manual(cx);
+            }
+        }));
+        subs.push(cx.observe(&sync, |_, _, cx| cx.notify()));
+
         Self {
             project,
+            sync,
             page: Page::Dashboard,
             daily,
             manuscript,
@@ -173,6 +213,10 @@ impl HomePanel {
             export_status: None,
             exporting: false,
             _export_task: None,
+            sync_name,
+            sync_code,
+            sync_addr,
+            sync_addr_error: None,
             focus: cx.focus_handle(),
             _subs: subs,
         }
@@ -211,7 +255,12 @@ impl HomePanel {
         let opts = self.compile_options(cx);
         let compiled = wordy_export::compile(&self.project.project, &opts);
         if compiled.chapters.is_empty() {
-            self.set_status("Nothing to export: the manuscript has no included scenes with text.".into(), None, false, cx);
+            self.set_status(
+                "Nothing to export: the manuscript has no included scenes with text.".into(),
+                None,
+                false,
+                cx,
+            );
             return;
         }
         let name = format!("{}.{}", wordy_export::file_stem(&compiled.title), format.extension());
@@ -231,7 +280,10 @@ impl HomePanel {
                     return;
                 }
                 Ok(Err(e)) => {
-                    this.update(cx, |t, cx| t.set_status(format!("Could not open a save dialog: {e:#}"), None, false, cx)).ok();
+                    this.update(cx, |t, cx| {
+                        t.set_status(format!("Could not open a save dialog: {e:#}"), None, false, cx)
+                    })
+                    .ok();
                     return;
                 }
             };
@@ -270,7 +322,8 @@ impl HomePanel {
         if let Err(e) = self.project.project.save() {
             tracing::error!("save before backup: {e:#}");
         }
-        let name = format!("{}-{}.zip", wordy_export::file_stem(&self.project.project.name()), today().format("%Y-%m-%d"));
+        let name =
+            format!("{}-{}.zip", wordy_export::file_stem(&self.project.project.name()), today().format("%Y-%m-%d"));
         let rx = cx.prompt_for_new_path(&self.export_dir(), Some(&name));
         self.exporting = true;
         self.export_status = None;
@@ -279,7 +332,10 @@ impl HomePanel {
             let path = match rx.await {
                 Ok(Ok(Some(path))) => path,
                 Ok(Err(e)) => {
-                    this.update(cx, |t, cx| t.set_status(format!("Could not open a save dialog: {e:#}"), None, false, cx)).ok();
+                    this.update(cx, |t, cx| {
+                        t.set_status(format!("Could not open a save dialog: {e:#}"), None, false, cx)
+                    })
+                    .ok();
                     return;
                 }
                 _ => {
@@ -292,7 +348,8 @@ impl HomePanel {
                 }
             };
             let out = path.clone();
-            let result = cx.background_executor().spawn(async move { wordy_export::archive::zip_project(&dir, &out) }).await;
+            let result =
+                cx.background_executor().spawn(async move { wordy_export::archive::zip_project(&dir, &out) }).await;
             this.update(cx, |t, cx| match result {
                 Ok(n) => t.set_status(format!("Backed up {n} files to {}", path.display()), Some(path), true, cx),
                 Err(e) => t.set_status(format!("Backup failed: {e:#}"), None, false, cx),
@@ -323,7 +380,8 @@ impl HomePanel {
                     .checked(scene_titles)
                     .label("Show scene titles (otherwise scenes are separated by #)")
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                        if let Err(e) = this.project.project.settings_map().insert(export_keys::SCENE_TITLES, *checked) {
+                        if let Err(e) = this.project.project.settings_map().insert(export_keys::SCENE_TITLES, *checked)
+                        {
                             tracing::error!("export setting: {e:#}");
                         }
                         this.changed(cx);
@@ -373,21 +431,151 @@ impl HomePanel {
         let mut status = v_flex().gap_2();
         if let Some(st) = &self.export_status {
             let color = if st.ok { theme.foreground } else { theme.danger };
-            let mut row = h_flex().items_center().gap_3().text_sm().child(div().text_color(color).child(st.message.clone()));
+            let mut row =
+                h_flex().items_center().gap_3().text_sm().child(div().text_color(color).child(st.message.clone()));
             if let Some(path) = st.path.clone() {
                 let p2 = path.clone();
                 row = row
-                    .child(Button::new("export-reveal").ghost().xsmall().label("Show in folder").on_click(
-                        move |_, _, cx| cx.reveal_path(&path),
-                    ))
-                    .child(Button::new("export-open").ghost().xsmall().label("Open").on_click(move |_, _, cx| {
-                        cx.open_with_system(&p2)
-                    }));
+                    .child(
+                        Button::new("export-reveal")
+                            .ghost()
+                            .xsmall()
+                            .label("Show in folder")
+                            .on_click(move |_, _, cx| cx.reveal_path(&path)),
+                    )
+                    .child(
+                        Button::new("export-open")
+                            .ghost()
+                            .xsmall()
+                            .label("Open")
+                            .on_click(move |_, _, cx| cx.open_with_system(&p2)),
+                    );
             }
             status = status.child(row);
         }
 
         v_flex().gap_3().w_full().child(manuscript).child(export_box).child(backup_box).child(status).into_any_element()
+    }
+
+    /// Sync with the address typed into the manual field.
+    fn sync_manual(&mut self, cx: &mut Context<Self>) {
+        let text = self.sync_addr.read(cx).value().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let addr: Option<SocketAddr> = text.parse().ok().or_else(|| text.to_socket_addrs().ok()?.next());
+        match addr {
+            Some(addr) => {
+                self.sync_addr_error = None;
+                self.sync.update(cx, |m, cx| m.sync_with(addr, &text, cx));
+            }
+            None => self.sync_addr_error = Some(format!("“{text}” is not a host:port address")),
+        }
+        cx.notify();
+    }
+
+    fn render_sync(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let m = self.sync.read(cx);
+        let busy = m.busy();
+        let ready = m.config.ready();
+        let my_project = m.project_id();
+        let port = m.port();
+        let peers = m.peers.clone();
+        let status = m.status.clone();
+        let discovery_error = m.discovery_error.clone();
+
+        let field = |label: &str, input: &Entity<InputState>| {
+            h_flex()
+                .items_center()
+                .gap_3()
+                .child(div().w(px(90.)).text_xs().text_color(muted).child(label.to_string()))
+                .child(div().w(px(360.)).child(Input::new(input).small()))
+        };
+        let listening = match port {
+            Some(p) => format!("Listening on port {p}. Other copies of this project on the network appear below."),
+            None => "The sync server could not start; see the log.".to_string(),
+        };
+        let this_machine = Self::section("This machine", cx)
+            .child(field("Name", &self.sync_name))
+            .child(field("Pairing code", &self.sync_code))
+            .child(div().text_xs().text_color(muted).child(listening))
+            .child(div().text_xs().text_color(muted).child(
+                "Type the same pairing code on both machines once. Sync merges edits made on both sides, copies missing attachments both ways and unions the custom dictionaries.",
+            ));
+
+        let mut peer_box = Self::section("Peers", cx);
+        if let Some(err) = discovery_error {
+            peer_box = peer_box.child(div().text_xs().text_color(theme.danger).child(err));
+        }
+        if peers.is_empty() {
+            peer_box = peer_box.child(div().text_sm().text_color(muted).child(
+                "No other Wordy found yet. Open the same project on the other machine (copy the folder or a backup zip first).",
+            ));
+        }
+        for (i, peer) in peers.into_iter().enumerate() {
+            let same = peer.project_id == my_project;
+            let addr = peer.addr;
+            let name = peer.name.clone();
+            let mut row = h_flex()
+                .items_center()
+                .gap_3()
+                .child(div().text_sm().font_semibold().w(px(200.)).child(name.clone()))
+                .child(div().text_xs().text_color(muted).w(px(180.)).child(addr.to_string()));
+            if same {
+                row = row.child(
+                    Button::new(ElementId::Name(format!("sync-peer-{i}").into()))
+                        .primary()
+                        .small()
+                        .label("Sync")
+                        .disabled(busy || !ready)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let name = name.clone();
+                            this.sync.update(cx, |m, cx| m.sync_with(addr, &name, cx));
+                        })),
+                );
+            } else {
+                row = row.child(div().text_xs().text_color(muted).child("different project"));
+            }
+            peer_box = peer_box.child(row);
+        }
+        let mut manual = h_flex()
+            .items_center()
+            .gap_3()
+            .child(div().w(px(90.)).text_xs().text_color(muted).child("By address"))
+            .child(div().w(px(360.)).child(Input::new(&self.sync_addr).small()))
+            .child(
+                Button::new("sync-manual")
+                    .small()
+                    .label("Connect")
+                    .disabled(busy || !ready)
+                    .on_click(cx.listener(|this, _, _, cx| this.sync_manual(cx))),
+            );
+        if let Some(err) = &self.sync_addr_error {
+            manual = manual.child(div().text_xs().text_color(theme.danger).child(err.clone()));
+        }
+        peer_box = peer_box.child(manual);
+
+        let status_line: Option<(String, bool)> = match status {
+            SyncStatus::Idle => None,
+            SyncStatus::Busy(s) => Some((s, true)),
+            SyncStatus::Done { peer, summary, when } => {
+                Some((format!("Synced with {peer} at {when}: {summary}."), true))
+            }
+            SyncStatus::Failed(e) => Some((format!("Sync failed: {e}"), false)),
+        };
+        let mut status_box = v_flex().gap_2();
+        if let Some((text, ok)) = status_line {
+            let color = if ok { theme.foreground } else { theme.danger };
+            status_box = status_box.child(div().text_sm().text_color(color).child(text));
+        }
+        if !ready {
+            status_box = status_box
+                .child(div().text_xs().text_color(theme.danger).child("Enter a pairing code before syncing."));
+        }
+
+        v_flex().gap_3().w_full().child(this_machine).child(peer_box).child(status_box).into_any_element()
     }
 
     fn changed(&mut self, cx: &mut Context<Self>) {
@@ -761,7 +949,16 @@ impl HomePanel {
                     .hover(|s| s.bg(theme.secondary))
                     .text_sm()
                     .child(div().w(px(160.)).flex_shrink_0().font_semibold().child(h.marker.clone()))
-                    .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_color(muted).child(h.snippet.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_color(muted)
+                            .child(h.snippet.clone()),
+                    )
                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(HomeEvent::Reveal { id, offset, len }))),
             );
         }
@@ -827,20 +1024,16 @@ impl Render for HomePanel {
             Page::Tasks => self.render_tasks(cx),
             Page::Placeholders => self.render_placeholders(cx),
             Page::Export => self.render_export(cx),
+            Page::Sync => self.render_sync(cx),
         };
-        v_flex()
-            .size_full()
-            .track_focus(&self.focus)
-            .bg(cx.theme().background)
-            .child(tabs)
-            .child(
-                div()
-                    .id("home-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(div().max_w(px(820.)).w_full().mx_auto().p_4().child(body)),
-            )
+        v_flex().size_full().track_focus(&self.focus).bg(cx.theme().background).child(tabs).child(
+            div()
+                .id("home-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(div().max_w(px(820.)).w_full().mx_auto().p_4().child(body)),
+        )
     }
 }
 

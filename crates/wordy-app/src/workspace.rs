@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::base::dock::PanelId;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::dock::{DockArea, DockLayout, DockPlacement, DockSkin, PanelStyle, panel_handle};
+use gpui_kit::component::dock::{panel_handle, DockArea, DockLayout, DockPlacement, DockSkin, PanelStyle};
 use gpui_kit::component::status_bar::StatusBar;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, TitleBar, h_flex, v_flex};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Sizable as _, TitleBar};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use wordy_doc::momentum::today;
@@ -20,6 +20,7 @@ use crate::panels::editor::{EditorPanel, EditorPanelEvent};
 use crate::panels::home::{HomeEvent, HomePanel};
 use crate::panels::reference::{ReferenceEvent, ReferencePanel};
 use crate::panels::sidebar::{SidebarEvent, SidebarPanel};
+use crate::sync::{SyncEvent, SyncManager};
 
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(1500);
 /// Gaps between edits longer than this do not count as writing time.
@@ -33,6 +34,7 @@ pub struct Workspace {
     reference: Entity<ReferencePanel>,
     placeholder: Option<Entity<EditorPanel>>,
     home: Option<Entity<HomePanel>>,
+    sync: Entity<SyncManager>,
     editors: HashMap<TreeID, Entity<EditorPanel>>,
     active: Option<TreeID>,
     dirty: bool,
@@ -65,11 +67,7 @@ impl Workspace {
                 cx,
             );
             dock.set_dock_size(DockPlacement::Left, px(260.), window, cx);
-            dock.set_center(
-                DockLayout::tabs().panel_view(panel_handle(placeholder.clone()), cx),
-                window,
-                cx,
-            );
+            dock.set_center(DockLayout::tabs().panel_view(panel_handle(placeholder.clone()), cx), window, cx);
             dock.set_dock(
                 DockPlacement::Right,
                 DockLayout::tabs().panel_view(panel_handle(reference.clone()), cx),
@@ -91,6 +89,11 @@ impl Workspace {
             ReferenceEvent::RestoreVersion(v) => this.restore_version(v.clone(), window, cx),
         });
 
+        let sync = cx.new(|cx| SyncManager::new(project.clone(), cx));
+        let sync_sub = cx.subscribe(&sync, |this, _, ev: &SyncEvent, cx| match ev {
+            SyncEvent::Applied(outcome) => this.after_sync(outcome, cx),
+        });
+
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
 
@@ -107,6 +110,7 @@ impl Workspace {
             reference,
             placeholder: Some(placeholder),
             home: None,
+            sync,
             editors: HashMap::new(),
             active: None,
             dirty: false,
@@ -116,7 +120,7 @@ impl Workspace {
             last_saved: None,
             save_task: None,
             focus,
-            _subs: vec![sub, ref_sub],
+            _subs: vec![sub, ref_sub, sync_sub],
         }
     }
 
@@ -168,7 +172,7 @@ impl Workspace {
             home.update(cx, |_, cx| cx.notify());
             return;
         }
-        let home = cx.new(|cx| HomePanel::new(self.project.clone(), window, cx));
+        let home = cx.new(|cx| HomePanel::new(self.project.clone(), self.sync.clone(), window, cx));
         let sub = cx.subscribe_in(&home, window, |this, _, ev: &HomeEvent, window, cx| match ev {
             HomeEvent::Open(id) => this.open_node(*id, window, cx),
             HomeEvent::Reveal { id, offset, len } => {
@@ -203,6 +207,36 @@ impl Workspace {
 
     fn on_show_home(&mut self, _: &ShowHome, window: &mut Window, cx: &mut Context<Self>) {
         self.show_home(window, cx);
+    }
+
+    /// A sync imported edits from the other machine (already saved): refresh
+    /// the index, the matcher, every open editor and the spell checker.
+    fn after_sync(&mut self, outcome: &wordy_sync::SyncOutcome, cx: &mut Context<Self>) {
+        if !outcome.new_words.is_empty() {
+            SpellState::set_custom_words(cx, self.project.load_dictionary());
+        }
+        self.project.refresh_matcher();
+        self.project.rebuild_index();
+        let targets = self.project.link_targets();
+        for panel in self.editors.values() {
+            panel.update(cx, |p, cx| {
+                p.reload(cx);
+                p.set_link_targets(targets.clone(), cx);
+                p.rescan_spelling(cx);
+            });
+        }
+        self.reference.update(cx, |r, cx| {
+            r.set_link_targets(targets, cx);
+            cx.notify();
+        });
+        self.dock.update(cx, |_, cx| cx.notify());
+        self.dirty = false;
+        self.dirty_nodes.clear();
+        self.last_saved = Some(chrono_time());
+        if let Some(home) = &self.home {
+            home.update(cx, |_, cx| cx.notify());
+        }
+        cx.notify();
     }
 
     /// A word was added to the custom dictionary: persist it and re-check
@@ -442,7 +476,7 @@ impl Workspace {
                     .small()
                     .w(px(48.))
                     .label("⌂")
-                    .tooltip("Home: dashboard, reports, tasks, placeholders, export")
+                    .tooltip("Home: dashboard, reports, tasks, placeholders, export, sync")
                     .toggled(self.home.is_some() && self.active.is_none())
                     .on_click(cx.listener(|this, _, window, cx| this.show_home(window, cx))),
             )
@@ -504,11 +538,7 @@ impl Focusable for Workspace {
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let name = self.project.project.name();
-        let dir = self
-            .project
-            .dir()
-            .map(|d| d.display().to_string())
-            .unwrap_or_default();
+        let dir = self.project.dir().map(|d| d.display().to_string()).unwrap_or_default();
         let save_state = if self.dirty {
             "unsaved".to_string()
         } else {

@@ -14,6 +14,8 @@ pub const SESSIONS: &str = "sessions";
 
 // project map keys
 pub mod project {
+    /// Stable id shared by every copy of this project; sync refuses to mix two.
+    pub const ID: &str = "id";
     pub const NAME: &str = "name";
     pub const CREATED: &str = "created";
     pub const SCHEMA: &str = "schema";

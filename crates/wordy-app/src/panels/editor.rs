@@ -5,7 +5,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use wordy_doc::loro::LoroText;
@@ -81,7 +81,13 @@ impl EditorPanel {
         }
     }
 
-    pub fn open(project: SharedProject, id: TreeID, body: LoroText, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn open(
+        project: SharedProject,
+        id: TreeID,
+        body: LoroText,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let doc = project.project.doc.clone();
         let editor = cx.new(|cx| ProseEditor::new(doc, body, cx));
         editor.update(cx, |e, cx| {
@@ -275,7 +281,10 @@ impl EditorPanel {
                 Ok((png, saved)) => {
                     copy_png(png, cx);
                     let msg = match saved {
-                        Some(p) => format!("Snippet copied and saved to exports/{}", p.file_name().unwrap_or_default().to_string_lossy()),
+                        Some(p) => format!(
+                            "Snippet copied and saved to exports/{}",
+                            p.file_name().unwrap_or_default().to_string_lossy()
+                        ),
                         None => "Snippet copied to clipboard".to_string(),
                     };
                     t.notify_user(msg, cx);
@@ -288,7 +297,9 @@ impl EditorPanel {
     }
 
     fn begin_save_version(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(meta) = self.meta.as_mut() else { return };
+        let Some(meta) = self.meta.as_mut() else {
+            return;
+        };
         let seed = format!("Version {}", wordy_doc::chrono::Local::now().format("%b %-d %H:%M"));
         let input = cx.new(|cx| InputState::new(window, cx).default_value(seed).placeholder("Version label"));
         let sub = cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, _, cx| {
@@ -325,9 +336,23 @@ impl EditorPanel {
         cx.notify();
     }
 
+    /// The document changed underneath us (a sync imported edits): re-read
+    /// the body and the sheet.
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = &self.editor {
+            editor.update(cx, |e, cx| e.reload(cx));
+        }
+        if let Some(sheet) = &self.sheet {
+            sheet.update(cx, |_, cx| cx.notify());
+        }
+        cx.notify();
+    }
+
     /// Replace the body with a saved version, as an undoable edit of this editor.
     pub fn restore_version(&mut self, v: &Version, cx: &mut Context<Self>) {
-        let Some(editor) = self.editor.clone() else { return };
+        let Some(editor) = self.editor.clone() else {
+            return;
+        };
         let origin = editor.read(cx).origin().to_string();
         if let Err(e) = self.project.project.restore_version(v, &origin) {
             tracing::error!("restore version: {e:#}");
@@ -412,11 +437,7 @@ impl EditorPanel {
                     .text_color(theme.accent_foreground)
                     .child(format!("#{tag}"))
                     .child(
-                        div()
-                            .text_color(muted)
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(theme.foreground))
-                            .child("×"),
+                        div().text_color(muted).cursor_pointer().hover(|s| s.text_color(theme.foreground)).child("×"),
                     )
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| this.remove_tag(&t, cx))),
@@ -482,15 +503,17 @@ impl EditorPanel {
                             let (v1, v2, v3) = (v.clone(), v.clone(), v.clone());
                             let (w1, w2, w3) = (w.clone(), w.clone(), w.clone());
                             menu.item(PopupMenuItem::new("View").on_click(move |_, _, cx| {
-                                w1.update(cx, |_, cx| cx.emit(EditorPanelEvent::ViewVersion(v1.clone()))).ok().unwrap_or(())
+                                w1.update(cx, |_, cx| cx.emit(EditorPanelEvent::ViewVersion(v1.clone())))
+                                    .ok()
+                                    .unwrap_or(())
                             }))
                             .item(PopupMenuItem::new("Restore").on_click(move |_, _, cx| {
                                 w2.update(cx, |p, cx| p.restore_version(&v2, cx)).ok().unwrap_or(())
                             }))
                             .separator()
-                            .item(PopupMenuItem::new("Delete").on_click(move |_, _, cx| {
-                                w3.update(cx, |p, cx| p.delete_version(&v3.id, cx)).ok().unwrap_or(())
-                            }))
+                            .item(PopupMenuItem::new("Delete").on_click(
+                                move |_, _, cx| w3.update(cx, |p, cx| p.delete_version(&v3.id, cx)).ok().unwrap_or(()),
+                            ))
                         });
                     }
                     menu
@@ -572,12 +595,18 @@ impl EditorPanel {
     // ----- find / replace --------------------------------------------------
 
     fn open_find(&mut self, with_replace: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(editor) = self.editor.clone() else { return };
+        let Some(editor) = self.editor.clone() else {
+            return;
+        };
         if self.find.is_none() {
             let seed = {
                 let e = editor.read(cx);
                 let t = e.selected_text();
-                if !t.is_empty() && !t.contains('\n') { t } else { String::new() }
+                if !t.is_empty() && !t.contains('\n') {
+                    t
+                } else {
+                    String::new()
+                }
             };
             let find = cx.new(|cx| InputState::new(window, cx).default_value(seed.clone()).placeholder("Find"));
             let replace = cx.new(|cx| InputState::new(window, cx).placeholder("Replace"));
@@ -661,44 +690,35 @@ impl EditorPanel {
             (None, n) => format!("{n} matches"),
         };
         let row = |children: Vec<AnyElement>| h_flex().gap_1().items_center().children(children);
-        let mut rows = v_flex()
-            .gap_1()
-            .px_2()
-            .py_1()
-            .bg(cx.theme().secondary)
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(row(vec![
-                div().w(px(260.)).child(Input::new(&bar.find).small()).into_any_element(),
-                div()
-                    .w(px(90.))
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(status)
-                    .into_any_element(),
-                Button::new("find-prev")
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::ChevronUp)
-                    .tooltip("Previous match")
-                    .on_click(cx.listener(|this, _, _, cx| this.step(-1, cx)))
-                    .into_any_element(),
-                Button::new("find-next")
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::ChevronDown)
-                    .tooltip("Next match")
-                    .on_click(cx.listener(|this, _, _, cx| this.step(1, cx)))
-                    .into_any_element(),
-                div().flex_1().into_any_element(),
-                Button::new("find-close")
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Close)
-                    .tooltip("Close")
-                    .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx)))
-                    .into_any_element(),
-            ]));
+        let mut rows =
+            v_flex().gap_1().px_2().py_1().bg(cx.theme().secondary).border_b_1().border_color(cx.theme().border).child(
+                row(vec![
+                    div().w(px(260.)).child(Input::new(&bar.find).small()).into_any_element(),
+                    div().w(px(90.)).text_xs().text_color(cx.theme().muted_foreground).child(status).into_any_element(),
+                    Button::new("find-prev")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::ChevronUp)
+                        .tooltip("Previous match")
+                        .on_click(cx.listener(|this, _, _, cx| this.step(-1, cx)))
+                        .into_any_element(),
+                    Button::new("find-next")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::ChevronDown)
+                        .tooltip("Next match")
+                        .on_click(cx.listener(|this, _, _, cx| this.step(1, cx)))
+                        .into_any_element(),
+                    div().flex_1().into_any_element(),
+                    Button::new("find-close")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Close)
+                        .tooltip("Close")
+                        .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx)))
+                        .into_any_element(),
+                ]),
+            );
         if bar.show_replace {
             rows = rows.child(row(vec![
                 div().w(px(260.)).child(Input::new(&bar.replace).small()).into_any_element(),
@@ -774,15 +794,18 @@ impl Render for EditorPanel {
                 .children(self.sheet.clone())
                 .child(div().flex_1().min_h_0().w_full().child(editor))
                 .into_any_element(),
-            None => div().size_full().child(
-                v_flex()
-                    .size_full()
-                    .track_focus(&self.focus)
-                    .items_center()
-                    .justify_center()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Open a scene from the sidebar to start writing."),
-            ).into_any_element(),
+            None => div()
+                .size_full()
+                .child(
+                    v_flex()
+                        .size_full()
+                        .track_focus(&self.focus)
+                        .items_center()
+                        .justify_center()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Open a scene from the sidebar to start writing."),
+                )
+                .into_any_element(),
         }
     }
 }
@@ -801,7 +824,8 @@ fn copy_png(png: Vec<u8>, cx: &mut App) {
             &[("xclip", &["-selection", "clipboard", "-t", "image/png"]), ("wl-copy", &["--type", "image/png"])]
         };
         for (bin, args) in candidates {
-            let child = Command::new(bin).args(*args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+            let child =
+                Command::new(bin).args(*args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
             if let Ok(mut child) = child {
                 let ok = child.stdin.take().map(|mut stdin| stdin.write_all(&png).is_ok()).unwrap_or(false);
                 // wl-copy forks and serves the selection; xclip likewise stays alive.
