@@ -323,9 +323,74 @@ Each phase ends with something usable. Don't start the next until the acceptance
 - mDNS discovery, pairing, update exchange, asset manifest, dictionary union.
 - **Accept:** edit the same scene on both machines offline, sync, both converge with both edits.
 
-### Phase 7 — Polish (ongoing)
+### Phase 7 — Polish (done 2026-10-03)
 - Focus mode, typewriter scroll, keyboard-only navigation, performance pass on long scenes,
   history pruning, crash-safe recovery from `snapshots/`.
+
+---
+
+## 10b. Gap audit (2026-10-03) and follow-on phases
+
+Phases 0–7 shipped. An audit against §5–§9 and the EmberWrite feature list found the items
+below either missing or shallow. The translucent window background (wallpaper visible behind the
+sidebar and editor) is **intentional** and stays.
+
+### Phase 8 — Structure and navigation
+- Visible hierarchy in the sidebar tree: indent per depth, chevrons, collapse/expand state
+  remembered per project. Acts/chapters visually distinct from scenes.
+- Dashboard groups scenes under their chapter; root-level scenes go under "Unsorted".
+- Drag-and-drop reorder in the tree: drop between siblings or onto a container → `move_before` /
+  `move_after` / `move_node`. Keyboard Move Up/Down stays.
+- Duplicate node (deep: body, marks, metadata, children) from the context menu.
+- Layout persistence per project in `layout.json` (derived, safe to delete): current space, open
+  tabs + active tab, reference pane open/pinned node, sidebar width, typewriter and focus mode.
+- **Accept:** restart the app and land exactly where you left off; drag a scene into another
+  chapter and the Dashboard reflects it.
+
+### Phase 9 — Editor commands and discoverability
+- Formatting toolbar above the editor: block-type dropdown (Paragraph / H1 / H2 / H3 / Quote /
+  Scene break), bold / italic / underline / strike / small caps, highlight colour menu, comment,
+  link, clear formatting. Reflects the style at the caret.
+- Clear formatting action (removes all inline marks in the selection).
+- Highlight colours: yellow, green, blue, pink, grey. Picker in the toolbar and via ⌘⇧H cycling.
+- Command palette: Ctrl-P becomes a combined palette — nodes plus every action (`> ` prefix or
+  auto-mixed), fuzzy, with keybinding hints.
+- Status bar shows the spell language; clicking it toggles spellcheck off/on for the project.
+- Typewriter and focus mode persisted (via Phase 8 layout.json).
+- **Accept:** every editor command is reachable with the mouse and from the palette.
+
+### Phase 10 — World space depth and versions
+- Entity sheet tabs: Fields / Relations / Appears in. Image attachments render inline at the top
+  of the sheet (first image = portrait).
+- "Appears in" rows filter the Manuscript sidebar to scenes mentioning that entity (clear button
+  in the search box).
+- Rename entity → prompt "Also replace N linked mentions in the text?" → replaces text under
+  explicit `link` marks only, as one undoable edit per scene.
+- Version compare: reference pane shows the saved version with word-level diff highlighting
+  (inserted = green, deleted = red strikethrough) against the live body.
+- **Accept:** rename a character and every linked mention updates; compare shows what changed.
+
+### Phase 11 — Visual design pass
+- Left rail: real icons (home, book, globe, note) with tooltips and a clear active state;
+  settings/theme icon at the bottom instead of the "Dark" text button in the title bar.
+- Typographic hierarchy: panel headers, meta strip and body use distinct sizes/weights; consistent
+  8px spacing scale; dashboard cards get titles, subtle borders and aligned numeric columns.
+- Empty states with an action: new project → "Create your first chapter" button; empty World →
+  "Add a character"; empty Notes → "New note".
+- Reports: words per day (30 days), per week (26 weeks), and per session list; chapter table with
+  goal progress bars.
+- **Accept:** screenshots of every space look like one app, not a debug UI.
+
+### Phase 12 — Infrastructure and robustness
+- GitHub Actions: build + test on `macos-latest` (Apple Silicon) and `ubuntu-latest`; clippy
+  and fmt gates. Mac binary verified to launch at least once (manual step documented).
+- Startup pruning: if the oldest change is older than 365 days, take a backup and shallow-snapshot
+  automatically; log it and show it once in the status bar.
+- JSON mirror written at most once per 30 s and on quit, not on every autosave.
+- IME tests: `replace_and_mark_text_in_range` / `unmark_text` round-trips for composition,
+  dead keys, and replacing a marked range with a selection present.
+- Two-host sync checklist in `docs/sync-test.md` (manual, run before each release).
+- **Accept:** CI green on both OSes; a year-old project opens without manual compaction.
 
 Rough total: 3–4 months of evenings/weekends; faster if full-time. The editor (Phases 1–2) is
 roughly half the effort.
