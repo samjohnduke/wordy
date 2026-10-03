@@ -76,7 +76,7 @@ impl SidebarPanel {
     }
 
     fn changed(&mut self, cx: &mut Context<Self>) {
-        self.project.project.doc.commit();
+        self.project.project.commit_meta();
         cx.emit(SidebarEvent::Changed);
         cx.notify();
     }

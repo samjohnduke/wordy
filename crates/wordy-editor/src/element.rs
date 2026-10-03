@@ -6,6 +6,8 @@
 //! movement, mouse clicks, and the IME bridge can all hit-test against the
 //! same numbers the painter used.
 
+use std::sync::Arc;
+
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 use wordy_doc::{Block, Paragraph, Paragraphs};
@@ -41,13 +43,27 @@ impl ParaLayout {
     }
 }
 
+/// A comment laid out in the right margin.
+pub(crate) struct CommentCard {
+    pub id: String,
+    /// Window-space bounds (already scrolled).
+    pub bounds: Bounds<Pixels>,
+    pub resolved: bool,
+    pub empty: bool,
+    line: WrappedLine,
+    line_height: Pixels,
+}
+
 pub(crate) struct FrameLayout {
+    /// Window-space origin of the element.
+    pub bounds_origin: Point<Pixels>,
     /// Window-space origin of the text column (already scrolled).
     pub origin: Point<Pixels>,
     #[allow(dead_code)]
     pub wrap_width: Pixels,
     pub paras: Vec<ParaLayout>,
     pub max_scroll: Pixels,
+    pub cards: Vec<CommentCard>,
 }
 
 impl FrameLayout {
@@ -117,6 +133,93 @@ struct Palette {
     selection: Hsla,
     caret: Hsla,
     highlight: Hsla,
+    comment: Hsla,
+    comment_active: Hsla,
+    search: Hsla,
+    search_active: Hsla,
+    card_bg: Hsla,
+    card_border: Hsla,
+    accent: Hsla,
+}
+
+impl Palette {
+    fn from_theme(cx: &App) -> Self {
+        let t = cx.theme();
+        Palette {
+            fg: t.foreground,
+            muted: t.muted_foreground,
+            link: t.link,
+            selection: t.selection,
+            caret: t.caret,
+            highlight: hsla(0.14, 0.9, 0.6, 0.45),
+            comment: hsla(0.08, 0.9, 0.6, 0.22),
+            comment_active: hsla(0.08, 0.9, 0.55, 0.5),
+            search: hsla(0.14, 0.9, 0.55, 0.3),
+            search_active: hsla(0.08, 0.95, 0.5, 0.6),
+            card_bg: t.popover,
+            card_border: t.border,
+            accent: t.primary,
+        }
+    }
+}
+
+const CARD_MIN_MARGIN: Pixels = px(140.);
+const CARD_MAX_WIDTH: Pixels = px(240.);
+const CARD_PAD: Pixels = px(8.);
+const CARD_GAP: Pixels = px(6.);
+const CARD_FONT: Pixels = px(12.);
+
+/// Paint a code-point range as row-by-row quads.
+fn paint_cp_range(
+    window: &mut Window,
+    frame: &FrameLayout,
+    paras: &Paragraphs,
+    r: std::ops::Range<usize>,
+    color: Hsla,
+    newline_width: Pixels,
+    (top, bottom): (Pixels, Pixels),
+) {
+    if r.is_empty() {
+        return;
+    }
+    for (ix, para) in paras.iter().enumerate() {
+        if para.end_cp() <= r.start || para.start_cp >= r.end {
+            continue;
+        }
+        let Some(pl) = frame.paras.get(ix) else { continue };
+        let para_top = frame.origin.y + pl.y;
+        if para_top + pl.height < top || para_top > bottom {
+            continue;
+        }
+        let sa = para.cp_to_byte(r.start.max(para.start_cp) - para.start_cp);
+        let sb = para.cp_to_byte(r.end.min(para.newline_cp()) - para.start_cp);
+        let includes_newline = r.end > para.newline_cp();
+        let rows = pl.row_starts();
+        let layout = &pl.line.unwrapped_layout;
+        for (ri, rs) in rows.iter().enumerate() {
+            let re = rows.get(ri + 1).copied().unwrap_or(para.text.len());
+            let seg_s = sa.max(*rs);
+            let seg_e = sb.min(re);
+            if seg_s > seg_e {
+                continue;
+            }
+            let last_row = ri + 1 == rows.len();
+            if seg_s == seg_e && !(includes_newline && last_row) {
+                continue;
+            }
+            let row_x = layout.x_for_index(*rs);
+            let x1 = layout.x_for_index(seg_s) - row_x;
+            let mut x2 = layout.x_for_index(seg_e) - row_x;
+            if includes_newline && last_row {
+                x2 += newline_width;
+            }
+            let rect = Bounds {
+                origin: point(frame.origin.x + pl.indent + x1, para_top + pl.line_height * ri as f32),
+                size: size(x2 - x1, pl.line_height),
+            };
+            window.paint_quad(fill(rect, color));
+        }
+    }
 }
 
 pub struct ProseElement {
@@ -128,7 +231,13 @@ impl ProseElement {
         Self { editor }
     }
 
-    fn runs_for(para: &Paragraph, style: &EditorStyle, pal: &Palette) -> (SharedString, Vec<TextRun>) {
+    fn runs_for(
+        para: &Paragraph,
+        style: &EditorStyle,
+        pal: &Palette,
+        active_comment: Option<&str>,
+        show_resolved_comments: &dyn Fn(&str) -> bool,
+    ) -> (SharedString, Vec<TextRun>) {
         let family = style.font_family.clone();
         let base_weight = if para.block.is_heading() { FontWeight::BOLD } else { FontWeight::NORMAL };
         let base_italic = para.block == Block::Quote;
@@ -152,17 +261,31 @@ impl ProseElement {
             let weight = if m.bold { FontWeight::BOLD } else { base_weight };
             let italic = m.italic ^ base_italic;
             let color = if m.link.is_some() { pal.link } else if para.block == Block::Quote { pal.muted } else { pal.fg };
+            let features = if m.smallcaps {
+                FontFeatures(Arc::new(vec![("smcp".to_string(), 1)]))
+            } else {
+                FontFeatures::default()
+            };
+            let background_color = if m.highlight {
+                Some(pal.highlight)
+            } else {
+                match &m.comment {
+                    Some(id) if active_comment == Some(id.as_str()) => Some(pal.comment_active),
+                    Some(id) if show_resolved_comments(id) => Some(pal.comment),
+                    _ => None,
+                }
+            };
             runs.push(TextRun {
                 len: r.text.len(),
                 font: Font {
                     family: family.clone(),
-                    features: FontFeatures::default(),
+                    features,
                     fallbacks: None,
                     weight,
                     style: if italic { FontStyle::Italic } else { FontStyle::Normal },
                 },
                 color,
-                background_color: m.highlight.then_some(pal.highlight),
+                background_color,
                 underline: (m.underline || m.link.is_some()).then_some(UnderlineStyle {
                     thickness: px(1.),
                     color: Some(color),
@@ -221,21 +344,22 @@ impl Element for ProseElement {
         window: &mut Window,
         cx: &mut App,
     ) -> ProsePrepaint {
-        let theme = cx.theme();
-        let pal = Palette {
-            fg: theme.foreground,
-            muted: theme.muted_foreground,
-            link: theme.link,
-            selection: theme.selection,
-            caret: theme.caret,
-            highlight: hsla(0.14, 0.9, 0.6, 0.45),
-        };
+        let pal = Palette::from_theme(cx);
 
-        let (style, scroll_y, want_scroll, head, frame_cell) = {
+        let (style, scroll_y, want_scroll, head, frame_cell, active_comment, anchors) = {
             let e = self.editor.read(cx);
-            (e.style.clone(), e.scroll_y, e.scroll_to_cursor, e.selection().head, e.frame.clone())
+            (
+                e.style.clone(),
+                e.scroll_y,
+                e.scroll_to_cursor,
+                e.selection().head,
+                e.frame.clone(),
+                e.active_comment(),
+                e.comment_anchors(),
+            )
         };
         let paras = self.editor.read(cx).paragraphs().clone();
+        let visible_comment = |id: &str| anchors.iter().any(|a| a.id == id);
 
         let wrap_width = (bounds.size.width - style.padding_x * 2.)
             .min(style.max_width)
@@ -243,13 +367,13 @@ impl Element for ProseElement {
         let column_x = bounds.origin.x + (bounds.size.width - wrap_width) * 0.5;
 
         let text_system = window.text_system().clone();
-        let mut layouts = Vec::with_capacity(paras.len());
+        let mut layouts: Vec<ParaLayout> = Vec::with_capacity(paras.len());
         let mut y = px(0.);
         let mut prev: Option<Block> = None;
         for para in paras.iter() {
             let font_size = style.font_size_for(para.block);
             let line_height = style.line_height_for(para.block);
-            let (text, runs) = Self::runs_for(para, &style, &pal);
+            let (text, runs) = Self::runs_for(para, &style, &pal, active_comment.as_deref(), &visible_comment);
             y += style.space_before(para.block, prev);
             let line = text_system
                 .shape_text(text, font_size, &runs, Some(wrap_width), None)
@@ -289,11 +413,68 @@ impl Element for ProseElement {
             }
         }
 
+        let origin = point(column_x, bounds.origin.y + style.padding_top - scroll_y);
+
+        // Comment cards in the right margin, stacked so they never overlap.
+        let mut cards = Vec::new();
+        let avail = bounds.origin.x + bounds.size.width - (column_x + wrap_width) - px(24.);
+        if !anchors.is_empty() && avail >= CARD_MIN_MARGIN {
+            let card_w = CARD_MAX_WIDTH.min(avail - px(8.));
+            let card_x = column_x + wrap_width + px(16.);
+            let ui_font = window.text_style().font();
+            let line_height = CARD_FONT * 1.4;
+            let mut next_y = origin.y;
+            let frame_tmp = FrameLayout {
+                bounds_origin: bounds.origin,
+                origin,
+                wrap_width,
+                paras: layouts,
+                max_scroll,
+                cards: Vec::new(),
+            };
+            for a in &anchors {
+                let anchor_y = frame_tmp
+                    .point_for_cp(a.range.start, &paras)
+                    .map(|(p, _)| p.y)
+                    .unwrap_or(next_y);
+                let empty = a.text.trim().is_empty();
+                let text: SharedString = if empty { "Add a note…".into() } else { a.text.clone().into() };
+                let run = TextRun {
+                    len: text.len(),
+                    font: ui_font.clone(),
+                    color: if empty || a.resolved { pal.muted } else { pal.fg },
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let line = text_system
+                    .shape_text(text, CARD_FONT, &[run], Some(card_w - CARD_PAD * 2.), None)
+                    .ok()
+                    .and_then(|mut v| v.pop())
+                    .unwrap_or_default();
+                let rows = line.wrap_boundaries.len() + 1;
+                let h = line_height * rows as f32 + CARD_PAD * 2.;
+                let y = anchor_y.max(next_y);
+                cards.push(CommentCard {
+                    id: a.id.clone(),
+                    bounds: Bounds { origin: point(card_x, y), size: size(card_w, h) },
+                    resolved: a.resolved,
+                    empty,
+                    line,
+                    line_height,
+                });
+                next_y = y + h + CARD_GAP;
+            }
+            layouts = frame_tmp.paras;
+        }
+
         let frame = FrameLayout {
-            origin: point(column_x, bounds.origin.y + style.padding_top - scroll_y),
+            bounds_origin: bounds.origin,
+            origin,
             wrap_width,
             paras: layouts,
             max_scroll,
+            cards,
         };
         *frame_cell.borrow_mut() = Some(frame);
         self.editor.update(cx, |e, _| {
@@ -315,21 +496,9 @@ impl Element for ProseElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let theme = cx.theme();
-        let pal = Palette {
-            fg: theme.foreground,
-            muted: theme.muted_foreground,
-            link: theme.link,
-            selection: theme.selection,
-            caret: theme.caret,
-            highlight: hsla(0.14, 0.9, 0.6, 0.45),
-        };
-        let _ = pal.fg;
-        let _ = pal.muted;
-        let _ = pal.link;
-        let _ = pal.highlight;
+        let pal = Palette::from_theme(cx);
 
-        let (focus, sel, blink_on, frame_cell, paras, font_size) = {
+        let (focus, sel, blink_on, frame_cell, paras, font_size, matches, match_ix, active_comment, editing) = {
             let e = self.editor.read(cx);
             (
                 e.focus.clone(),
@@ -338,6 +507,10 @@ impl Element for ProseElement {
                 e.frame.clone(),
                 e.paragraphs().clone(),
                 e.style.font_size,
+                e.matches.clone(),
+                e.match_ix,
+                e.active_comment(),
+                e.is_editing_comment(),
             )
         };
         let focused = focus.is_focused(window);
@@ -351,47 +524,16 @@ impl Element for ProseElement {
             let top = bounds.origin.y;
             let bottom = bounds.origin.y + bounds.size.height;
 
-            // Selection.
-            let r = sel.range();
-            if !r.is_empty() {
-                for (ix, para) in paras.iter().enumerate() {
-                    if para.end_cp() <= r.start || para.start_cp >= r.end {
-                        continue;
-                    }
-                    let Some(pl) = frame.paras.get(ix) else { continue };
-                    let para_top = frame.origin.y + pl.y;
-                    if para_top + pl.height < top || para_top > bottom {
-                        continue;
-                    }
-                    let sa = para.cp_to_byte(r.start.max(para.start_cp) - para.start_cp);
-                    let sb = para.cp_to_byte(r.end.min(para.newline_cp()) - para.start_cp);
-                    let includes_newline = r.end > para.newline_cp();
-                    let rows = pl.row_starts();
-                    let layout = &pl.line.unwrapped_layout;
-                    for (ri, rs) in rows.iter().enumerate() {
-                        let re = rows.get(ri + 1).copied().unwrap_or(para.text.len());
-                        let seg_s = sa.max(*rs);
-                        let seg_e = sb.min(re);
-                        if seg_s > seg_e {
-                            continue;
-                        }
-                        let last_row = ri + 1 == rows.len();
-                        if seg_s == seg_e && !(includes_newline && last_row) {
-                            continue;
-                        }
-                        let row_x = layout.x_for_index(*rs);
-                        let x1 = layout.x_for_index(seg_s) - row_x;
-                        let mut x2 = layout.x_for_index(seg_e) - row_x;
-                        if includes_newline && last_row {
-                            x2 += font_size * 0.35;
-                        }
-                        let rect = Bounds {
-                            origin: point(frame.origin.x + pl.indent + x1, para_top + pl.line_height * ri as f32),
-                            size: size(x2 - x1, pl.line_height),
-                        };
-                        window.paint_quad(fill(rect, pal.selection));
-                    }
-                }
+            let nl_w = font_size * 0.35;
+
+            // Search matches, then the selection on top.
+            for (i, m) in matches.iter().enumerate() {
+                let color = if Some(i) == match_ix { pal.search_active } else { pal.search };
+                paint_cp_range(window, frame, &paras, m.clone(), color, nl_w, (top, bottom));
+            }
+            let on_current_match = match_ix.and_then(|i| matches.get(i)).is_some_and(|m| *m == sel.range());
+            if !on_current_match {
+                paint_cp_range(window, frame, &paras, sel.range(), pal.selection, nl_w, (top, bottom));
             }
 
             // Text.
@@ -401,15 +543,33 @@ impl Element for ProseElement {
                     continue;
                 }
                 let origin = point(frame.origin.x + pl.indent, para_top);
+                let _ = pl.line.paint_background(origin, pl.line_height, pl.align, None, window, cx);
                 let _ = pl.line.paint(origin, pl.line_height, pl.align, None, window, cx);
             }
 
             // Caret.
-            if focused && blink_on {
+            if focused && blink_on && !editing {
                 if let Some((pt, lh)) = frame.point_for_cp(sel.head, &paras) {
                     let rect = Bounds { origin: point(pt.x - px(1.), pt.y), size: size(px(2.), lh) };
                     window.paint_quad(fill(rect, pal.caret));
                 }
+            }
+
+            // Comment cards.
+            for card in frame.cards.iter() {
+                let b = card.bounds;
+                if b.origin.y + b.size.height < top || b.origin.y > bottom {
+                    continue;
+                }
+                let active = active_comment.as_deref() == Some(card.id.as_str());
+                if active && editing {
+                    continue; // the overlay editor covers it
+                }
+                let border = if active { pal.accent } else { pal.card_border };
+                window.paint_quad(fill(b, pal.card_bg).corner_radii(px(6.)).border_widths(px(1.)).border_color(border));
+                let origin = point(b.origin.x + CARD_PAD, b.origin.y + CARD_PAD);
+                let _ = card.line.paint(origin, card.line_height, TextAlign::Left, None, window, cx);
+                let _ = card.empty;
             }
         });
 
@@ -417,12 +577,22 @@ impl Element for ProseElement {
         let hitbox = prepaint.hitbox.clone();
         let editor = self.editor.clone();
         let focus_for_down = focus.clone();
+        let frame_for_down = frame_cell.clone();
         window.on_mouse_event(move |ev: &MouseDownEvent, phase, window, cx| {
             if !phase.bubble() || ev.button != MouseButton::Left || !hitbox.is_hovered(window) {
                 return;
             }
-            window.focus(&focus_for_down, cx);
-            editor.update(cx, |e, cx| e.on_mouse_down(ev, cx));
+            let card = frame_for_down
+                .borrow()
+                .as_ref()
+                .and_then(|f| f.cards.iter().find(|c| c.bounds.contains(&ev.position)).map(|c| c.id.clone()));
+            match card {
+                Some(id) => editor.update(cx, |e, cx| e.begin_comment_edit(&id, window, cx)),
+                None => {
+                    window.focus(&focus_for_down, cx);
+                    editor.update(cx, |e, cx| e.on_mouse_down(ev, cx));
+                }
+            }
             cx.stop_propagation();
         });
         let editor = self.editor.clone();

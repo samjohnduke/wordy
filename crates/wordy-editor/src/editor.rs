@@ -6,14 +6,17 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, button::{Button, ButtonVariants as _}, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use unicode_segmentation::UnicodeSegmentation;
-use wordy_doc::loro::{LoroDoc, LoroText, LoroValue, UndoItemMeta, UndoManager};
-use wordy_doc::{Block, Marks, Paragraphs};
+use wordy_doc::loro::{CommitOptions, ContainerTrait as _, LoroDoc, LoroText, LoroValue, UndoItemMeta, UndoManager};
+use wordy_doc::{Block, Comments, Marks, Paragraphs, Run, META_ORIGIN};
 
 use crate::element::{FrameLayout, ProseElement};
 use crate::style::EditorStyle;
+use crate::typography::smart_replace;
 use crate::*;
 
 /// A selection in Unicode code points. `anchor == head` is a caret.
@@ -47,6 +50,61 @@ pub enum EditorEvent {
 type SelSnapshot = Arc<Mutex<(usize, usize)>>;
 type SelRestore = Arc<Mutex<Option<(usize, usize)>>>;
 
+/// One paragraph of a copied fragment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FragmentPara {
+    pub block: Block,
+    pub runs: Vec<Run>,
+    /// Whether the paragraph's terminating newline was part of the copy.
+    pub terminated: bool,
+}
+
+/// A formatted slice of a body, as placed on the clipboard by `copy`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RichFragment {
+    pub paras: Vec<FragmentPara>,
+}
+
+impl RichFragment {
+    pub fn plain_text(&self) -> String {
+        let mut s = String::new();
+        for p in &self.paras {
+            for r in &p.runs {
+                s.push_str(&r.text);
+            }
+            if p.terminated {
+                s.push('\n');
+            }
+        }
+        s
+    }
+}
+
+/// App-wide memory of the last in-app copy, so a paste can restore formatting
+/// when the system clipboard still holds the same plain text.
+#[derive(Default)]
+pub struct RichClipboard {
+    pub text: String,
+    pub fragment: RichFragment,
+}
+
+impl Global for RichClipboard {}
+
+/// A comment anchored in the body, derived from the `comment` marks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommentAnchor {
+    pub id: String,
+    pub range: Range<usize>,
+    pub text: String,
+    pub resolved: bool,
+}
+
+struct CommentEdit {
+    id: String,
+    input: Entity<InputState>,
+    _sub: Subscription,
+}
+
 pub struct ProseEditor {
     doc: LoroDoc,
     text: LoroText,
@@ -71,6 +129,19 @@ pub struct ProseEditor {
     _blink: Task<()>,
     pub(crate) selecting: bool,
     read_only: bool,
+    /// Commit origin for this editor's body edits (`body:<container id>`).
+    origin: String,
+    /// Marks to apply to the next typed text when the caret is collapsed.
+    pending: Option<Marks>,
+    pub smart_typography: bool,
+    comments: Option<Comments>,
+    /// Node id string recorded on new comments.
+    node_label: Option<String>,
+    comment_edit: Option<CommentEdit>,
+    pub(crate) show_resolved: bool,
+    search: Option<String>,
+    pub(crate) matches: Vec<Range<usize>>,
+    pub(crate) match_ix: Option<usize>,
 }
 
 impl EventEmitter<EditorEvent> for ProseEditor {}
@@ -94,8 +165,10 @@ impl ProseEditor {
 
         let undo_sel: SelSnapshot = Arc::new(Mutex::new((0, 0)));
         let undo_restore: SelRestore = Arc::new(Mutex::new(None));
+        let origin = format!("body:{}", text.id());
         let mut undo = UndoManager::new(&doc);
         undo.set_merge_interval(700);
+        undo.add_exclude_origin_prefix(META_ORIGIN);
         {
             let snap = undo_sel.clone();
             undo.set_on_push(Some(Box::new(move |_kind, _span, _event| {
@@ -139,9 +212,36 @@ impl ProseEditor {
             _blink: Task::ready(()),
             selecting: false,
             read_only: false,
+            origin,
+            pending: None,
+            smart_typography: true,
+            comments: None,
+            node_label: None,
+            comment_edit: None,
+            show_resolved: false,
+            search: None,
+            matches: Vec::new(),
+            match_ix: None,
         };
         this.restart_blink(cx);
         this
+    }
+
+    /// The commit origin of this editor's edits. Other editors on the same doc
+    /// exclude it from their undo stacks (see [`Self::exclude_origin`]).
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    /// Keep edits committed under `prefix` out of this editor's undo history.
+    pub fn exclude_origin(&mut self, prefix: &str) {
+        self.undo.add_exclude_origin_prefix(prefix);
+    }
+
+    /// Attach the project's comments map; `node_label` is recorded on new comments.
+    pub fn set_comments(&mut self, comments: Comments, node_label: String) {
+        self.comments = Some(comments);
+        self.node_label = Some(node_label);
     }
 
     // ----- accessors -------------------------------------------------------
@@ -176,13 +276,82 @@ impl ProseEditor {
         self.paras.get(pos.para).map(|p| p.block).unwrap_or_default()
     }
 
-    /// Marks at the selection head (inherited from the preceding character).
+    /// Marks that the next typed character will get: pending toggles if any,
+    /// else the marks inherited from the preceding character.
     pub fn current_marks(&self) -> Marks {
+        if let Some(p) = &self.pending {
+            return p.clone();
+        }
+        self.inherited_marks()
+    }
+
+    fn inherited_marks(&self) -> Marks {
         let pos = self.paras.locate(self.sel.head);
         self.paras
             .get(pos.para)
             .map(|p| p.marks_before(pos.cp))
             .unwrap_or_default()
+    }
+
+    /// Comments anchored in this body, in document order. Resolved ones are
+    /// included only when `show_resolved` is set.
+    pub fn comment_anchors(&self) -> Vec<CommentAnchor> {
+        self.comment_anchors_with(self.show_resolved)
+    }
+
+    fn comment_anchors_with(&self, include_resolved: bool) -> Vec<CommentAnchor> {
+        let Some(comments) = &self.comments else { return Vec::new() };
+        let mut out: Vec<CommentAnchor> = Vec::new();
+        for p in self.paras.iter() {
+            let mut cp = p.start_cp;
+            for run in &p.runs {
+                let n = run.text.chars().count();
+                if let Some(id) = &run.marks.comment {
+                    match out.last_mut() {
+                        Some(last) if &last.id == id => last.range.end = cp + n,
+                        _ => {
+                            let c = comments.get(id);
+                            out.push(CommentAnchor {
+                                id: id.clone(),
+                                range: cp..cp + n,
+                                text: c.as_ref().map(|c| c.text.clone()).unwrap_or_default(),
+                                resolved: c.as_ref().map(|c| c.resolved).unwrap_or(false),
+                            });
+                        }
+                    }
+                }
+                cp += n;
+            }
+        }
+        if !include_resolved {
+            out.retain(|a| !a.resolved);
+        }
+        out
+    }
+
+    /// The comment being edited, or the one under the caret.
+    pub fn active_comment(&self) -> Option<String> {
+        if let Some(e) = &self.comment_edit {
+            return Some(e.id.clone());
+        }
+        let r = self.sel.range();
+        self.comment_anchors()
+            .into_iter()
+            .find(|a| a.range.start <= r.start && r.end <= a.range.end)
+            .map(|a| a.id)
+    }
+
+    pub fn is_editing_comment(&self) -> bool {
+        self.comment_edit.is_some()
+    }
+
+    pub fn search_query(&self) -> Option<&str> {
+        self.search.as_deref()
+    }
+
+    /// (index of the current match, number of matches).
+    pub fn search_status(&self) -> (Option<usize>, usize) {
+        (self.match_ix, self.matches.len())
     }
 
     pub fn selected_text(&self) -> String {
@@ -197,9 +366,16 @@ impl ProseEditor {
     }
 
     fn commit(&mut self, cx: &mut Context<Self>) {
-        self.doc.commit();
+        self.doc.commit_with(CommitOptions::default().origin(&self.origin));
         self.refresh(cx);
         cx.emit(EditorEvent::Edited);
+    }
+
+    /// Commit a metadata-only change (comment text, resolved flag) outside undo.
+    fn commit_meta(&mut self, cx: &mut Context<Self>) {
+        self.doc.commit_with(CommitOptions::default().origin(META_ORIGIN));
+        cx.emit(EditorEvent::Edited);
+        cx.notify();
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -213,6 +389,8 @@ impl ProseEditor {
                 self.marked = None;
             }
         }
+        self.pending = None;
+        self.recompute_matches();
         self.scroll_to_cursor = true;
         self.restart_blink(cx);
         cx.notify();
@@ -223,6 +401,8 @@ impl ProseEditor {
         let sel = Selection { anchor: sel.anchor.min(max), head: sel.head.min(max) };
         if sel != self.sel {
             self.sel = sel;
+            self.pending = None;
+            self.match_ix = self.matches.iter().position(|m| *m == sel.range());
             cx.emit(EditorEvent::SelectionChanged);
         }
         self.scroll_to_cursor = true;
@@ -283,9 +463,65 @@ impl ProseEditor {
         }
     }
 
+    fn set_mark(&self, r: Range<usize>, key: &str, on: bool) {
+        if r.is_empty() {
+            return;
+        }
+        let res = if on { self.text.mark(r, key, true) } else { self.text.unmark(r, key) };
+        if let Err(e) = res {
+            tracing::warn!("mark {key} failed: {e}");
+        }
+    }
+
+    /// Make the inline marks over `r` exactly `want` (links included, comments
+    /// left alone), by diffing against what the text currently carries.
+    fn apply_marks_in(&self, r: Range<usize>, want: &Marks) {
+        let paras = Paragraphs::from_text(&self.text);
+        let mut segments: Vec<(Range<usize>, Marks)> = Vec::new();
+        for p in paras.iter() {
+            if p.end_cp() <= r.start || p.start_cp >= r.end {
+                continue;
+            }
+            let mut cp = p.start_cp;
+            for run in &p.runs {
+                let n = run.text.chars().count();
+                let seg = cp.max(r.start)..(cp + n).min(r.end);
+                cp += n;
+                if !seg.is_empty() {
+                    segments.push((seg, run.marks.clone()));
+                }
+            }
+        }
+        for (seg, have) in segments {
+            let bools: [(&str, bool, bool); 6] = [
+                ("bold", want.bold, have.bold),
+                ("italic", want.italic, have.italic),
+                ("underline", want.underline, have.underline),
+                ("strike", want.strike, have.strike),
+                ("smallcaps", want.smallcaps, have.smallcaps),
+                ("highlight", want.highlight, have.highlight),
+            ];
+            for (key, w, h) in bools {
+                if w != h {
+                    self.set_mark(seg.clone(), key, w);
+                }
+            }
+            if want.link != have.link {
+                let res = match &want.link {
+                    Some(target) => self.text.mark(seg.clone(), "link", target.as_str()),
+                    None => self.text.unmark(seg.clone(), "link"),
+                };
+                if let Err(e) = res {
+                    tracing::warn!("link mark failed: {e}");
+                }
+            }
+        }
+    }
+
     // ----- editing ---------------------------------------------------------
 
-    /// Insert typed or pasted text at the selection, replacing it.
+    /// Insert typed or pasted text at the selection, replacing it. A single
+    /// typed character goes through smart typography and picks up pending marks.
     pub fn insert_text(&mut self, s: &str, cx: &mut Context<Self>) {
         if self.read_only {
             return;
@@ -294,8 +530,32 @@ impl ProseEditor {
         self.begin_edit();
         let r = self.sel.range();
         self.delete_cp_range(r.clone());
-        self.insert_at(r.start, &s);
-        self.sel = Selection::caret(r.start + s.chars().count());
+        let mut start = r.start;
+        let mut insert = s.clone();
+        let mut chars = s.chars();
+        if let (Some(ch), None, true) = (chars.next(), chars.next(), self.smart_typography) {
+            let pos = self.paras.locate(r.start);
+            let before: String = self
+                .paras
+                .get(pos.para)
+                .map(|p| p.text[..pos.byte].chars().rev().take(2).collect::<Vec<_>>())
+                .unwrap_or_default()
+                .into_iter()
+                .rev()
+                .collect();
+            if let Some((back, repl)) = smart_replace(&before, ch) {
+                let back = back.min(pos.cp);
+                start = r.start - back;
+                self.delete_cp_range(start..r.start);
+                insert = repl.to_string();
+            }
+        }
+        self.insert_at(start, &insert);
+        let end = start + insert.chars().count();
+        if let Some(want) = self.pending.take() {
+            self.apply_marks_in(start..end, &want);
+        }
+        self.sel = Selection::caret(end);
         self.marked = None;
         self.goal_x = None;
         self.commit(cx);
@@ -484,18 +744,25 @@ impl ProseEditor {
         }
         let r = self.sel.range();
         if r.is_empty() {
-            return; // pending marks for a caret arrive with Phase 2
+            // Collapsed caret: remember the toggle for the next typed text.
+            let mut m = self.current_marks();
+            match key {
+                "bold" => m.bold = !m.bold,
+                "italic" => m.italic = !m.italic,
+                "underline" => m.underline = !m.underline,
+                "strike" => m.strike = !m.strike,
+                "smallcaps" => m.smallcaps = !m.smallcaps,
+                "highlight" => m.highlight = !m.highlight,
+                _ => return,
+            }
+            self.pending = Some(m);
+            cx.emit(EditorEvent::SelectionChanged);
+            cx.notify();
+            return;
         }
         self.begin_edit();
         let has = self.range_has_mark(r.clone(), key);
-        let res = if has {
-            self.text.unmark(r, key)
-        } else {
-            self.text.mark(r, key, true)
-        };
-        if let Err(e) = res {
-            tracing::warn!("toggle mark failed: {e}");
-        }
+        self.set_mark(r, key, !has);
         self.commit(cx);
     }
 
@@ -607,11 +874,69 @@ impl ProseEditor {
 
     // ----- clipboard -------------------------------------------------------
 
+    /// The selection as a formatted fragment.
+    pub fn selected_fragment(&self) -> RichFragment {
+        let r = self.sel.range();
+        let mut paras = Vec::new();
+        for p in self.paras.iter() {
+            if p.end_cp() <= r.start || p.start_cp >= r.end {
+                continue;
+            }
+            let mut runs = Vec::new();
+            let mut cp = p.start_cp;
+            for run in &p.runs {
+                let n = run.text.chars().count();
+                let seg = cp.max(r.start)..(cp + n).min(r.end);
+                if !seg.is_empty() {
+                    let text: String = run.text.chars().skip(seg.start - cp).take(seg.len()).collect();
+                    let mut marks = run.marks.clone();
+                    marks.comment = None;
+                    runs.push(Run { text, marks });
+                }
+                cp += n;
+            }
+            let terminated = p.terminated && r.end > p.newline_cp();
+            paras.push(FragmentPara { block: p.block, runs, terminated });
+        }
+        RichFragment { paras }
+    }
+
     pub fn copy(&mut self, cx: &mut Context<Self>) {
         if self.sel.is_empty() {
             return;
         }
-        cx.write_to_clipboard(ClipboardItem::new_string(self.selected_text()));
+        let fragment = self.selected_fragment();
+        let text = fragment.plain_text();
+        cx.set_global(RichClipboard { text: text.clone(), fragment });
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
+    /// Insert a formatted fragment at the selection, replacing it.
+    pub fn paste_fragment(&mut self, frag: &RichFragment, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        self.begin_edit();
+        let r = self.sel.range();
+        self.delete_cp_range(r.clone());
+        let plain = frag.plain_text();
+        self.insert_at(r.start, &plain);
+        let mut cp = r.start;
+        for p in &frag.paras {
+            for run in &p.runs {
+                let n = run.text.chars().count();
+                self.apply_marks_in(cp..cp + n, &run.marks);
+                cp += n;
+            }
+            if p.terminated {
+                self.set_block_at(cp, p.block);
+                cp += 1;
+            }
+        }
+        self.sel = Selection::caret(cp);
+        self.marked = None;
+        self.goal_x = None;
+        self.commit(cx);
     }
 
     pub fn cut(&mut self, cx: &mut Context<Self>) {
@@ -627,9 +952,233 @@ impl ProseEditor {
     }
 
     pub fn paste(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
-            self.insert_text(&text, cx);
+        let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) else { return };
+        let rich = cx
+            .try_global::<RichClipboard>()
+            .filter(|c| c.text == text)
+            .map(|c| c.fragment.clone());
+        match rich {
+            Some(frag) => self.paste_fragment(&frag, cx),
+            None => {
+                let text = text.replace("\r\n", "\n").replace('\r', "\n");
+                let frag = RichFragment {
+                    paras: text
+                        .split('\n')
+                        .enumerate()
+                        .map(|(i, line)| FragmentPara {
+                            block: Block::Paragraph,
+                            runs: vec![Run { text: line.to_string(), marks: Marks::default() }],
+                            terminated: i + 1 < text.split('\n').count(),
+                        })
+                        .collect(),
+                };
+                if frag.paras.len() == 1 {
+                    self.insert_text(&text, cx);
+                } else {
+                    self.paste_fragment(&frag, cx);
+                }
+            }
         }
+    }
+
+    // ----- comments --------------------------------------------------------
+
+    /// Attach a new, empty comment to the selection and start editing it.
+    pub fn add_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        let Some(comments) = self.comments.clone() else { return };
+        let mut r = self.sel.range();
+        if r.is_empty() {
+            r = self.word_range_at(self.sel.head);
+        }
+        // A comment needs visible text to anchor to; bare newlines leave orphans.
+        let anchored: String = self.plain.chars().skip(r.start).take(r.len()).collect();
+        if anchored.trim().is_empty() {
+            return;
+        }
+        self.begin_edit();
+        let id = match comments.add(self.node_label.as_deref(), "") {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!("add comment: {e:#}");
+                return;
+            }
+        };
+        if let Err(e) = self.text.mark(r.clone(), "comment", id.as_str()) {
+            tracing::warn!("comment mark failed: {e}");
+        }
+        self.sel = Selection::caret(r.end);
+        self.commit(cx);
+        self.begin_comment_edit(&id, window, cx);
+    }
+
+    /// Open the inline editor for a comment's text.
+    pub fn begin_comment_edit(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(comments) = &self.comments else { return };
+        let text = comments.get(id).map(|c| c.text).unwrap_or_default();
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(text)
+                .placeholder("Add a note…")
+        });
+        input.update(cx, |s, cx| s.focus(window, cx));
+        let id_owned = id.to_string();
+        let sub = cx.subscribe_in(&input, window, move |this, input, ev: &InputEvent, window, cx| match ev {
+            InputEvent::Change => {
+                let value = input.read(cx).value().to_string();
+                if let Some(c) = &this.comments {
+                    if let Err(e) = c.set_text(&id_owned, &value) {
+                        tracing::warn!("comment text: {e:#}");
+                    }
+                }
+                this.commit_meta(cx);
+            }
+            InputEvent::PressEnter { .. } => this.end_comment_edit(window, cx),
+            _ => {}
+        });
+        self.comment_edit = Some(CommentEdit { id: id.to_string(), input, _sub: sub });
+        cx.notify();
+    }
+
+    pub fn end_comment_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.comment_edit.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+        }
+    }
+
+    pub fn set_comment_resolved(&mut self, id: &str, resolved: bool, cx: &mut Context<Self>) {
+        if let Some(c) = &self.comments {
+            if let Err(e) = c.set_resolved(id, resolved) {
+                tracing::warn!("resolve comment: {e:#}");
+            }
+        }
+        if self.comment_edit.as_ref().map(|e| e.id.as_str()) == Some(id) {
+            self.comment_edit = None;
+        }
+        self.commit_meta(cx);
+    }
+
+    /// Remove the comment and its anchor mark (undoable).
+    pub fn delete_comment(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        self.begin_edit();
+        let ranges: Vec<Range<usize>> =
+            self.comment_anchors_with(true).into_iter().filter(|a| a.id == id).map(|a| a.range).collect();
+        for r in ranges {
+            if let Err(e) = self.text.unmark(r, "comment") {
+                tracing::warn!("unmark comment: {e}");
+            }
+        }
+        if let Some(c) = &self.comments {
+            if let Err(e) = c.remove(id) {
+                tracing::warn!("remove comment: {e:#}");
+            }
+        }
+        if self.comment_edit.as_ref().map(|e| e.id.as_str()) == Some(id) {
+            self.comment_edit = None;
+        }
+        self.commit(cx);
+    }
+
+    pub fn toggle_show_resolved(&mut self, cx: &mut Context<Self>) {
+        self.show_resolved = !self.show_resolved;
+        cx.notify();
+    }
+
+    // ----- find / replace --------------------------------------------------
+
+    /// Set (or clear) the search query; matching is case-insensitive.
+    pub fn set_search(&mut self, query: Option<String>, cx: &mut Context<Self>) {
+        self.search = query.filter(|q| !q.is_empty());
+        self.recompute_matches();
+        if self.match_ix.is_none() && !self.matches.is_empty() {
+            // Jump to the first match at or after the caret.
+            self.search_step(1, true, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    fn recompute_matches(&mut self) {
+        self.matches.clear();
+        let Some(q) = &self.search else {
+            self.match_ix = None;
+            return;
+        };
+        let hay: Vec<char> = self.plain.chars().flat_map(|c| c.to_lowercase()).collect();
+        let needle: Vec<char> = q.chars().flat_map(|c| c.to_lowercase()).collect();
+        if needle.is_empty() || hay.len() < needle.len() {
+            self.match_ix = None;
+            return;
+        }
+        let mut i = 0;
+        while i + needle.len() <= hay.len() {
+            if hay[i..i + needle.len()] == needle[..] {
+                self.matches.push(i..i + needle.len());
+                i += needle.len();
+            } else {
+                i += 1;
+            }
+        }
+        let sel = self.sel.range();
+        self.match_ix = self.matches.iter().position(|m| *m == sel);
+    }
+
+    /// Select the next (`dir > 0`) or previous match relative to the caret.
+    /// With `inclusive`, a match starting at the caret counts as "next".
+    pub fn search_step(&mut self, dir: i32, inclusive: bool, cx: &mut Context<Self>) {
+        if self.matches.is_empty() {
+            cx.notify();
+            return;
+        }
+        let r = self.sel.range();
+        let ix = if dir > 0 {
+            let from = if inclusive { r.start } else { r.start + 1 };
+            self.matches.iter().position(|m| m.start >= from).unwrap_or(0)
+        } else {
+            self.matches
+                .iter()
+                .rposition(|m| m.start < r.start)
+                .unwrap_or(self.matches.len() - 1)
+        };
+        let m = self.matches[ix].clone();
+        self.goal_x = None;
+        self.set_selection(Selection { anchor: m.start, head: m.end }, cx);
+        self.match_ix = Some(ix);
+    }
+
+    /// Replace the current match (if the selection is one) and move to the next.
+    pub fn replace_current(&mut self, with: &str, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        let r = self.sel.range();
+        if self.matches.iter().any(|m| *m == r) {
+            self.begin_edit();
+            self.delete_cp_range(r.clone());
+            self.insert_at(r.start, with);
+            self.sel = Selection::caret(r.start + with.chars().count());
+            self.commit(cx);
+        }
+        self.search_step(1, true, cx);
+    }
+
+    pub fn replace_all(&mut self, with: &str, cx: &mut Context<Self>) {
+        if self.read_only || self.matches.is_empty() {
+            return;
+        }
+        self.begin_edit();
+        for m in self.matches.clone().into_iter().rev() {
+            self.delete_cp_range(m.clone());
+            self.insert_at(m.start, with);
+        }
+        self.sel = Selection::caret(self.sel.head.min(self.paras.max_cursor()));
+        self.commit(cx);
     }
 
     // ----- movement --------------------------------------------------------
@@ -785,6 +1334,7 @@ impl ProseEditor {
 
     pub(crate) fn on_mouse_down(&mut self, ev: &MouseDownEvent, cx: &mut Context<Self>) {
         let Some(cp) = self.cp_for_window_point(ev.position) else { return };
+        self.comment_edit = None;
         self.goal_x = None;
         match ev.click_count {
             1 => {
@@ -913,7 +1463,9 @@ impl EntityInputHandler for ProseEditor {
             .unwrap_or_else(|| self.sel.range());
         let max = self.paras.max_cursor();
         let target = target.start.min(max)..target.end.min(max);
-        if text.contains('\n') && target == self.sel.range() {
+        // Plain typing (no IME composition in flight) goes through
+        // `insert_text` so pending marks and smart typography apply.
+        if self.marked.is_none() && target == self.sel.range() {
             self.insert_text(text, cx);
             return;
         }
@@ -1005,12 +1557,93 @@ impl EntityInputHandler for ProseEditor {
     }
 }
 
+impl ProseEditor {
+    /// The floating editor for the active comment, positioned over its margin card.
+    fn render_comment_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let edit = self.comment_edit.as_ref()?;
+        let frame = self.frame.borrow();
+        let f = frame.as_ref()?;
+        // Over the margin card when there is one; otherwise just under the
+        // anchored text (narrow windows have no margin).
+        let (left, top, width, resolved) = match f.cards.iter().find(|c| c.id == edit.id) {
+            Some(card) => (
+                card.bounds.origin.x - f.bounds_origin.x,
+                card.bounds.origin.y - f.bounds_origin.y,
+                card.bounds.size.width,
+                card.resolved,
+            ),
+            None => {
+                let anchor = self.comment_anchors_with(true).into_iter().find(|a| a.id == edit.id)?;
+                let (pt, lh) = f.point_for_cp(anchor.range.start, &self.paras)?;
+                let width = px(320.).min(f.wrap_width);
+                let left = (pt.x - f.bounds_origin.x).min(f.origin.x + f.wrap_width - width - f.bounds_origin.x);
+                (left.max(px(0.)), pt.y + lh + px(4.) - f.bounds_origin.y, width, anchor.resolved)
+            }
+        };
+        let id = edit.id.clone();
+        let theme = cx.theme();
+        let (bg, border, muted) = (theme.popover, theme.border, theme.muted_foreground);
+        let id_resolve = id.clone();
+        let id_delete = id.clone();
+        Some(
+            v_flex()
+                .id("comment-overlay")
+                .occlude()
+                // Enter in the note input must not also split the paragraph.
+                .on_action(|_: &NewParagraph, _, _| {})
+                .absolute()
+                .left(left)
+                .top(top)
+                .w(width)
+                .p_2()
+                .gap_1()
+                .rounded_md()
+                .bg(bg)
+                .border_1()
+                .border_color(border)
+                .shadow_md()
+                .child(Input::new(&edit.input).small())
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .justify_between()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(if resolved { "Resolved" } else { "" })
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(
+                                    Button::new("comment-resolve")
+                                        .ghost()
+                                        .xsmall()
+                                        .label(if resolved { "Reopen" } else { "Resolve" })
+                                        .on_click(cx.listener(move |e, _, _, cx| {
+                                            e.set_comment_resolved(&id_resolve, !resolved, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("comment-delete")
+                                        .ghost()
+                                        .xsmall()
+                                        .label("Delete")
+                                        .on_click(cx.listener(move |e, _, _, cx| e.delete_comment(&id_delete, cx))),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+}
+
 impl Render for ProseEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let overlay = self.render_comment_overlay(cx);
         div()
             .id("prose-editor")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
+            .relative()
             .size_full()
             .on_action(cx.listener(|e, _: &Backspace, _, cx| e.backspace(cx)))
             .on_action(cx.listener(|e, _: &Delete, _, cx| e.delete_forward(cx)))
@@ -1081,6 +1714,22 @@ impl Render for ProseEditor {
             .on_action(cx.listener(|e, _: &ToggleItalic, _, cx| e.toggle_mark("italic", cx)))
             .on_action(cx.listener(|e, _: &ToggleUnderline, _, cx| e.toggle_mark("underline", cx)))
             .on_action(cx.listener(|e, _: &ToggleStrike, _, cx| e.toggle_mark("strike", cx)))
+            .on_action(cx.listener(|e, _: &ToggleSmallCaps, _, cx| e.toggle_mark("smallcaps", cx)))
+            .on_action(cx.listener(|e, _: &ToggleHighlight, _, cx| e.toggle_mark("highlight", cx)))
+            .on_action(cx.listener(|e, _: &AddComment, window, cx| e.add_comment(window, cx)))
+            .on_action(cx.listener(|e, _: &ToggleResolvedComments, _, cx| e.toggle_show_resolved(cx)))
+            .on_action(cx.listener(|e, _: &Cancel, window, cx| {
+                if e.comment_edit.is_some() {
+                    e.end_comment_edit(window, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|e, _: &EditCommentAtCaret, window, cx| {
+                if let Some(id) = e.active_comment() {
+                    e.begin_comment_edit(&id, window, cx)
+                }
+            }))
             .on_action(cx.listener(|e, _: &SetParagraph, _, cx| e.set_block(Block::Paragraph, cx)))
             .on_action(cx.listener(|e, _: &SetHeading1, _, cx| e.set_block(Block::H1, cx)))
             .on_action(cx.listener(|e, _: &SetHeading2, _, cx| e.set_block(Block::H2, cx)))
@@ -1088,5 +1737,6 @@ impl Render for ProseEditor {
             .on_action(cx.listener(|e, _: &SetQuote, _, cx| e.set_block(Block::Quote, cx)))
             .on_action(cx.listener(|e, _: &InsertSceneBreak, _, cx| e.insert_scene_break(cx)))
             .child(ProseElement::new(cx.entity().clone()))
+            .children(overlay)
     }
 }

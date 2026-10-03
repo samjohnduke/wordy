@@ -3,11 +3,16 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use loro::{LoroDoc, LoroMap, LoroTree, LoroValue, TreeID, TreeParentId, ValueOrContainer};
+use loro::{CommitOptions, LoroDoc, LoroMap, LoroTree, LoroValue, TreeID, TreeParentId, ValueOrContainer};
+
+use crate::comments::Comments;
 
 use crate::node::{Node, NodeKind, Space, Status};
 use crate::schema::{self, meta};
 use crate::storage;
+
+/// Commit origin for everything that is not a body edit. See [`Project::commit_meta`].
+pub const META_ORIGIN: &str = "meta";
 
 pub struct Project {
     pub doc: LoroDoc,
@@ -15,7 +20,7 @@ pub struct Project {
     pub dir: Option<PathBuf>,
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
@@ -57,9 +62,16 @@ impl Project {
     }
 
     /// Write the binary snapshot and the JSON mirror atomically.
+    /// Commit pending non-body edits (tree, metadata, comments) under the
+    /// `meta` origin. Editors exclude that origin from their undo stacks, so a
+    /// rename or a status change never gets undone by Ctrl-Z in a scene.
+    pub fn commit_meta(&self) {
+        self.doc.commit_with(CommitOptions::default().origin(META_ORIGIN));
+    }
+
     pub fn save(&self) -> Result<()> {
         let Some(dir) = &self.dir else { return Ok(()) };
-        self.doc.commit();
+        self.commit_meta();
         storage::save(&self.doc, dir)
     }
 
@@ -123,8 +135,8 @@ impl Project {
     pub fn tasks(&self) -> LoroMap {
         self.doc.get_map(schema::TASKS)
     }
-    pub fn comments(&self) -> LoroMap {
-        self.doc.get_map(schema::COMMENTS)
+    pub fn comments(&self) -> Comments {
+        Comments::new(self.doc.get_map(schema::COMMENTS))
     }
     pub fn versions(&self) -> LoroMap {
         self.doc.get_map(schema::VERSIONS)
@@ -272,7 +284,7 @@ impl Project {
     }
 
     pub fn export_snapshot(&self) -> Result<Vec<u8>> {
-        self.doc.commit();
+        self.commit_meta();
         Ok(self.doc.export(loro::ExportMode::Snapshot)?)
     }
 }
@@ -392,5 +404,34 @@ mod tests {
                 ("\n".to_string(), vec![]),
             ]
         );
+    }
+
+    #[test]
+    fn formatted_scene_round_trips_through_save_and_load() {
+        use crate::Paragraphs;
+        let dir = std::env::temp_dir().join(format!("wordy-rt-{}", ulid::Ulid::new()));
+        let p = Project::create(&dir, "RT").unwrap();
+        let scene = p.create_node(p.root(Space::Manuscript), NodeKind::Scene, "S").unwrap();
+        let body = p.node(scene).unwrap().body().unwrap();
+        body.insert(0, "Title\nSome bold and italic text.\n* * *\n").unwrap();
+        body.mark(5..6, "block", "h1").unwrap();
+        body.mark(11..15, "bold", true).unwrap();
+        body.mark(20..26, "italic", true).unwrap();
+        body.mark(11..26, "highlight", true).unwrap();
+        body.mark(16..19, "comment", "01ABC").unwrap();
+        body.mark(38..39, "block", "break").unwrap();
+        let before = Paragraphs::from_text(&body);
+        p.save().unwrap();
+
+        let q = Project::open(&dir).unwrap();
+        let body2 = q.node(scene).unwrap().body().unwrap();
+        let after = Paragraphs::from_text(&body2);
+        assert_eq!(before, after);
+        assert_eq!(after.get(0).unwrap().block, crate::Block::H1);
+        assert_eq!(after.get(2).unwrap().block, crate::Block::Break);
+        let runs = &after.get(1).unwrap().runs;
+        assert!(runs.iter().any(|r| r.marks.bold && r.marks.highlight));
+        assert!(runs.iter().any(|r| r.marks.comment.as_deref() == Some("01ABC")));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -8,8 +8,9 @@
 mod editor;
 mod element;
 mod style;
+mod typography;
 
-pub use editor::{EditorEvent, ProseEditor, Selection};
+pub use editor::{CommentAnchor, EditorEvent, ProseEditor, RichClipboard, RichFragment, Selection};
 pub use element::ProseElement;
 pub use style::EditorStyle;
 
@@ -55,6 +56,12 @@ gpui_kit::actions!(
         ToggleItalic,
         ToggleUnderline,
         ToggleStrike,
+        ToggleSmallCaps,
+        ToggleHighlight,
+        AddComment,
+        EditCommentAtCaret,
+        ToggleResolvedComments,
+        Cancel,
         SetParagraph,
         SetHeading1,
         SetHeading2,
@@ -95,6 +102,11 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-i", ToggleItalic, c),
         KeyBinding::new("secondary-u", ToggleUnderline, c),
         KeyBinding::new("secondary-shift-x", ToggleStrike, c),
+        KeyBinding::new("secondary-shift-k", ToggleSmallCaps, c),
+        KeyBinding::new("secondary-shift-h", ToggleHighlight, c),
+        KeyBinding::new("secondary-shift-m", AddComment, c),
+        KeyBinding::new("secondary-shift-e", EditCommentAtCaret, c),
+        KeyBinding::new("escape", Cancel, c),
         KeyBinding::new("secondary-alt-0", SetParagraph, c),
         KeyBinding::new("secondary-alt-1", SetHeading1, c),
         KeyBinding::new("secondary-alt-2", SetHeading2, c),

@@ -3,6 +3,7 @@
 //! Everything stored lives in one `LoroDoc`. This crate owns the schema, typed
 //! accessors over it, and save/load. Nothing here knows about the UI.
 
+pub mod comments;
 pub mod node;
 pub mod paragraphs;
 pub mod project;
@@ -13,5 +14,7 @@ pub use chrono;
 pub use loro;
 pub use loro::TreeID;
 pub use node::{Node, NodeKind, Space, Status};
+pub use comments::{Comment, Comments};
 pub use paragraphs::{count_words, Block, Marks, Paragraph, Paragraphs, Run};
+pub use project::META_ORIGIN;
 pub use project::Project;

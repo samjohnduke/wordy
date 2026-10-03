@@ -10,7 +10,9 @@ use wordy_doc::{storage, Project};
 
 use crate::workspace::Workspace;
 
-gpui_kit::actions!(wordy, [Quit, ToggleTheme, Save, NewItem]);
+gpui_kit::actions!(wordy, [Quit, ToggleTheme, Save, NewItem, Find, FindNext, FindPrev, Replace, CloseFind]);
+
+pub const EDITOR_PANEL_CONTEXT: &str = "EditorPanel";
 
 /// The open project, shared by every view in the window.
 ///
@@ -39,6 +41,11 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-n", NewItem, None),
         KeyBinding::new("cmd-shift-t", ToggleTheme, None),
         KeyBinding::new("ctrl-shift-t", ToggleTheme, None),
+        KeyBinding::new("secondary-f", Find, Some(EDITOR_PANEL_CONTEXT)),
+        KeyBinding::new("secondary-g", FindNext, Some(EDITOR_PANEL_CONTEXT)),
+        KeyBinding::new("secondary-shift-g", FindPrev, Some(EDITOR_PANEL_CONTEXT)),
+        KeyBinding::new("secondary-h", Replace, Some(EDITOR_PANEL_CONTEXT)),
+        KeyBinding::new("escape", CloseFind, Some(EDITOR_PANEL_CONTEXT)),
     ]);
     Theme::sync_system_appearance(None, cx);
 }

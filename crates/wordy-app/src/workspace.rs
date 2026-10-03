@@ -120,6 +120,18 @@ impl Workspace {
             }
         };
         let panel = cx.new(|cx| EditorPanel::open(self.project.clone(), id, body, cx));
+        // Keep each editor's undo stack to its own body: exclude every other
+        // open editor's commit origin, in both directions.
+        if let Some(new_editor) = panel.read(cx).editor().cloned() {
+            let new_origin = new_editor.read(cx).origin().to_string();
+            let others: Vec<Entity<wordy_editor::ProseEditor>> =
+                self.editors.values().filter_map(|p| p.read(cx).editor().cloned()).collect();
+            for other in others {
+                let other_origin = other.read(cx).origin().to_string();
+                new_editor.update(cx, |e, _| e.exclude_origin(&other_origin));
+                other.update(cx, |e, _| e.exclude_origin(&new_origin));
+            }
+        }
         let sub = cx.subscribe_in(&panel, window, move |this, _, ev: &EditorPanelEvent, _window, cx| match ev {
             EditorPanelEvent::Edited => this.on_edited(cx),
             EditorPanelEvent::Activated => {
