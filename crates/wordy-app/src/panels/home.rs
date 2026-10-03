@@ -1,7 +1,6 @@
 //! Home tab: dashboard (goals, streak, pace, project file), reports (words
-//! per day), tasks, the placeholder scan, export, LAN sync, and shortcuts.
+//! per day), tasks, the placeholder scan, export, the account, and shortcuts.
 
-use std::net::{SocketAddr, ToSocketAddrs as _};
 use std::path::PathBuf;
 
 use gpui_kit::base::StyledExt as _;
@@ -21,7 +20,7 @@ use wordy_doc::{storage, Goals, NodeKind, Space, Status, TreeID};
 use wordy_export::{CompileOptions, Format};
 
 use crate::app::SharedProject;
-use crate::sync::{CloudStatus, CloudSyncStatus, SyncManager, SyncStatus};
+use crate::sync::{CloudStatus, CloudSyncStatus, SyncManager};
 
 pub enum HomeEvent {
     /// Open a node in an editor tab.
@@ -43,7 +42,7 @@ enum Page {
     Tasks,
     Placeholders,
     Export,
-    Sync,
+    Account,
     Shortcuts,
 }
 
@@ -54,7 +53,7 @@ impl Page {
         Page::Tasks,
         Page::Placeholders,
         Page::Export,
-        Page::Sync,
+        Page::Account,
         Page::Shortcuts,
     ];
     fn label(self) -> &'static str {
@@ -64,7 +63,7 @@ impl Page {
             Page::Tasks => "Tasks",
             Page::Placeholders => "Placeholders",
             Page::Export => "Export",
-            Page::Sync => "Sync",
+            Page::Account => "Account",
             Page::Shortcuts => "Shortcuts",
         }
     }
@@ -75,7 +74,7 @@ impl Page {
             Page::Tasks => "home-tasks",
             Page::Placeholders => "home-placeholders",
             Page::Export => "home-export",
-            Page::Sync => "home-sync",
+            Page::Account => "home-account",
             Page::Shortcuts => "home-shortcuts",
         }
     }
@@ -116,10 +115,7 @@ pub struct HomePanel {
     exporting: bool,
     _export_task: Option<Task<()>>,
     sync_name: Entity<InputState>,
-    sync_code: Entity<InputState>,
-    sync_addr: Entity<InputState>,
     sync_server: Entity<InputState>,
-    sync_addr_error: Option<String>,
     pub focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -203,13 +199,9 @@ impl HomePanel {
             );
         }
 
-        let (peer_name, pairing_code, cloud_server) = {
+        let (device_name, cloud_server) = {
             let m = sync.read(cx);
-            (
-                m.config.peer_name.clone(),
-                m.config.pairing_code.clone(),
-                m.config.cloud_server.clone(),
-            )
+            (m.config.device_name.clone(), m.config.cloud_server.clone())
         };
         let sync_server = cx.new(|cx| {
             InputState::new(window, cx)
@@ -226,36 +218,17 @@ impl HomePanel {
         );
         let sync_name = cx.new(|cx| {
             InputState::new(window, cx)
-                .default_value(peer_name)
+                .default_value(device_name)
                 .placeholder("This machine's name")
         });
-        let sync_code = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(pairing_code)
-                .placeholder("Same code on both machines")
-        });
-        let sync_addr = cx.new(|cx| InputState::new(window, cx).placeholder("host:port, e.g. 192.168.1.20:40123"));
         subs.push(
             cx.subscribe_in(&sync_name, window, |this, input, ev: &InputEvent, _, cx| {
                 if matches!(ev, InputEvent::Change) {
                     let v = input.read(cx).value().to_string();
-                    this.sync.update(cx, |m, cx| m.set_peer_name(&v, cx));
+                    this.sync.update(cx, |m, cx| m.set_device_name(&v, cx));
                 }
             }),
         );
-        subs.push(
-            cx.subscribe_in(&sync_code, window, |this, input, ev: &InputEvent, _, cx| {
-                if matches!(ev, InputEvent::Change) {
-                    let v = input.read(cx).value().to_string();
-                    this.sync.update(cx, |m, cx| m.set_pairing_code(&v, cx));
-                }
-            }),
-        );
-        subs.push(cx.subscribe_in(&sync_addr, window, |this, _, ev: &InputEvent, _, cx| {
-            if matches!(ev, InputEvent::PressEnter { .. }) {
-                this.sync_manual(cx);
-            }
-        }));
         subs.push(cx.observe(&sync, |_, _, cx| cx.notify()));
 
         Self {
@@ -273,10 +246,7 @@ impl HomePanel {
             exporting: false,
             _export_task: None,
             sync_name,
-            sync_code,
-            sync_addr,
             sync_server,
-            sync_addr_error: None,
             focus: cx.focus_handle(),
             _subs: subs,
         }
@@ -541,138 +511,6 @@ impl HomePanel {
             .into_any_element()
     }
 
-    /// Sync with the address typed into the manual field.
-    fn sync_manual(&mut self, cx: &mut Context<Self>) {
-        let text = self.sync_addr.read(cx).value().trim().to_string();
-        if text.is_empty() {
-            return;
-        }
-        let addr: Option<SocketAddr> = text.parse().ok().or_else(|| text.to_socket_addrs().ok()?.next());
-        match addr {
-            Some(addr) => {
-                self.sync_addr_error = None;
-                self.sync.update(cx, |m, cx| m.sync_with(addr, &text, cx));
-            }
-            None => self.sync_addr_error = Some(format!("“{text}” is not a host:port address")),
-        }
-        cx.notify();
-    }
-
-    fn render_sync(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let muted = theme.muted_foreground;
-        let m = self.sync.read(cx);
-        let busy = m.busy();
-        let ready = m.config.ready();
-        let my_project = m.project_id();
-        let port = m.port();
-        let peers = m.peers.clone();
-        let status = m.status.clone();
-        let discovery_error = m.discovery_error.clone();
-
-        let field = |label: &str, input: &Entity<InputState>| {
-            h_flex()
-                .items_center()
-                .gap_3()
-                .child(div().w(px(90.)).text_xs().text_color(muted).child(label.to_string()))
-                .child(div().w(px(360.)).child(Input::new(input).small()))
-        };
-        let listening = match port {
-            Some(p) => format!("Listening on port {p}. Other copies of this project on the network appear below."),
-            None => "The sync server could not start; see the log.".to_string(),
-        };
-        let this_machine = Self::section("This machine", cx)
-            .child(field("Name", &self.sync_name))
-            .child(field("Pairing code", &self.sync_code))
-            .child(div().text_xs().text_color(muted).child(listening))
-            .child(div().text_xs().text_color(muted).child(
-                "Type the same pairing code on both machines once. Sync merges edits made on both sides, copies missing attachments both ways and unions the custom dictionaries.",
-            ));
-
-        let mut peer_box = Self::section("Peers", cx);
-        if let Some(err) = discovery_error {
-            peer_box = peer_box.child(div().text_xs().text_color(theme.danger).child(err));
-        }
-        if peers.is_empty() {
-            peer_box = peer_box.child(div().text_sm().text_color(muted).child(
-                "No other Wordy found yet. Open the same project on the other machine (copy the folder or a backup zip first).",
-            ));
-        }
-        for (i, peer) in peers.into_iter().enumerate() {
-            let same = peer.project_id == my_project;
-            let addr = peer.addr;
-            let name = peer.name.clone();
-            let mut row = h_flex()
-                .items_center()
-                .gap_3()
-                .child(div().text_sm().font_semibold().w(px(200.)).child(name.clone()))
-                .child(div().text_xs().text_color(muted).w(px(180.)).child(addr.to_string()));
-            if same {
-                row = row.child(
-                    Button::new(ElementId::Name(format!("sync-peer-{i}").into()))
-                        .primary()
-                        .small()
-                        .label("Sync")
-                        .disabled(busy || !ready)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let name = name.clone();
-                            this.sync.update(cx, |m, cx| m.sync_with(addr, &name, cx));
-                        })),
-                );
-            } else {
-                row = row.child(div().text_xs().text_color(muted).child("different project"));
-            }
-            peer_box = peer_box.child(row);
-        }
-        let mut manual = h_flex()
-            .items_center()
-            .gap_3()
-            .child(div().w(px(90.)).text_xs().text_color(muted).child("By address"))
-            .child(div().w(px(360.)).child(Input::new(&self.sync_addr).small()))
-            .child(
-                Button::new("sync-manual")
-                    .small()
-                    .label("Connect")
-                    .disabled(busy || !ready)
-                    .on_click(cx.listener(|this, _, _, cx| this.sync_manual(cx))),
-            );
-        if let Some(err) = &self.sync_addr_error {
-            manual = manual.child(div().text_xs().text_color(theme.danger).child(err.clone()));
-        }
-        peer_box = peer_box.child(manual);
-
-        let status_line: Option<(String, bool)> = match status {
-            SyncStatus::Idle => None,
-            SyncStatus::Busy(s) => Some((s, true)),
-            SyncStatus::Done { peer, summary, when } => {
-                Some((format!("Synced with {peer} at {when}: {summary}."), true))
-            }
-            SyncStatus::Failed(e) => Some((format!("Sync failed: {e}"), false)),
-        };
-        let mut status_box = v_flex().gap_2();
-        if let Some((text, ok)) = status_line {
-            let color = if ok { theme.foreground } else { theme.danger };
-            status_box = status_box.child(div().text_sm().text_color(color).child(text));
-        }
-        if !ready {
-            status_box = status_box.child(
-                div()
-                    .text_xs()
-                    .text_color(theme.danger)
-                    .child("Enter a pairing code before syncing."),
-            );
-        }
-
-        v_flex()
-            .gap_3()
-            .w_full()
-            .child(self.render_account(cx))
-            .child(this_machine)
-            .child(peer_box)
-            .child(status_box)
-            .into_any_element()
-    }
-
     /// The cloud account card: link this machine, or show who is signed in
     /// and the other linked machines.
     fn render_account(&self, cx: &mut Context<Self>) -> Div {
@@ -696,6 +534,17 @@ impl HomePanel {
                 card = card.child(div().text_xs().text_color(muted).child(
                     "Link this machine to your Wordy account to back projects up and sync them between machines. Sign-in happens in your browser with a passkey; nothing is typed here.",
                 ));
+                card = card.child(
+                    h_flex()
+                        .items_center()
+                        .gap_3()
+                        .child(div().w(px(90.)).text_xs().text_color(muted).child("This machine"))
+                        .child(
+                            div()
+                                .w(px(360.))
+                                .child(Input::new(&self.sync_name).small().disabled(busy)),
+                        ),
+                );
                 card = card.child(
                     h_flex()
                         .items_center()
@@ -1784,7 +1633,7 @@ impl Render for HomePanel {
             Page::Tasks => self.render_tasks(cx),
             Page::Placeholders => self.render_placeholders(cx),
             Page::Export => self.render_export(cx),
-            Page::Sync => self.render_sync(cx),
+            Page::Account => self.render_account(cx).into_any_element(),
             Page::Shortcuts => self.render_shortcuts(cx),
         };
         v_flex()

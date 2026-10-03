@@ -292,7 +292,6 @@ impl Workspace {
 
         let sync = cx.new(|cx| SyncManager::new(project.clone(), cx));
         let sync_sub = cx.subscribe(&sync, |this, _, ev: &SyncEvent, cx| match ev {
-            SyncEvent::Applied(outcome) => this.after_sync(outcome, cx),
             SyncEvent::RemoteReady => this.apply_cloud(cx),
             SyncEvent::CloudWords => this.on_cloud_words(cx),
             SyncEvent::CloudAssets => this.on_cloud_assets(cx),
@@ -628,36 +627,6 @@ impl Workspace {
 
     fn on_show_home(&mut self, _: &ShowHome, window: &mut Window, cx: &mut Context<Self>) {
         self.show_home(window, cx);
-    }
-
-    /// A sync imported edits from the other machine (already saved): refresh
-    /// the index, the matcher, every open editor and the spell checker.
-    fn after_sync(&mut self, outcome: &wordy_sync::SyncOutcome, cx: &mut Context<Self>) {
-        if !outcome.new_words.is_empty() {
-            SpellState::set_custom_words(cx, self.project.load_dictionary());
-        }
-        self.project.refresh_matcher();
-        self.project.rebuild_index();
-        let targets = self.project.link_targets();
-        for panel in self.editors.values() {
-            panel.update(cx, |p, cx| {
-                p.reload(cx);
-                p.set_link_targets(targets.clone(), cx);
-                p.rescan_spelling(cx);
-            });
-        }
-        self.reference.update(cx, |r, cx| {
-            r.set_link_targets(targets, cx);
-            cx.notify();
-        });
-        self.dock.update(cx, |_, cx| cx.notify());
-        self.dirty = false;
-        self.dirty_nodes.clear();
-        self.last_saved = Some(chrono_time());
-        if let Some(home) = &self.home {
-            home.update(cx, |_, cx| cx.notify());
-        }
-        cx.notify();
     }
 
     /// A word was added to the custom dictionary: persist it and re-check

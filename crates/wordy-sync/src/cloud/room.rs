@@ -23,8 +23,7 @@ use tungstenite::{Message, WebSocket};
 
 use super::protocol::{split_frame, AssetEntry, ClientMsg, ServerMsg, MAX_INLINE, PROTOCOL_VERSION};
 use super::{is_unauthorized, Client};
-use crate::protocol::sha256_hex;
-use crate::session::safe_relative;
+use crate::util::{safe_relative, sha256_hex};
 
 /// How long a read waits before the thread checks for commands.
 const READ_TICK: Duration = Duration::from_millis(250);

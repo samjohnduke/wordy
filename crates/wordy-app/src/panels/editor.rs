@@ -389,12 +389,6 @@ impl EditorPanel {
         cx.notify();
     }
 
-    /// The document changed underneath us (a sync imported edits): re-read
-    /// the body and the sheet.
-    pub fn reload(&mut self, cx: &mut Context<Self>) {
-        self.reload_keeping(None, cx);
-    }
-
     /// The selection as Loro cursors, for `reload_keeping`.
     pub fn cursor_marks(&self, cx: &App) -> Option<CursorMarks> {
         self.editor.as_ref().map(|e| e.read(cx).cursor_marks())

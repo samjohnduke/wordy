@@ -1,5 +1,5 @@
-//! Per-machine sync settings: this machine's name, the pairing code and the
-//! linked cloud account. Stored in `~/.config/wordy/sync.json` (override the
+//! Per-machine sync settings: this machine's name, the server and the
+//! linked account. Stored in `~/.config/wordy/sync.json` (override the
 //! folder with `WORDY_CONFIG_DIR`, handy for running two copies on one
 //! machine). The file holds a bearer token once linked, so it is written
 //! readable by the owner only.
@@ -14,12 +14,10 @@ use crate::cloud::CloudAccount;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct SyncConfig {
-    /// Shown to the other side; defaults to the hostname.
-    pub peer_name: String,
-    /// Pre-shared pairing code, typed once on each machine.
-    pub pairing_code: String,
-    /// Listening port; 0 picks a free one each launch.
-    pub port: u16,
+    /// How this machine is listed on the account; defaults to the hostname.
+    /// (`peer_name` is the field's old name, from the LAN sync days.)
+    #[serde(alias = "peer_name")]
+    pub device_name: String,
     /// Which Wordy server the cloud account lives on.
     pub cloud_server: String,
     /// The linked cloud account, if this machine has been linked.
@@ -29,16 +27,14 @@ pub struct SyncConfig {
 impl Default for SyncConfig {
     fn default() -> Self {
         Self {
-            peer_name: default_peer_name(),
-            pairing_code: String::new(),
-            port: 0,
+            device_name: default_device_name(),
             cloud_server: crate::cloud::DEFAULT_SERVER.to_string(),
             cloud: None,
         }
     }
 }
 
-pub fn default_peer_name() -> String {
+pub fn default_device_name() -> String {
     gethostname::gethostname()
         .to_string_lossy()
         .trim_end_matches(".local")
@@ -90,10 +86,6 @@ impl SyncConfig {
         } else {
             s.to_string()
         }
-    }
-
-    pub fn ready(&self) -> bool {
-        !self.pairing_code.trim().is_empty() && !self.peer_name.trim().is_empty()
     }
 }
 

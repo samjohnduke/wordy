@@ -61,7 +61,7 @@ mod hex_bytes {
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&crate::protocol::hex(bytes))
+        s.serialize_str(&crate::util::hex(bytes))
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
@@ -131,7 +131,7 @@ mod absorb_tests {
     #[test]
     fn absorb_skips_remote_ops_but_not_unsent_local_ones() {
         // Peer 1 is us (all pushed), peer 2 arrived from the cloud, peer 3
-        // came by LAN sync earlier and was never pushed.
+        // came from a copied folder earlier and was never pushed.
         let before = vv(&[(1, 10), (3, 5)]);
         let after = vv(&[(1, 10), (2, 7), (3, 9)]);
         let mut pushed = vv(&[(1, 10), (3, 2)]);

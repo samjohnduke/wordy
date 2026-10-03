@@ -1,8 +1,8 @@
 # Wordy
 
 A private, personal fiction-writing app: manuscript, world and notes in one
-window, rich text on a Loro CRDT document, and manual file-level sync between
-two machines on the same network. Native (Rust, gpui) on macOS and Linux.
+window, rich text on a Loro CRDT document, and optional sync between your
+machines through a Wordy account. Native (Rust, gpui) on macOS and Linux.
 `PLAN.md` is the design and the build log.
 
 ## Build
@@ -42,7 +42,8 @@ cargo test --all-targets
    Expect a window titled "Wordy — launch-check" with the empty-manuscript
    hint, type a sentence into a new scene, quit with Cmd-Q, relaunch with
    the same path and see the sentence again. Delete `/tmp/launch-check`.
-3. Run the two-host sync checklist in [`docs/sync-test.md`](docs/sync-test.md).
+3. Walk through [`docs/localhost-testing.md`](docs/localhost-testing.md) once: link two
+   app instances to accounts on a local server and see an edit cross between them.
 4. Bump `version` in the root `Cargo.toml`, add `site/src/content/changelog/<version>.md`,
    then push a `v<version>` tag. `.github/workflows/release.yml` builds the Linux
    tarball and the macOS app zip and publishes a GitHub Release with the changelog
@@ -101,7 +102,7 @@ on one computer: passkeys in the browser, the app pointed at `http://localhost:8
 second app instance (`WORDY_CONFIG_DIR`, `WORDY_PROJECTS_DIR`) and sharing between two
 accounts; `pnpm mail` prints the emails wrangler wrote.
 
-In the app, Sync → Account → "Link this machine" opens the browser at `/device` with a
+In the app, Home → Account → "Link this machine" opens the browser at `/device` with a
 code; approving it there with a passkey gives the app a bearer token, stored in
 `sync.json` (owner-readable only). "Sync this project" then keeps the open project in its
 room on the server: every save sends the new edits, edits from other machines land after

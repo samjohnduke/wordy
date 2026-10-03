@@ -5,7 +5,7 @@ document model. Mac and Linux only. Single user. No website, no Windows, no Scri
 
 Reference feature set: EmberWrite (spaces, act/chapter/scene tree, wiki with templates, entity
 linking, scene versioning, tags, split panes, goals and stats, tasks, attachments, snippets,
-docx/pdf/epub export, LAN sync).
+docx/pdf/epub export, sync).
 
 ---
 
@@ -18,7 +18,8 @@ docx/pdf/epub export, LAN sync).
 - Manuscript hierarchy (Act / Chapter / Scene), World space (characters, locations, cultures,
   systems, objects), Notes space.
 - Lossless storage with full history (Loro snapshot), JSON mirror for inspection.
-- Manual LAN sync between two machines, conflict-free via CRDT merge.
+- Sync between machines through an account, conflict-free via CRDT merge (§13; the
+  original LAN sync of §9 was removed on 2026-10-04).
 - Mac (Apple Silicon) and Linux (Wayland, X11 fallback) builds.
 
 **Non-goals**
@@ -46,7 +47,6 @@ docx/pdf/epub export, LAN sync).
 | ePub export | `epub-builder` | 0.8 | |
 | PDF export | `typst` (+ `typst-pdf`) | 0.15 | manuscript template compiled in-process |
 | Snippet images | `tiny-skia` + `cosmic-text` | 0.12 / 0.19 | render quote to PNG |
-| LAN discovery | `mdns-sd` | 0.21 | no async runtime needed |
 | Serialization | `serde`, `serde_json` | | settings, JSON mirror |
 | Editor/PDF font | Libertinus Serif (OFL) | | bundled as embedded asset |
 
@@ -70,7 +70,7 @@ wordy/
     wordy-index     # SQLite index: words, backlinks, tags, search, stats; rebuilt from doc
     wordy-editor    # gpui prose editor element (layout, input, selection, decorations)
     wordy-export    # docx / epub / pdf / snippet png
-    wordy-sync      # LAN peer discovery + update exchange
+    wordy-sync      # account link, project rooms over websockets, fetching copies
     wordy-app       # gpui-component shell: spaces, panels, views, commands, settings
 ```
 
@@ -258,7 +258,11 @@ paragraphs → target format.
 
 ---
 
-## 9. LAN sync (`wordy-sync`)
+## 9. LAN sync (`wordy-sync`) — removed 2026-10-04
+
+Built in Phase 6 and taken out again in Phase 18 once account sync (§13) covered the
+same ground without a second machine on the same network. Kept here as the record of
+what it was.
 
 Manual, two-machine, conflict-free.
 
@@ -323,7 +327,7 @@ Each phase ends with something usable. Don't start the next until the acceptance
 - docx, epub, typst PDF, snippet PNG, project zip.
 - **Accept:** compiled manuscript opens cleanly in Word/Pages, Apple Books/Calibre, and a PDF viewer.
 
-### Phase 6 — LAN sync (1–2 weeks)
+### Phase 6 — LAN sync (1–2 weeks) *(built, later removed in Phase 18)*
 - mDNS discovery, pairing, update exchange, asset manifest, dictionary union.
 - **Accept:** edit the same scene on both machines offline, sync, both converge with both edits.
 
@@ -393,7 +397,6 @@ sidebar and editor) is **intentional** and stays.
 - JSON mirror written at most once per 30 s and on quit, not on every autosave.
 - IME tests: `replace_and_mark_text_in_range` / `unmark_text` round-trips for composition,
   dead keys, and replacing a marked range with a selection present.
-- Two-host sync checklist in `docs/sync-test.md` (manual, run before each release).
 - **Accept:** CI green on both OSes; a year-old project opens without manual compaction.
 
 ### Phase 13 — Loose ends after the gap audit (code done 2026-10-03; *(manual)* items open)
@@ -416,8 +419,6 @@ here rather than done in code.
   held up; the only breakage was an unquoted colon in a step name. Both `ubuntu-latest` and
   `macos-latest` pass fmt, clippy, build and test (26 and 34 minutes cold). *(manual, still
   open)* the Mac binary has not been launched by a person.
-- *(manual)* Two-host sync checklist (`docs/sync-test.md`) has never been run; sync is plain
-  TCP on the LAN with no TLS, by design for a two-machine private tool.
 - *(manual)* HiDPI and fractional scaling: check text crispness and hit targets at 1.5× and 2×
   on both OSes.
 - No UI-level tests: gpui's `test-support` feature would rebuild gpui for the test profile, so
@@ -569,8 +570,8 @@ a snapshot that compacts the log and a reconnect after it. *(Done:
 `crates/wordy-sync/tests/cloud.rs::room_syncs_two_copies` runs two `RoomHandle`s on two
 Loro docs against the local server: snapshot, live edits both ways, dictionary, an
 attachment, a 700 KiB update over HTTP, compaction, replay from the base, a reset and a
-stranger's refusal. The in-app behaviour was checked by building; the two-machine
-walk-through goes into `docs/sync-test.md` with the next release.)*
+stranger's refusal. The in-app behaviour was checked by building; the two-instance
+walk-through is `docs/localhost-testing.md`.)*
 
 ### Phase 17 — Sharing (2026-10-04)
 
@@ -630,3 +631,16 @@ computer against `wrangler dev`. `docs/localhost-testing.md` is the procedure.
 - Not done: a second window shares the process (one dictionary in the spell checker,
   Quit closes both); it is meant for testing and for getting a copy, not as a general
   multi-window mode.
+
+### Phase 18 — LAN sync removed (2026-10-04)
+
+Done. The Phase 6 peer sync (mDNS discovery, pairing code, TCP sessions pushing whole
+snapshots, the "Peers" and "By address" controls) is gone; account sync does the job
+without two machines having to be on one network. Deleted: `client.rs`, `server.rs`,
+`discovery.rs`, `protocol.rs`, `session.rs` and `tests/converge.rs` in `wordy-sync`,
+`docs/sync-test.md`, and the `mdns-sd` and `hmac` dependencies. The three helpers the
+cloud code shared with it (`hex`, `sha256_hex`, `safe_relative`) live in
+`wordy-sync/src/util.rs`. `SyncConfig` keeps only `device_name` (read from the old
+`peer_name` key too), `cloud_server` and `cloud`; `SyncManager` owns only the account
+and the room. The Home tab's "Sync" page is now "Account": the card alone, with the
+machine's name next to the server field before linking.
