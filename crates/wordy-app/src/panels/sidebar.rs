@@ -1005,12 +1005,7 @@ impl Render for SidebarPanel {
             .justify_between()
             .px_2()
             .py_1()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(self.space.label().to_uppercase()),
-            )
+            .child(super::heading(self.space.label(), cx))
             .child(
                 h_flex()
                     .gap_0p5()
@@ -1122,11 +1117,31 @@ impl Render for SidebarPanel {
                     .overflow_y_scroll()
                     .when(searching && !filtering, |d| d.children(self.render_search_results(cx)))
                     .when(!searching && items.is_empty(), |d| {
-                        d.child(div().p_2().text_sm().text_color(muted).child(if filtering {
-                            "No scene mentions this entity yet."
-                        } else {
-                            "Nothing here yet. Use + to add one."
-                        }))
+                        if filtering {
+                            return d.child(
+                                div()
+                                    .p_3()
+                                    .text_sm()
+                                    .text_color(muted)
+                                    .child("No scene mentions this entity yet."),
+                            );
+                        }
+                        // An empty space offers the one thing you would do next.
+                        let (hint, action, kind) = match self.space {
+                            Space::Manuscript => ("Your manuscript is empty.", "Create your first chapter", container),
+                            Space::World => ("No people, places or things yet.", "Add a character", leaf),
+                            Space::Notes => ("No notes yet.", "New note", leaf),
+                        };
+                        d.child(
+                            v_flex()
+                                .p_3()
+                                .gap_2()
+                                .items_start()
+                                .child(div().text_sm().text_color(muted).child(hint))
+                                .child(Button::new("empty-create").outline().small().label(action).on_click(
+                                    cx.listener(move |this, _, window, cx| this.create(root, kind, window, cx)),
+                                )),
+                        )
                     })
                     .when(!searching || filtering, |d| d.children(items))
                     .children(trash_section)

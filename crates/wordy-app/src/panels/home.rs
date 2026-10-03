@@ -14,7 +14,7 @@ use gpui_kit::component::progress::Progress;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Disableable as _, Sizable as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use wordy_doc::chrono::{Duration, NaiveDate};
+use wordy_doc::chrono::{Datelike as _, Duration, NaiveDate};
 use wordy_doc::loro::{LoroValue, ValueOrContainer};
 use wordy_doc::momentum::{date_str, parse_date, today};
 use wordy_doc::{storage, Goals, NodeKind, Space, Status, TreeID};
@@ -708,13 +708,7 @@ impl HomePanel {
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().secondary.opacity(0.35))
-            .child(
-                div()
-                    .text_xs()
-                    .font_semibold()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(title.to_uppercase()),
-            )
+            .child(super::heading(title.to_string(), cx))
     }
 
     /// One chapter line on the dashboard: title, scene count, words.
@@ -1096,6 +1090,39 @@ impl HomePanel {
             .tooltip_title(|d: &Day| format!("Day {}", d.label).into())
             .tooltip_value(|_, v| format!("{v:.0} words").into());
 
+        // ---- per week, 26 weeks, Monday-based ----
+        let this_monday = today - Duration::days(today.weekday().num_days_from_monday() as i64);
+        let mut weeks: Vec<Day> = Vec::new();
+        let mut week_total = 0i64;
+        let mut active_weeks = 0i64;
+        for i in (0..26).rev() {
+            let start = this_monday - Duration::weeks(i);
+            let end = start + Duration::days(7);
+            let words: i64 = sessions
+                .iter()
+                .filter(|s| s.date >= start && s.date < end)
+                .map(|s| s.words().max(0))
+                .sum();
+            week_total += words;
+            if words > 0 {
+                active_weeks += 1;
+            }
+            weeks.push(Day {
+                label: start.format("%-d %b").to_string(),
+                words: words as f64,
+            });
+        }
+        let week_chart = BarChart::new(weeks)
+            .id("words-per-week")
+            .band(|d: &Day| d.label.clone())
+            .value(|d: &Day| d.words)
+            .tick_margin(4)
+            .label_axis(true)
+            .value_axis(true)
+            .grid(true)
+            .tooltip_title(|d: &Day| format!("Week of {}", d.label).into())
+            .tooltip_value(|_, v| format!("{v:.0} words").into());
+
         let summary = h_flex()
             .gap_6()
             .text_sm()
@@ -1107,8 +1134,9 @@ impl HomePanel {
             )
             .child(div().text_color(muted).child(format!("{} h written", seconds / 3600)));
 
+        // ---- every session, newest first ----
         let mut table = v_flex().gap_0().w_full().text_sm();
-        for s in sessions.iter().rev().take(14) {
+        for s in sessions.iter().rev() {
             table = table.child(
                 h_flex()
                     .w_full()
@@ -1132,6 +1160,104 @@ impl HomePanel {
                     ),
             );
         }
+        let table_head = |cx: &App| {
+            h_flex()
+                .w_full()
+                .px_1()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(div().w(px(110.)).child("Date"))
+                .child(div().w(px(90.)).text_right().child("Words"))
+                .child(div().w(px(90.)).text_right().child("Time"))
+                .child(div().flex_1().text_right().child("Manuscript"))
+        };
+
+        // ---- chapters with goal progress ----
+        let root = p.root(Space::Manuscript);
+        let mut chapters = v_flex().gap_0().w_full().text_sm();
+        let mut any_goal = false;
+        let mut n_chapters = 0usize;
+        for chapter in p.children(root) {
+            let Ok(node) = p.node(chapter) else { continue };
+            if node.kind() != NodeKind::Chapter {
+                continue;
+            }
+            n_chapters += 1;
+            let mut words = 0usize;
+            let mut scenes = 0usize;
+            p.walk(chapter, &mut |_, n| {
+                if n.kind() == NodeKind::Scene {
+                    scenes += 1;
+                    if n.include_in_compile() {
+                        words += n.word_count();
+                    }
+                }
+            });
+            let goal = node.word_goal().filter(|g| *g > 0);
+            any_goal |= goal.is_some();
+            let id = chapter;
+            let bar: AnyElement = match goal {
+                Some(g) => {
+                    let pct = (words as f32 / g as f32 * 100.).min(100.);
+                    let color = if words as i64 >= g { theme.green } else { theme.primary };
+                    h_flex()
+                        .w(px(220.))
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(Progress::new(format!("rep-goal-{chapter}")).value(pct).color(color)),
+                        )
+                        .child(
+                            div()
+                                .w(px(80.))
+                                .text_right()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(format!("{words} / {g}")),
+                        )
+                        .into_any_element()
+                }
+                None => div()
+                    .w(px(220.))
+                    .text_right()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("no goal")
+                    .into_any_element(),
+            };
+            chapters = chapters.child(
+                h_flex()
+                    .id(ElementId::Name(format!("rep-ch-{chapter}").into()))
+                    .w_full()
+                    .px_1()
+                    .py_0p5()
+                    .gap_3()
+                    .items_center()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.secondary))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(node.title()),
+                    )
+                    .child(
+                        div()
+                            .w(px(50.))
+                            .text_right()
+                            .text_color(muted)
+                            .child(format!("{scenes} sc")),
+                    )
+                    .child(div().w(px(70.)).text_right().child(format!("{words}")))
+                    .child(bar)
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(HomeEvent::Open(id)))),
+            );
+        }
 
         v_flex()
             .gap_3()
@@ -1142,18 +1268,45 @@ impl HomePanel {
                     .child(div().w_full().h(px(220.)).child(chart)),
             )
             .child(
-                Self::section("Sessions", cx)
+                Self::section("Words per week (last 26 weeks)", cx)
+                    .child(div().text_sm().text_color(muted).child(format!(
+                        "{week_total} words · {active_weeks} active week{} · avg {} per active week",
+                        if active_weeks == 1 { "" } else { "s" },
+                        week_total / active_weeks.max(1)
+                    )))
+                    .child(div().w_full().h(px(200.)).child(week_chart)),
+            )
+            .child(
+                Self::section("Chapters", cx)
+                    .child(div().text_xs().text_color(muted).child(if n_chapters == 0 {
+                        "No chapters yet.".to_string()
+                    } else if any_goal {
+                        "Set a chapter's goal in its meta strip; the bar fills as its scenes grow.".to_string()
+                    } else {
+                        "No chapter has a word goal yet. Set one in the chapter's meta strip.".to_string()
+                    }))
                     .child(
                         h_flex()
                             .w_full()
                             .px_1()
+                            .gap_3()
                             .text_xs()
                             .text_color(muted)
-                            .child(div().w(px(110.)).child("Date"))
-                            .child(div().w(px(90.)).text_right().child("Words"))
-                            .child(div().w(px(90.)).text_right().child("Time"))
-                            .child(div().flex_1().text_right().child("Manuscript")),
+                            .child(div().flex_1().child("Chapter"))
+                            .child(div().w(px(50.)).text_right().child("Scenes"))
+                            .child(div().w(px(70.)).text_right().child("Words"))
+                            .child(div().w(px(220.)).text_right().child("Goal")),
                     )
+                    .child(chapters),
+            )
+            .child(
+                Self::section("Sessions", cx)
+                    .child(div().text_xs().text_color(muted).child(format!(
+                        "{} session{}, newest first.",
+                        sessions.len(),
+                        if sessions.len() == 1 { "" } else { "s" }
+                    )))
+                    .child(table_head(cx))
                     .child(table),
             )
             .into_any_element()

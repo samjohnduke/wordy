@@ -4,6 +4,24 @@ pub mod reference;
 pub mod sheet;
 pub mod sidebar;
 
+use gpui_kit::base::StyledExt as _;
+use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::prelude::*;
+use gpui_kit::*;
+
+/// The one heading style every panel uses for its section titles: small,
+/// semibold, muted and upper-cased. Sidebar, sheet and Home share it so the
+/// spaces read as one app.
+pub fn heading(title: impl Into<SharedString>, cx: &App) -> Div {
+    let title: SharedString = title.into();
+    div()
+        .text_xs()
+        .font_semibold()
+        .text_color(cx.theme().muted_foreground)
+        .whitespace_nowrap()
+        .child(title.to_uppercase())
+}
+
 /// Boilerplate shared by every dock panel.
 macro_rules! impl_panel_boilerplate {
     ($ty:ty, $name:literal) => {

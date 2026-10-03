@@ -721,7 +721,7 @@ impl Render for EntitySheet {
             .text_color(cx.theme().muted_foreground)
             .cursor_pointer()
             .child(if collapsed { "▸" } else { "▾" })
-            .child("SHEET")
+            .child(super::heading("Sheet", cx))
             .child(div().flex_1())
             .child(self.template().label)
             .on_click(cx.listener(|this, _, _, cx| {

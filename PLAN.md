@@ -370,7 +370,7 @@ sidebar and editor) is **intentional** and stays.
   (inserted = green, deleted = red strikethrough) against the live body.
 - **Accept:** rename a character and every linked mention updates; compare shows what changed.
 
-### Phase 11 — Visual design pass
+### Phase 11 — Visual design pass (done 2026-10-03)
 - Left rail: real icons (home, book, globe, note) with tooltips and a clear active state;
   settings/theme icon at the bottom instead of the "Dark" text button in the title bar.
 - Typographic hierarchy: panel headers, meta strip and body use distinct sizes/weights; consistent

@@ -10,7 +10,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dock::{panel_handle, DockArea, DockLayout, DockPlacement, DockSkin, PanelStyle};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::status_bar::StatusBar;
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Sizable as _, TitleBar};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _, TitleBar};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use wordy_doc::momentum::today;
@@ -1400,12 +1400,35 @@ impl Workspace {
         cx.quit();
     }
 
+    /// One rail entry: an icon button with an accent bar on its left edge
+    /// when it is the current space, so the active one reads at a glance.
+    fn rail_item(active: bool, button: Button, cx: &App) -> impl IntoElement {
+        let theme = cx.theme();
+        h_flex()
+            .w_full()
+            .items_center()
+            .child(div().w(px(3.)).h(px(22.)).rounded_r_sm().bg(if active {
+                theme.primary
+            } else {
+                gpui::transparent_black()
+            }))
+            .child(div().flex_1().flex().justify_center().child(button))
+            .child(div().w(px(3.)))
+    }
+
     fn render_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let spaces = [
-            ("rail-manuscript", "Manuscript", Space::Manuscript),
-            ("rail-world", "World", Space::World),
-            ("rail-notes", "Notes", Space::Notes),
+            (
+                "rail-manuscript",
+                "Manuscript (Ctrl-1)",
+                IconName::BookOpen,
+                Space::Manuscript,
+            ),
+            ("rail-world", "World (Ctrl-2)", IconName::Globe, Space::World),
+            ("rail-notes", "Notes (Ctrl-3)", IconName::FileText, Space::Notes),
         ];
+        let home_active = self.home.is_some() && self.active.is_none();
+        let dark = cx.theme().mode.is_dark();
         v_flex()
             .w(px(56.))
             .h_full()
@@ -1416,28 +1439,44 @@ impl Workspace {
             .bg(cx.theme().sidebar)
             .border_r_1()
             .border_color(cx.theme().border)
-            .child(
+            .child(Self::rail_item(
+                home_active,
                 Button::new("rail-home")
                     .ghost()
-                    .small()
-                    .w(px(48.))
-                    .label("⌂")
-                    .tooltip("Home: dashboard, reports, tasks, placeholders, export, sync")
-                    .toggled(self.home.is_some() && self.active.is_none())
+                    .icon(IconName::LayoutDashboard)
+                    .tooltip("Home: dashboard, reports, tasks, export, sync (Ctrl-Shift-H)")
+                    .toggled(home_active)
                     .on_click(cx.listener(|this, _, window, cx| this.show_home(window, cx))),
-            )
-            .child(div().h(px(6.)))
-            .children(spaces.into_iter().map(|(id, label, space)| {
-                let active = self.space == space;
-                Button::new(id)
-                    .ghost()
-                    .small()
-                    .w(px(48.))
-                    .label(label.chars().next().unwrap().to_string())
-                    .tooltip(label)
-                    .toggled(active)
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_space(space, cx)))
+                cx,
+            ))
+            .child(div().h(px(8.)))
+            .children(spaces.into_iter().map(|(id, label, icon, space)| {
+                let active = self.space == space && !home_active;
+                Self::rail_item(
+                    active,
+                    Button::new(id)
+                        .ghost()
+                        .icon(icon)
+                        .tooltip(label)
+                        .toggled(active)
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_space(space, cx))),
+                    cx,
+                )
             }))
+            .child(div().flex_1())
+            .child(Self::rail_item(
+                false,
+                Button::new("rail-theme")
+                    .ghost()
+                    .icon(if dark { IconName::Sun } else { IconName::Moon })
+                    .tooltip(if dark {
+                        "Switch to light theme (Ctrl-Shift-T)"
+                    } else {
+                        "Switch to dark theme (Ctrl-Shift-T)"
+                    })
+                    .on_click(|_, window, cx| app::toggle_theme(window, cx)),
+                cx,
+            ))
     }
 
     fn status_right(&self, cx: &App) -> String {
@@ -1546,16 +1585,8 @@ impl Render for Workspace {
                     h_flex()
                         .w_full()
                         .items_center()
-                        .justify_between()
                         .px_2()
-                        .child(div().text_sm().child(format!("Wordy — {name}")))
-                        .child(
-                            Button::new("theme")
-                                .ghost()
-                                .xsmall()
-                                .label(if cx.theme().mode.is_dark() { "Light" } else { "Dark" })
-                                .on_click(|_, window, cx| app::toggle_theme(window, cx)),
-                        ),
+                        .child(div().text_sm().child(format!("Wordy — {name}"))),
                 ),
             )
             .child(
