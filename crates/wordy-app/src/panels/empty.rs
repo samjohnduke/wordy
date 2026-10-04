@@ -5,7 +5,7 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui_kit::base::dock::{DockAreaRenderer, DockContext, NodeId, PanelState, PanelView, TabGroupRenderer};
+use gpui_kit::base::dock::{DockArea, DockAreaRenderer, DockContext, NodeId, PanelState, PanelView, TabGroupRenderer};
 use gpui_kit::base::ResizeHandleContext;
 use gpui_kit::component::dock::DockSkin;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -243,16 +243,17 @@ impl Render for EmptyCenter {
 }
 
 /// The app's dock appearance: gpui-component's skin, plus the empty-centre
-/// view laid over the centre while no tab is open. Every other hook is the
-/// skin's.
+/// view laid over the centre while no tab is open and Wordy's own tab bars
+/// (see `panels::tabs`). Every other hook is the skin's.
 pub struct WordyDockRenderer {
     skin: Rc<DockSkin>,
     empty: Entity<EmptyCenter>,
+    area: WeakEntity<DockArea>,
 }
 
 impl WordyDockRenderer {
-    pub fn new(skin: Rc<DockSkin>, empty: Entity<EmptyCenter>) -> Self {
-        Self { skin, empty }
+    pub fn new(skin: Rc<DockSkin>, empty: Entity<EmptyCenter>, area: WeakEntity<DockArea>) -> Self {
+        Self { skin, empty, area }
     }
 }
 
@@ -291,6 +292,9 @@ impl DockAreaRenderer for WordyDockRenderer {
     }
 
     fn tab_group_renderer(&self) -> Rc<dyn TabGroupRenderer> {
-        self.skin.tab_group_renderer()
+        Rc::new(super::tabs::WordyTabs::new(
+            self.skin.tab_group_renderer(),
+            self.area.clone(),
+        ))
     }
 }

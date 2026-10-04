@@ -5,6 +5,7 @@ pub mod reference;
 pub mod settings;
 pub mod sheet;
 pub mod sidebar;
+pub mod tabs;
 
 use gpui_kit::base::StyledExt as _;
 use gpui_kit::component::{v_flex, ActiveTheme as _};

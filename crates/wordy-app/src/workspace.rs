@@ -261,8 +261,11 @@ impl Workspace {
         let dock = cx.new(|cx| {
             let this = DockSkin::new(cx);
             skin = Some(this.clone());
-            DockArea::new("wordy-main", Some(1), window, cx)
-                .with_renderer(Rc::new(WordyDockRenderer::new(this, empty.clone())))
+            DockArea::new("wordy-main", Some(1), window, cx).with_renderer(Rc::new(WordyDockRenderer::new(
+                this,
+                empty.clone(),
+                cx.weak_entity(),
+            )))
         });
         let skin = skin.expect("DockSkin::new ran inside the constructor");
         skin.set_panel_style(PanelStyle::TabBar, cx);

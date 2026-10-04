@@ -747,3 +747,8 @@ workspace flips the mode in `layout_changed`, which every tab change already rea
 right dock (reference and sheet) parks at the same moment if it was open and comes back when
 another tab is in front; the saved layout remembers it as open meanwhile. The toggle needs
 the window, which not every caller has, so it runs deferred through the stored window handle.
+
+The dock's tab bars are Wordy's own (`panels/tabs.rs`, a `TabGroupRenderer` that wraps the
+skin's for everything but the bar). gpui-component's bar puts a "..." menu with Zoom In on
+every group and nothing short of a renderer turns it off. Ours keeps the tabs, close buttons,
+drag-to-reorder and the two dock collapse buttons, since nothing else collapses the sidebar.
