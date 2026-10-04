@@ -132,6 +132,28 @@ pub fn mirrored_id(dir: &Path) -> Option<String> {
     (!id.is_empty()).then(|| id.to_string())
 }
 
+/// The project name as the JSON mirror has it, without loading the project;
+/// `None` for a folder without a mirror.
+pub fn mirrored_name(dir: &Path) -> Option<String> {
+    let bytes = std::fs::read(json_path(dir)).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let name = v.get("project")?.get("name")?.as_str()?.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// The project under `root` whose snapshot was written most recently: the
+/// one that was open last, give or take a sync. `None` for an empty root.
+pub fn most_recent_project(root: &Path) -> Option<PathBuf> {
+    list_projects(root)
+        .into_iter()
+        .filter_map(|p| {
+            let modified = std::fs::metadata(snapshot_path(&p)).ok()?.modified().ok()?;
+            Some((modified, p))
+        })
+        .max_by_key(|(modified, _)| *modified)
+        .map(|(_, p)| p)
+}
+
 /// Rolling backups under `snapshots/`, newest first.
 pub fn backups(dir: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir.join(BACKUP_DIR))
@@ -198,4 +220,45 @@ fn prune_backups(bdir: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    fn project_dir(root: &Path, name: &str, age: Duration) -> PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = snapshot_path(&dir);
+        std::fs::write(&path, b"x").unwrap();
+        let f = std::fs::File::options().write(true).open(&path).unwrap();
+        f.set_modified(SystemTime::now() - age).unwrap();
+        dir
+    }
+
+    #[test]
+    fn most_recent_project_goes_by_snapshot_time_not_name() {
+        let root = tempfile::tempdir().unwrap();
+        // "Zeta" sorts last by name but was written a day ago; "Alpha" is fresh.
+        project_dir(root.path(), "Zeta", Duration::from_secs(86_400));
+        let alpha = project_dir(root.path(), "Alpha", Duration::from_secs(60));
+        std::fs::create_dir_all(root.path().join("not a project")).unwrap();
+        assert_eq!(most_recent_project(root.path()), Some(alpha));
+    }
+
+    #[test]
+    fn most_recent_project_is_none_for_an_empty_root() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(most_recent_project(root.path()), None);
+        assert_eq!(most_recent_project(&root.path().join("missing")), None);
+    }
+
+    #[test]
+    fn mirrored_name_reads_the_json_mirror() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(mirrored_name(root.path()), None);
+        std::fs::write(json_path(root.path()), r#"{"project":{"name":"  Dune  "}}"#).unwrap();
+        assert_eq!(mirrored_name(root.path()).as_deref(), Some("Dune"));
+    }
 }

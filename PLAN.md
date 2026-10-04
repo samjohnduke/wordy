@@ -752,3 +752,34 @@ The dock's tab bars are Wordy's own (`panels/tabs.rs`, a `TabGroupRenderer` that
 skin's for everything but the bar). gpui-component's bar puts a "..." menu with Zoom In on
 every group and nothing short of a renderer turns it off. Ours keeps the tabs, close buttons,
 drag-to-reorder and the two dock collapse buttons, since nothing else collapses the sidebar.
+
+### Phase 25 — Projects on one machine (2026-10-05)
+
+Done. One project per window stays the rule; what changed is getting from one to another.
+
+- Startup bug: with no folder on the command line the app sorted `~/Wordy` by name and took
+  the last entry, so "most recent" meant "alphabetically last". Now it opens the first entry of
+  `recent_projects` in `prefs.json` that still holds a `project.loro`, else the project whose
+  snapshot was written last (`storage::most_recent_project`, tested), else creates "My Novel".
+  Every window opened goes to the front of the recent list (`Prefs::remember_project`, twelve
+  kept); a folder that has gone is dropped from it the next time it is picked.
+- `projects.rs`: `known_projects` is the recent list first, then the rest of the projects root
+  by name, with names read from each `project.json` mirror (`storage::mirrored_name`) so no
+  project has to be opened to be listed. It parses every mirror, so callers cache it: the
+  palette reads it once when it opens, the Settings Project page when it is shown.
+- Switching (`Workspace::switch_project`): save with mirror, open the new project in a window
+  with this window's bounds (`app::open_project_window_at`), then remove this one, so the
+  process never has zero windows and nothing in the old workspace has to be unwound. A folder
+  that will not open leaves the window up with the reason as the status-bar notice.
+- Three ways in: the project name in the title bar is a menu (every known project, checked
+  for the current one; New project…; Open a folder…; Show in file manager); the palette
+  matches other projects by name ("› Switch to Dune") and lists New project… and Open a
+  project folder… (`Ctrl-Shift-N`, `Ctrl-Shift-O`); the Settings Project page has a Name
+  field (`Project::set_name`, saved like any setting), the project list with Open buttons,
+  and the same two buttons.
+- New project…: a name box beside the title (Enter or Create) makes a folder with
+  `storage::free_project_dir` under the projects root. Open a folder…: a platform folder
+  picker; an existing project opens, an empty folder becomes a project named after it (a way
+  to keep one outside `~/Wordy`), anything else is refused.
+- Not done, by decision: more than one manuscript inside a project (a Book node above Act with
+  a shared World). The series case can be revisited; the data model was left as it is.

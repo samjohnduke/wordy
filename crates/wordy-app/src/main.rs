@@ -4,6 +4,7 @@ mod app;
 mod layout;
 mod panels;
 mod prefs;
+mod projects;
 mod sync;
 mod workspace;
 

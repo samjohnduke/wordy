@@ -43,6 +43,8 @@ gpui_kit::actions!(
         NextDocument,
         PrevDocument,
         FocusSidebar,
+        NewProject,
+        OpenProjectFolder,
         SpaceManuscript,
         SpaceWorld,
         SpaceNotes,
@@ -234,6 +236,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-alt-down", NextDocument, None),
         KeyBinding::new("secondary-alt-up", PrevDocument, None),
         KeyBinding::new("secondary-e", FocusSidebar, None),
+        KeyBinding::new("secondary-shift-n", NewProject, None),
+        KeyBinding::new("secondary-shift-o", OpenProjectFolder, None),
         KeyBinding::new("secondary-1", SpaceManuscript, None),
         KeyBinding::new("secondary-2", SpaceWorld, None),
         KeyBinding::new("secondary-3", SpaceNotes, None),
@@ -257,9 +261,10 @@ pub fn init(cx: &mut App) {
 }
 
 /// Open the project folder given on the command line (`wordy <dir>`,
-/// created if it does not exist yet), else the most recent project under
-/// `~/Wordy`, else create "My Novel".
-pub fn open_or_create_default_project() -> Result<Project> {
+/// created if it does not exist yet), else the project opened last on this
+/// machine (`recent`, from prefs), else the project under `~/Wordy` whose
+/// file was written most recently, else create "My Novel".
+pub fn open_or_create_default_project(recent: &[PathBuf]) -> Result<Project> {
     if let Some(arg) = std::env::args_os().nth(1) {
         let dir = PathBuf::from(arg);
         if storage::snapshot_path(&dir).exists() {
@@ -274,10 +279,14 @@ pub fn open_or_create_default_project() -> Result<Project> {
         tracing::info!("creating {}", dir.display());
         return Project::create(&dir, &name);
     }
+    // A folder that was moved or deleted since is skipped, not an error.
+    if let Some(dir) = recent.iter().find(|d| storage::snapshot_path(d).exists()) {
+        tracing::info!("opening last project {}", dir.display());
+        return Project::open(dir);
+    }
     let root = storage::projects_root();
     std::fs::create_dir_all(&root)?;
-    let mut projects = storage::list_projects(&root);
-    if let Some(dir) = projects.pop() {
+    if let Some(dir) = storage::most_recent_project(&root) {
         tracing::info!("opening {}", dir.display());
         return Project::open(&dir);
     }
@@ -287,7 +296,8 @@ pub fn open_or_create_default_project() -> Result<Project> {
 }
 
 pub fn open_main_window(cx: &mut App) {
-    let project = match open_or_create_default_project() {
+    let recent = Prefs::global(cx).recent_projects.clone();
+    let project = match open_or_create_default_project(&recent) {
         Ok(p) => p,
         Err(e) => {
             tracing::error!("could not open a project: {e:#}");
@@ -314,20 +324,40 @@ pub fn open_main_window(cx: &mut App) {
 }
 
 /// Open `project` in its own window. The first call is the main window;
-/// later ones (a copy fetched from the account) sit beside it.
+/// later ones (a copy fetched from the account) sit beside it. A window
+/// that will not open is fatal: there is nothing else to show.
 pub fn open_project_window(project: Project, notice: Option<String>, cx: &mut App) {
+    if let Err(e) = open_project_window_at(project, notice, None, cx) {
+        tracing::error!("open window: {e:#}");
+        cx.quit();
+    }
+}
+
+/// Open `project` in a new window, at `bounds` when given (switching
+/// projects puts the new window where the old one was) else centred.
+/// Remembers the folder as the most recent project.
+pub fn open_project_window_at(
+    project: Project,
+    notice: Option<String>,
+    bounds: Option<WindowBounds>,
+    cx: &mut App,
+) -> Result<()> {
+    if let Some(dir) = project.dir.clone() {
+        Prefs::remember_project(&dir, cx);
+    }
     let shared: SharedProject = Rc::new(ProjectHandle::new(project));
     wordy_editor::SpellState::set_custom_words(cx, shared.load_dictionary());
 
-    let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
+    let bounds =
+        bounds.unwrap_or_else(|| WindowBounds::Windowed(Bounds::centered(None, size(px(1280.), px(820.)), cx)));
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_bounds: Some(bounds),
         window_min_size: Some(size(px(720.), px(480.))),
         app_id: Some("dev.sam.wordy".into()),
         ..TitleBar::window_options()
     };
 
-    if let Err(e) = gpui_kit::open_window(options, cx, move |window, cx| {
+    gpui_kit::open_window(options, cx, move |window, cx| {
         // Follow the system theme when that is the preference.
         window
             .observe_window_appearance(|window, cx| Prefs::system_changed(window, cx))
@@ -337,11 +367,9 @@ pub fn open_project_window(project: Project, notice: Option<String>, cx: &mut Ap
             ws.set_notice(notice);
             ws
         })
-    }) {
-        tracing::error!("open window: {e:#}");
-        cx.quit();
-    }
+    })?;
     cx.activate(true);
+    Ok(())
 }
 
 fn human_size(n: u64) -> String {

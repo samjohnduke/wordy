@@ -20,6 +20,7 @@ use wordy_export::{CompileOptions, Format};
 use super::{human_size, section, setting_bool, setting_str};
 use crate::app::{CloseTab, SharedProject};
 use crate::prefs::{self, Appearance, ParagraphStyle, Prefs, Scrollbars, TextPrefs, ThemeFamily, UserThemes};
+use crate::projects;
 use crate::sync::{CloudStatus, CloudSyncStatus, SyncManager};
 
 /// What an Appearance choice does when picked.
@@ -43,6 +44,12 @@ pub enum SettingsEvent {
     Activated,
     /// The tab was closed.
     Closed,
+    /// Replace this project with the one in the folder.
+    SwitchProject(PathBuf),
+    /// Name and create a new project.
+    NewProject,
+    /// Pick a project folder to open.
+    OpenProjectFolder,
 }
 
 /// The pages down the left of the tab.
@@ -102,7 +109,7 @@ impl Section {
             Section::Export => "Compile the manuscript to a file, or zip the whole project.",
             Section::Appearance => "How the app looks on this machine.",
             Section::Text => "The type on the page you write on. Per machine, like Appearance.",
-            Section::Project => "The project file on disk and its edit history.",
+            Section::Project => "This project's name and file, and the other projects on this machine.",
             Section::Shortcuts => "Every keyboard shortcut.",
         }
     }
@@ -128,6 +135,10 @@ pub struct SettingsPanel {
     section: Section,
     /// Result line under the "Compact history" button.
     compact_status: Option<String>,
+    /// The project's name, edited in place.
+    name: Entity<InputState>,
+    /// Projects on this machine, read when the Project page is shown.
+    projects: Vec<projects::KnownProject>,
     export_title: Entity<InputState>,
     export_author: Entity<InputState>,
     export_status: Option<ExportStatus>,
@@ -152,7 +163,7 @@ impl SettingsPanel {
         let export_title = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(setting_str(&settings, export_keys::TITLE).unwrap_or_default())
-                .placeholder(project_name)
+                .placeholder(project_name.clone())
         });
         let export_author = cx.new(|cx| {
             InputState::new(window, cx)
@@ -160,7 +171,23 @@ impl SettingsPanel {
                 .placeholder("Author name")
         });
 
+        let name = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(project_name.clone())
+                .placeholder("Project name")
+        });
         let mut subs = Vec::new();
+        subs.push(cx.subscribe_in(&name, window, |this, input, ev: &InputEvent, _, cx| {
+            if matches!(ev, InputEvent::Change) {
+                let value = input.read(cx).value().trim().to_string();
+                if !value.is_empty() && value != this.project.project.name() {
+                    if let Err(e) = this.project.project.set_name(&value) {
+                        tracing::error!("rename project: {e:#}");
+                    }
+                    cx.emit(SettingsEvent::Changed);
+                }
+            }
+        }));
         for (input, key) in [
             (&export_title, export_keys::TITLE),
             (&export_author, export_keys::AUTHOR),
@@ -241,6 +268,8 @@ impl SettingsPanel {
             sync,
             section: Section::Account,
             compact_status: None,
+            name,
+            projects: Vec::new(),
             export_title,
             export_author,
             export_status: None,
@@ -261,6 +290,9 @@ impl SettingsPanel {
     }
 
     pub fn show_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        if section == Section::Project {
+            self.projects = projects::known_projects(cx);
+        }
         if self.section != section {
             self.section = section;
             cx.notify();
@@ -1206,7 +1238,89 @@ impl SettingsPanel {
                     ),
             );
 
-        v_flex().gap_3().w_full().child(file_box).into_any_element()
+        let current = self.project.dir().cloned();
+        let name_box = section("Name", cx)
+            .child(div().w(px(320.)).child(Input::new(&self.name).small()))
+            .child(div().text_xs().text_color(muted).child(
+                "Shown in the title bar and the project list, and the default title of an export. \
+                     The folder keeps its name.",
+            ));
+
+        let mut rows = v_flex().gap_1();
+        for known in self.projects.iter() {
+            let is_current = Some(&known.dir) == current.as_ref();
+            let dir = known.dir.clone();
+            let mut row = h_flex()
+                .items_center()
+                .gap_3()
+                .child(div().text_sm().font_semibold().w(px(200.)).child(known.name.clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(known.dir.display().to_string()),
+                );
+            row = if is_current {
+                row.child(div().text_xs().text_color(muted).child("open"))
+            } else {
+                row.child(
+                    Button::new(SharedString::from(format!("open-project:{}", known.dir.display())))
+                        .outline()
+                        .xsmall()
+                        .label("Open")
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(SettingsEvent::SwitchProject(dir.clone()));
+                        })),
+                )
+            };
+            rows = rows.child(row);
+        }
+        let projects_box = section("Projects on this machine", cx)
+            .child(div().text_xs().text_color(muted).child(format!(
+                "Projects you have opened here, then the rest of {}. Opening one replaces this window after saving.",
+                storage::projects_root().display()
+            )))
+            .child(rows)
+            .child(
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        Button::new("new-project")
+                            .outline()
+                            .small()
+                            .label("New project…")
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::NewProject))),
+                    )
+                    .child(
+                        Button::new("open-folder")
+                            .outline()
+                            .small()
+                            .label("Open a folder…")
+                            .tooltip("An existing project folder, or an empty folder to start a project in")
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::OpenProjectFolder))),
+                    )
+                    .children(current.clone().map(|dir| {
+                        Button::new("reveal-project")
+                            .ghost()
+                            .small()
+                            .label("Show in file manager")
+                            .on_click(move |_, _, cx| cx.reveal_path(&dir))
+                    })),
+            );
+
+        v_flex()
+            .gap_3()
+            .w_full()
+            .child(name_box)
+            .child(file_box)
+            .child(projects_box)
+            .into_any_element()
     }
 
     fn compact_history(&mut self, cx: &mut Context<Self>) {

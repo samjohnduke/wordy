@@ -3,26 +3,28 @@
 //! palette and keyboard navigation between tabs and documents.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use gpui_kit::base::dock::PanelId;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dock::{panel_handle, DockArea, DockLayout, DockPlacement, DockSkin, PanelStyle};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _, TitleBar};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::rc::Rc;
 use wordy_doc::momentum::today;
-use wordy_doc::{storage, NodeKind, Space, TreeID, Version, BULK_ORIGIN};
+use wordy_doc::{storage, NodeKind, Project, Space, TreeID, Version, BULK_ORIGIN};
 use wordy_editor::SpellState;
 
 use crate::app::{
-    self, CloseQuickOpen, CloseTab, Find, FindNext, FindPrev, FocusSidebar, NewItem, NextDocument, NextTab,
-    PrevDocument, PrevTab, QuickOpen, QuickOpenDown, QuickOpenUp, Quit, Replace, Save, SearchProject, SharedProject,
-    ShowHome, ShowSettings, SpaceManuscript, SpaceNotes, SpaceWorld, ToggleFocusMode, ToggleReference,
-    ToggleSpellcheck, ToggleTheme, ToggleTypewriter, QUICK_OPEN_CONTEXT,
+    self, CloseQuickOpen, CloseTab, Find, FindNext, FindPrev, FocusSidebar, NewItem, NewProject, NextDocument, NextTab,
+    OpenProjectFolder, PrevDocument, PrevTab, QuickOpen, QuickOpenDown, QuickOpenUp, Quit, Replace, Save,
+    SearchProject, SharedProject, ShowHome, ShowSettings, SpaceManuscript, SpaceNotes, SpaceWorld, ToggleFocusMode,
+    ToggleReference, ToggleSpellcheck, ToggleTheme, ToggleTypewriter, QUICK_OPEN_CONTEXT,
 };
 use crate::layout::Layout;
 use crate::panels::editor::{EditorPanel, EditorPanelEvent};
@@ -32,6 +34,8 @@ use crate::panels::reference::{ReferenceEvent, ReferencePanel};
 use crate::panels::settings::{Section, SettingsEvent, SettingsPanel};
 use crate::panels::sheet::{SheetEvent, SheetPanel};
 use crate::panels::sidebar::{SidebarEvent, SidebarPanel};
+use crate::prefs::Prefs;
+use crate::projects::{self, KnownProject};
 use crate::sync::{SyncEvent, SyncManager};
 
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(1500);
@@ -51,6 +55,9 @@ const QUICK_OPEN_MIXED_ACTIONS: usize = 3;
 struct QuickOpenState {
     input: Entity<InputState>,
     selected: usize,
+    /// Other projects on this machine, read once when the palette opens:
+    /// their names come from each project's JSON mirror, too slow per keystroke.
+    projects: Vec<KnownProject>,
     _sub: Subscription,
 }
 
@@ -68,6 +75,8 @@ enum QuickOpenHit {
         label: &'static str,
         action: Box<dyn Action>,
     },
+    /// Another project on this machine; chosen, it replaces this one.
+    Project(KnownProject),
 }
 
 /// How well a title matches the palette query; higher sorts first.
@@ -118,6 +127,8 @@ fn palette_actions(has_editor: bool) -> Vec<(&'static str, &'static str, Box<dyn
         ("Project", "New scene / entity / note", Box::new(NewItem)),
         ("Project", "Save now", Box::new(Save)),
         ("Project", "Toggle spellcheck", Box::new(ToggleSpellcheck)),
+        ("Project", "New project…", Box::new(NewProject)),
+        ("Project", "Open a project folder…", Box::new(OpenProjectFolder)),
     ];
     if has_editor {
         use wordy_editor::*;
@@ -235,6 +246,8 @@ pub struct Workspace {
     window_handle: AnyWindowHandle,
     typewriter: bool,
     quick_open: Option<QuickOpenState>,
+    /// The name box in the title bar while a new project is being named.
+    new_project: Option<(Entity<InputState>, Subscription)>,
     last_backup: Option<Instant>,
     dirty: bool,
     /// Writing time since the last save, and when the last edit happened.
@@ -387,6 +400,7 @@ impl Workspace {
             window_handle: window.window_handle(),
             typewriter: false,
             quick_open: None,
+            new_project: None,
             last_backup: None,
             dirty: false,
             session_seconds: 0.,
@@ -777,7 +791,7 @@ impl Workspace {
         if let Some(section) = section {
             settings.update(cx, |s, cx| s.show_section(section, cx));
         }
-        let sub = cx.subscribe_in(&settings, window, |this, _, ev: &SettingsEvent, _, cx| match ev {
+        let sub = cx.subscribe_in(&settings, window, |this, _, ev: &SettingsEvent, window, cx| match ev {
             SettingsEvent::Changed => this.on_edited(cx),
             SettingsEvent::Activated => {
                 this.active = None;
@@ -790,6 +804,9 @@ impl Workspace {
                 this.layout_changed(cx);
                 cx.notify();
             }
+            SettingsEvent::SwitchProject(dir) => this.switch_project(dir.clone(), window, cx),
+            SettingsEvent::NewProject => this.begin_new_project(window, cx),
+            SettingsEvent::OpenProjectFolder => this.open_project_folder(&OpenProjectFolder, window, cx),
         });
         self._subs.push(sub);
         let pid = PanelId::from(settings.entity_id());
@@ -1308,9 +1325,15 @@ impl Workspace {
             InputEvent::PressEnter { .. } => this.quick_open_confirm(window, cx),
             _ => {}
         });
+        let current = self.project.dir();
+        let projects = projects::known_projects(cx)
+            .into_iter()
+            .filter(|k| Some(&k.dir) != current)
+            .collect();
         self.quick_open = Some(QuickOpenState {
             input,
             selected: 0,
+            projects,
             _sub: sub,
         });
         cx.notify();
@@ -1346,6 +1369,12 @@ impl Workspace {
             for (group, label, action) in palette_actions(has_editor) {
                 if let Some(rank) = match_rank(label, &query, &terms) {
                     actions.push((rank, QuickOpenHit::Action { group, label, action }));
+                }
+            }
+            // Other projects match on their name, so "dune" switches to Dune.
+            for known in self.quick_open.iter().flat_map(|q| q.projects.iter()) {
+                if let Some(rank) = match_rank(&known.name, &query, &terms) {
+                    actions.push((rank, QuickOpenHit::Project(known.clone())));
                 }
             }
             actions.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
@@ -1411,6 +1440,11 @@ impl Workspace {
                 cx.notify();
                 return;
             }
+            QuickOpenHit::Project(known) => {
+                self.quick_open = None;
+                self.switch_project(known.dir, window, cx);
+                return;
+            }
             QuickOpenHit::Node {
                 id, space, has_body, ..
             } => (id, space, has_body),
@@ -1469,6 +1503,7 @@ impl Workspace {
                             .unwrap_or_default();
                         (format!("› {label}"), format!("{group}  {keys}").trim_end().to_string())
                     }
+                    QuickOpenHit::Project(known) => (format!("› Switch to {}", known.name), "Project".to_string()),
                 };
                 h_flex()
                     .id(ElementId::Name(format!("qo-{ix}").into()))
@@ -1692,6 +1727,186 @@ impl Workspace {
         self.sidebar.update(cx, |s, cx| s.new_leaf(window, cx));
     }
 
+    // ---- projects ---------------------------------------------------------
+
+    /// Save this project, open `dir` in a window where this one is, and
+    /// close this one. A folder that will not open leaves this window up
+    /// with the reason in the status bar.
+    fn switch_project(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project.dir() == Some(&dir) {
+            return;
+        }
+        if !storage::snapshot_path(&dir).exists() {
+            Prefs::forget_project(&dir, cx);
+            self.notice = Some(format!(
+                "{} is no longer a project folder; removed from the list",
+                dir.display()
+            ));
+            cx.notify();
+            return;
+        }
+        self.open_project(Project::open(&dir), window, cx);
+    }
+
+    /// Replace this window with one showing `project`, after saving.
+    fn open_project(&mut self, project: anyhow::Result<Project>, window: &mut Window, cx: &mut Context<Self>) {
+        let project = match project {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("open project: {e:#}");
+                self.notice = Some(format!("Could not open the project: {e:#}"));
+                cx.notify();
+                return;
+            }
+        };
+        self.new_project = None;
+        self.save_with(true, cx);
+        let bounds = window.window_bounds();
+        match app::open_project_window_at(project, None, Some(bounds), cx) {
+            Ok(()) => window.remove_window(),
+            Err(e) => {
+                tracing::error!("open window: {e:#}");
+                self.notice = Some(format!("Could not open a window: {e:#}"));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Show the name box in the title bar; Enter creates the project.
+    fn begin_new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Name for the new project"));
+        let sub = cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, window, cx| {
+            if let InputEvent::PressEnter { .. } = ev {
+                let name = input.read(cx).value().trim().to_string();
+                this.finish_new_project(&name, window, cx);
+            }
+        });
+        input.update(cx, |s, cx| s.focus(window, cx));
+        self.new_project = Some((input, sub));
+        cx.notify();
+    }
+
+    fn cancel_new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_project = None;
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn finish_new_project(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if name.is_empty() {
+            return;
+        }
+        self.open_project(projects::create_project(name), window, cx);
+    }
+
+    /// Pick a folder: an existing project opens, an empty folder becomes one.
+    fn open_project_folder(&mut self, _: &OpenProjectFolder, _: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open".into()),
+        });
+        let handle = self.window_handle;
+        cx.spawn(async move |this, cx| {
+            let dir = match rx.await {
+                Ok(Ok(Some(mut paths))) if !paths.is_empty() => paths.swap_remove(0),
+                Ok(Err(e)) => {
+                    this.update(cx, |t, cx| {
+                        t.notice = Some(format!("Could not open a folder dialog: {e:#}"));
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+                _ => return,
+            };
+            handle
+                .update(cx, |_, window, cx| {
+                    this.update(cx, |t, cx| {
+                        t.open_project(projects::open_or_create_in(&dir), window, cx)
+                    })
+                    .ok();
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// The project name in the title bar: a menu of every project on this
+    /// machine, plus new and open.
+    fn render_project_menu(&self, name: String, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity().downgrade();
+        let current = self.project.dir().cloned();
+        Button::new("project-menu")
+            .ghost()
+            .xsmall()
+            .label(name)
+            .dropdown_caret(true)
+            .tooltip("Switch project")
+            .dropdown_menu(move |mut menu, _, cx| {
+                for known in projects::known_projects(cx) {
+                    let is_current = Some(&known.dir) == current.as_ref();
+                    let this = this.clone();
+                    let dir = known.dir.clone();
+                    menu = menu.item(PopupMenuItem::new(known.name).checked(is_current).on_click(
+                        move |_, window, cx| {
+                            this.update(cx, |w, cx| w.switch_project(dir.clone(), window, cx)).ok();
+                        },
+                    ));
+                }
+                let (t1, t2) = (this.clone(), this.clone());
+                let dir = current.clone();
+                menu.separator()
+                    .item(PopupMenuItem::new("New project…").on_click(move |_, window, cx| {
+                        t1.update(cx, |w, cx| w.begin_new_project(window, cx)).ok();
+                    }))
+                    .item(PopupMenuItem::new("Open a folder…").on_click(move |_, window, cx| {
+                        t2.update(cx, |w, cx| w.open_project_folder(&OpenProjectFolder, window, cx))
+                            .ok();
+                    }))
+                    .separator()
+                    .item(PopupMenuItem::new("Show in file manager").on_click(move |_, _, cx| {
+                        if let Some(dir) = &dir {
+                            cx.reveal_path(dir);
+                        }
+                    }))
+            })
+    }
+
+    /// The name box for a new project, beside the project menu.
+    fn render_new_project(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let (input, _) = self.new_project.as_ref()?;
+        Some(
+            h_flex()
+                .items_center()
+                .gap_1()
+                .ml_2()
+                .child(div().w(px(240.)).child(Input::new(input).small()))
+                .child(
+                    Button::new("new-project-create")
+                        .primary()
+                        .xsmall()
+                        .label("Create")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let name = this
+                                .new_project
+                                .as_ref()
+                                .map(|(i, _)| i.read(cx).value().trim().to_string())
+                                .unwrap_or_default();
+                            this.finish_new_project(&name, window, cx);
+                        })),
+                )
+                .child(
+                    Button::new("new-project-cancel")
+                        .ghost()
+                        .xsmall()
+                        .label("Cancel")
+                        .on_click(cx.listener(|this, _, window, cx| this.cancel_new_project(window, cx))),
+                ),
+        )
+    }
+
     fn quit(&mut self, _: &Quit, _: &mut Window, cx: &mut Context<Self>) {
         // The flush happens in the `on_app_quit` hook registered in `new`, which
         // also covers the global `Quit` action and the macOS application menu.
@@ -1887,6 +2102,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::next_document))
             .on_action(cx.listener(Self::prev_document))
             .on_action(cx.listener(Self::focus_sidebar))
+            .on_action(cx.listener(|this, _: &NewProject, window, cx| this.begin_new_project(window, cx)))
+            .on_action(cx.listener(Self::open_project_folder))
             .on_action(
                 cx.listener(|this, _: &SpaceManuscript, window, cx| this.space_shortcut(Space::Manuscript, window, cx)),
             )
@@ -1900,8 +2117,12 @@ impl Render for Workspace {
                     h_flex()
                         .w_full()
                         .items_center()
+                        .gap_1()
                         .px_2()
-                        .child(div().text_sm().child(format!("Wordy — {name}"))),
+                        .child(div().text_sm().child("Wordy"))
+                        .child(div().text_sm().text_color(cx.theme().muted_foreground).child("—"))
+                        .child(self.render_project_menu(name, cx))
+                        .children(self.render_new_project(cx)),
                 ),
             )
             .child(

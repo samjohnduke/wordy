@@ -598,7 +598,13 @@ pub struct Prefs {
     pub appearance: Appearance,
     pub scrollbars: Scrollbars,
     pub text: TextPrefs,
+    /// Project folders opened on this machine, most recent first. The first
+    /// one is what the app opens at launch.
+    pub recent_projects: Vec<PathBuf>,
 }
+
+/// How many project folders [`Prefs::recent_projects`] keeps.
+pub const MAX_RECENT_PROJECTS: usize = 12;
 
 impl Global for Prefs {}
 
@@ -678,6 +684,39 @@ impl Prefs {
         }
         cx.set_global(prefs);
         Prefs::apply(window, cx);
+    }
+
+    /// Move `dir` to the front of the recent projects and save. Does not
+    /// re-apply the theme, since nothing visual changed.
+    pub fn remember_project(dir: &Path, cx: &mut App) {
+        let mut prefs = Prefs::global(cx).clone();
+        prefs.push_recent_project(dir);
+        if *Prefs::global(cx) == prefs {
+            return;
+        }
+        if let Err(e) = prefs.save() {
+            tracing::error!("save prefs: {e:#}");
+        }
+        cx.set_global(prefs);
+    }
+
+    /// Drop `dir` from the recent projects (its folder is gone) and save.
+    pub fn forget_project(dir: &Path, cx: &mut App) {
+        let mut prefs = Prefs::global(cx).clone();
+        prefs.recent_projects.retain(|p| p != dir);
+        if *Prefs::global(cx) == prefs {
+            return;
+        }
+        if let Err(e) = prefs.save() {
+            tracing::error!("save prefs: {e:#}");
+        }
+        cx.set_global(prefs);
+    }
+
+    fn push_recent_project(&mut self, dir: &Path) {
+        self.recent_projects.retain(|p| p != dir);
+        self.recent_projects.insert(0, dir.to_path_buf());
+        self.recent_projects.truncate(MAX_RECENT_PROJECTS);
     }
 
     /// The system appearance changed: follow it when that is the setting.
