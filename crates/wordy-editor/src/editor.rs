@@ -248,6 +248,12 @@ impl ProseEditor {
         let origin = format!("body:{}", text.id());
         let mut undo = UndoManager::new(&doc);
         undo.set_merge_interval(700);
+        cx.observe_global::<EditorStyle>(|this, cx| {
+            this.style = cx.global::<EditorStyle>().clone();
+            this.scroll_to_cursor = true;
+            cx.notify();
+        })
+        .detach();
         undo.add_exclude_origin_prefix(META_ORIGIN);
         undo.add_exclude_origin_prefix(BULK_ORIGIN);
         {
@@ -281,7 +287,7 @@ impl ProseEditor {
             goal_x: None,
             marked: None,
             focus: cx.focus_handle(),
-            style: EditorStyle::default(),
+            style: cx.try_global::<EditorStyle>().cloned().unwrap_or_default(),
             scroll_y: px(0.),
             scroll_to_cursor: false,
             typewriter: false,

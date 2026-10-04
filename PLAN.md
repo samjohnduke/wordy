@@ -705,3 +705,14 @@ stock values first, since a theme file only sets what it names) and then `Theme:
 loads whichever half Appearance asks for. The JSON files are generated from palette tables so
 all three sets name the same 105 colour keys; the Catppuccin colours are the project's own
 (MIT). Frappé and Macchiato are a palette table away if wanted.
+
+### Phase 23 — Text settings (2026-10-04)
+
+Done. Settings → Text sets the editor's type per machine: font (a searchable Select of the
+bundled Libertinus Serif plus every family the text system knows), size (12–36 px), line
+spacing (1.2–2.2×), column width (440–1100 px) and paragraph style (first-line indent or a
+half line of space), with a live preview and a reset. `Prefs.text` (`TextPrefs`) holds the
+numbers and maps onto `EditorStyle`; `Prefs::apply` sets that style as a gpui global, and
+`EditorStyle` is now `Global`, so every `ProseEditor` starts from the global and follows it
+through `observe_global` (keeping the caret in view). Headings keep scaling off the body
+size; exports keep their own paragraph setting.

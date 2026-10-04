@@ -1,5 +1,5 @@
-//! Settings tab: the account, export, appearance, the project file and
-//! the shortcut list. A column of sections on the left, the chosen page on
+//! Settings tab: the account, export, appearance, text, the project file
+//! and the shortcut list. A column of sections on the left, the chosen page on
 //! the right, so each thing has one place.
 
 use std::path::PathBuf;
@@ -9,6 +9,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dock::Panel;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Disableable as _, IconName, Sizable as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -18,7 +19,7 @@ use wordy_export::{CompileOptions, Format};
 
 use super::{human_size, section, setting_bool, setting_str};
 use crate::app::{CloseTab, SharedProject};
-use crate::prefs::{Appearance, Prefs, Scrollbars, ThemeFamily};
+use crate::prefs::{Appearance, ParagraphStyle, Prefs, Scrollbars, TextPrefs, ThemeFamily};
 use crate::sync::{CloudStatus, CloudSyncStatus, SyncManager};
 
 /// What an Appearance choice does when picked.
@@ -39,15 +40,17 @@ pub enum Section {
     Account,
     Export,
     Appearance,
+    Text,
     Project,
     Shortcuts,
 }
 
 impl Section {
-    pub const ALL: [Section; 5] = [
+    pub const ALL: [Section; 6] = [
         Section::Account,
         Section::Export,
         Section::Appearance,
+        Section::Text,
         Section::Project,
         Section::Shortcuts,
     ];
@@ -57,6 +60,7 @@ impl Section {
             Section::Account => "Account",
             Section::Export => "Export",
             Section::Appearance => "Appearance",
+            Section::Text => "Text",
             Section::Project => "Project",
             Section::Shortcuts => "Shortcuts",
         }
@@ -67,6 +71,7 @@ impl Section {
             Section::Account => "settings-account",
             Section::Export => "settings-export",
             Section::Appearance => "settings-appearance",
+            Section::Text => "settings-text",
             Section::Project => "settings-project",
             Section::Shortcuts => "settings-shortcuts",
         }
@@ -78,6 +83,7 @@ impl Section {
             Section::Account => "Your Wordy account, the machines linked to it, and syncing this project.",
             Section::Export => "Compile the manuscript to a file, or zip the whole project.",
             Section::Appearance => "How the app looks on this machine.",
+            Section::Text => "The type on the page you write on. Per machine, like Appearance.",
             Section::Project => "The project file on disk and its edit history.",
             Section::Shortcuts => "Every keyboard shortcut.",
         }
@@ -111,6 +117,8 @@ pub struct SettingsPanel {
     _export_task: Option<Task<()>>,
     sync_name: Entity<InputState>,
     sync_server: Entity<InputState>,
+    /// The editor font: the bundled serif first, then every installed family.
+    font_select: Entity<SelectState<Vec<SharedString>>>,
     /// The only tab in the centre, so the tab bar needs its own close button.
     sole_tab: bool,
     pub focus: FocusHandle,
@@ -188,6 +196,33 @@ impl SettingsPanel {
         );
         subs.push(cx.observe(&sync, |_, _, cx| cx.notify()));
 
+        let fonts: Vec<SharedString> = {
+            let mut names = cx.text_system().all_font_names();
+            names.retain(|n| n != TextPrefs::BUNDLED_FONT && !n.starts_with('.'));
+            std::iter::once(TextPrefs::BUNDLED_FONT.to_string())
+                .chain(names)
+                .map(SharedString::from)
+                .collect()
+        };
+        let current: SharedString = Prefs::global(cx).text.font.clone().into();
+        let font_select = cx.new(|cx| {
+            let mut s = SelectState::new(fonts, None, window, cx).searchable(true);
+            s.set_selected_value(&current, window, cx);
+            s
+        });
+        subs.push(cx.subscribe_in(
+            &font_select,
+            window,
+            |_, _, ev: &SelectEvent<Vec<SharedString>>, window, cx| {
+                if let SelectEvent::Confirm(Some(font)) = ev {
+                    let font = font.to_string();
+                    Prefs::update(Some(window), cx, |p| p.text.font = font);
+                }
+            },
+        ));
+        // Text and theme edits change the global, not this panel; redraw.
+        subs.push(cx.observe_global::<Prefs>(|_, cx| cx.notify()));
+
         Self {
             project,
             sync,
@@ -200,6 +235,7 @@ impl SettingsPanel {
             _export_task: None,
             sync_name,
             sync_server,
+            font_select,
             sole_tab: false,
             focus: cx.focus_handle(),
             _subs: subs,
@@ -847,6 +883,138 @@ impl SettingsPanel {
             .into_any_element()
     }
 
+    /// Font, size, spacing, measure and paragraph style for the editor.
+    fn render_text(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let muted = theme.muted_foreground;
+        let text = Prefs::global(cx).text.clone();
+        let stepper = |dec_id: &'static str, inc_id: &'static str, value: String, dec: Pick, inc: Pick| {
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(
+                    Button::new(dec_id)
+                        .outline()
+                        .small()
+                        .label("−")
+                        .on_click(move |_, window, cx| dec(window, cx)),
+                )
+                .child(div().text_sm().w(px(72.)).text_center().child(value))
+                .child(
+                    Button::new(inc_id)
+                        .outline()
+                        .small()
+                        .label("+")
+                        .on_click(move |_, window, cx| inc(window, cx)),
+                )
+        };
+        let row = |label: &'static str, control: Div| {
+            h_flex()
+                .gap_3()
+                .items_center()
+                .child(div().w(px(120.)).text_sm().child(label))
+                .child(control)
+        };
+        let step = |field: fn(&mut TextPrefs) -> &mut f32, range: (f32, f32, f32), steps: f32| -> Pick {
+            Box::new(move |window, cx| {
+                Prefs::update(Some(window), cx, |p| TextPrefs::step(field(&mut p.text), range, steps))
+            })
+        };
+        let preview = div()
+            .w_full()
+            .p_3()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .font_family(text.font.clone())
+            .text_size(px(text.size))
+            .line_height(relative(text.line_height))
+            .child(
+                "She walked to the window and looked out at the rain, thinking of nothing in particular.                  The quick brown fox jumps over the lazy dog; 0123456789.",
+            );
+        let font_box = section("Font", cx)
+            .child(div().text_xs().text_color(muted).child(
+                "Any font installed on this machine. Libertinus Serif comes with Wordy and is what the PDF export uses.",
+            ))
+            .child(Select::new(&self.font_select).id("text-font").w(px(360.)).placeholder("Font"))
+            .child(preview);
+        let type_box = section("Size and spacing", cx)
+            .child(row(
+                "Size",
+                stepper(
+                    "size-dec",
+                    "size-inc",
+                    format!("{:.0} px", text.size),
+                    step(|t| &mut t.size, TextPrefs::SIZE, -1.),
+                    step(|t| &mut t.size, TextPrefs::SIZE, 1.),
+                ),
+            ))
+            .child(row(
+                "Line spacing",
+                stepper(
+                    "line-dec",
+                    "line-inc",
+                    format!("{:.2}×", text.line_height),
+                    step(|t| &mut t.line_height, TextPrefs::LINE_HEIGHT, -1.),
+                    step(|t| &mut t.line_height, TextPrefs::LINE_HEIGHT, 1.),
+                ),
+            ))
+            .child(row(
+                "Column width",
+                stepper(
+                    "width-dec",
+                    "width-inc",
+                    format!("{:.0} px", text.width),
+                    step(|t| &mut t.width, TextPrefs::WIDTH, -1.),
+                    step(|t| &mut t.width, TextPrefs::WIDTH, 1.),
+                ),
+            ))
+            .child(div().text_xs().text_color(muted).child(
+                "Column width is the widest the text gets; it narrows with the window. Headings scale with the size.",
+            ));
+        let para_box = section("Paragraphs", cx)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("How one body paragraph is told from the next. Exports have their own setting."),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .flex_wrap()
+                    .children(ParagraphStyle::ALL.into_iter().map(|s| {
+                        let id: &'static str = match s {
+                            ParagraphStyle::Indent => "para-indent",
+                            ParagraphStyle::Spaced => "para-spaced",
+                        };
+                        Button::new(id)
+                            .outline()
+                            .small()
+                            .label(s.label())
+                            .toggled(text.paragraphs == s)
+                            .on_click(move |_, window, cx| Prefs::update(Some(window), cx, |p| p.text.paragraphs = s))
+                    })),
+            );
+        let reset = h_flex().child(
+            Button::new("text-reset")
+                .outline()
+                .small()
+                .label("Reset to defaults")
+                .disabled(text == TextPrefs::default())
+                .on_click(|_, window, cx| Prefs::update(Some(window), cx, |p| p.text = TextPrefs::default())),
+        );
+        v_flex()
+            .gap_3()
+            .w_full()
+            .child(font_box)
+            .child(type_box)
+            .child(para_box)
+            .child(reset)
+            .into_any_element()
+    }
+
     /// The project file on disk: size, history, backups, compaction.
     fn render_project(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = &self.project.project;
@@ -1081,6 +1249,7 @@ impl Render for SettingsPanel {
             Section::Account => self.render_account(cx).into_any_element(),
             Section::Export => self.render_export(cx),
             Section::Appearance => self.render_appearance(cx),
+            Section::Text => self.render_text(cx),
             Section::Project => self.render_project(cx),
             Section::Shortcuts => self.render_shortcuts(cx),
         };

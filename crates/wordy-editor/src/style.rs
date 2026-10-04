@@ -1,7 +1,11 @@
 //! Visual parameters for the prose editor. Colors come from the theme at
 //! render time; these are the typographic knobs.
+//!
+//! The app sets one `EditorStyle` as a global; every `ProseEditor` starts
+//! from it and follows it when it changes, so the Settings page only has to
+//! set the global.
 
-use gpui_kit::{px, Pixels, SharedString};
+use gpui_kit::{px, Global, Pixels, SharedString};
 use wordy_doc::Block;
 
 #[derive(Clone, Debug)]
@@ -19,6 +23,8 @@ pub struct EditorStyle {
     /// Indent for the first line of body paragraphs that follow another body paragraph.
     pub first_line_indent: Pixels,
 }
+
+impl Global for EditorStyle {}
 
 impl Default for EditorStyle {
     fn default() -> Self {

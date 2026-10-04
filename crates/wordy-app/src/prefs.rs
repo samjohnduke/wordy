@@ -1,6 +1,6 @@
 //! Per-user preferences that are not about any one project: theme,
-//! appearance and scrollbars. Stored beside the sync settings as `prefs.json`
-//! in `wordy_sync::config::config_dir()`.
+//! appearance, scrollbars and the editor's type. Stored beside the sync
+//! settings as `prefs.json` in `wordy_sync::config::config_dir()`.
 
 use std::path::PathBuf;
 
@@ -9,6 +9,7 @@ use gpui_kit::component::scroll::ScrollbarMode;
 use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
+use wordy_editor::EditorStyle;
 
 /// Which theme to use: follow the system, or pin one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,12 +133,93 @@ impl Scrollbars {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Body paragraphs: a first-line indent, or a blank half line between them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParagraphStyle {
+    #[default]
+    Indent,
+    Spaced,
+}
+
+impl ParagraphStyle {
+    pub const ALL: [ParagraphStyle; 2] = [ParagraphStyle::Indent, ParagraphStyle::Spaced];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ParagraphStyle::Indent => "Indent first line",
+            ParagraphStyle::Spaced => "Space between",
+        }
+    }
+}
+
+/// The type on the page you write on: font, size, spacing, measure. Maps
+/// onto [`EditorStyle`]; the defaults are the editor's own.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TextPrefs {
+    pub font: String,
+    /// Body size in pixels.
+    pub size: f32,
+    /// Line height as a multiple of the size.
+    pub line_height: f32,
+    /// The widest the text column gets, in pixels.
+    pub width: f32,
+    pub paragraphs: ParagraphStyle,
+}
+
+impl Default for TextPrefs {
+    fn default() -> Self {
+        let s = EditorStyle::default();
+        Self {
+            font: s.font_family.to_string(),
+            size: f32::from(s.font_size),
+            line_height: s.line_height,
+            width: f32::from(s.max_width),
+            paragraphs: ParagraphStyle::Indent,
+        }
+    }
+}
+
+impl TextPrefs {
+    /// The serif that ships with Wordy, and that the PDF export uses.
+    pub const BUNDLED_FONT: &str = "Libertinus Serif";
+    pub const SIZE: (f32, f32, f32) = (12., 36., 1.);
+    pub const LINE_HEIGHT: (f32, f32, f32) = (1.2, 2.2, 0.05);
+    pub const WIDTH: (f32, f32, f32) = (440., 1100., 40.);
+
+    pub fn style(&self) -> EditorStyle {
+        let (paragraph_spacing, first_line_indent) = match self.paragraphs {
+            ParagraphStyle::Indent => (0.0, px(28.)),
+            ParagraphStyle::Spaced => (0.6, px(0.)),
+        };
+        EditorStyle {
+            font_family: self.font.clone().into(),
+            font_size: px(self.size),
+            line_height: self.line_height,
+            max_width: px(self.width),
+            paragraph_spacing,
+            first_line_indent,
+            ..EditorStyle::default()
+        }
+    }
+
+    /// Move one setting by `steps` of its increment, inside its range.
+    pub fn step(value: &mut f32, (min, max, by): (f32, f32, f32), steps: f32) {
+        let n = ((*value - min) / by).round() + steps;
+        *value = (min + n * by).clamp(min, max);
+        // Keep "1.65" from drifting to 1.6500001 in the file.
+        *value = (*value * 100.).round() / 100.;
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Prefs {
     pub theme: ThemeFamily,
     pub appearance: Appearance,
     pub scrollbars: Scrollbars,
+    pub text: TextPrefs,
 }
 
 impl Global for Prefs {}
@@ -183,9 +265,11 @@ impl Prefs {
         }
     }
 
-    /// Push the preferences onto the theme: family, mode and scrollbars.
+    /// Push the preferences onto the theme (family, mode, scrollbars) and
+    /// onto the editors (the global [`EditorStyle`]).
     pub fn apply(window: Option<&Window>, cx: &mut App) {
         let prefs = Prefs::global(cx).clone();
+        cx.set_global(prefs.text.style());
         let mode = prefs.theme_mode(window, cx);
         let registry = ThemeRegistry::global(cx);
         let (light, dark) = prefs
