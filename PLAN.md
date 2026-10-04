@@ -715,4 +715,6 @@ half line of space), with a live preview and a reset. `Prefs.text` (`TextPrefs`)
 numbers and maps onto `EditorStyle`; `Prefs::apply` sets that style as a gpui global, and
 `EditorStyle` is now `Global`, so every `ProseEditor` starts from the global and follows it
 through `observe_global` (keeping the caret in view). Headings keep scaling off the body
-size; exports keep their own paragraph setting.
+size; exports keep their own paragraph setting. A `fonts/` folder beside `prefs.json` holds
+the user's own `.ttf`/`.otf`/`.ttc` files: loaded at launch and on Reload, no install needed,
+and they show up in the picker like any installed family.

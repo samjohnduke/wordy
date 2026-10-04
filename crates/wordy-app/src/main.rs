@@ -19,6 +19,7 @@ fn main() {
 
     gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(|cx| {
         load_fonts(cx);
+        prefs::load_user_fonts(cx);
         gpui_kit::init(cx);
         wordy_editor::init(cx);
         app::init(cx);

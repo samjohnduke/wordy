@@ -19,11 +19,22 @@ use wordy_export::{CompileOptions, Format};
 
 use super::{human_size, section, setting_bool, setting_str};
 use crate::app::{CloseTab, SharedProject};
-use crate::prefs::{Appearance, ParagraphStyle, Prefs, Scrollbars, TextPrefs, ThemeFamily};
+use crate::prefs::{self, Appearance, ParagraphStyle, Prefs, Scrollbars, TextPrefs, ThemeFamily};
 use crate::sync::{CloudStatus, CloudSyncStatus, SyncManager};
 
 /// What an Appearance choice does when picked.
 type Pick = Box<dyn Fn(&mut Window, &mut App)>;
+
+/// The families the font picker offers: the bundled serif first, then every
+/// family the text system knows, installed or dropped into the fonts folder.
+fn font_names(cx: &App) -> Vec<SharedString> {
+    let mut names = cx.text_system().all_font_names();
+    names.retain(|n| n != TextPrefs::BUNDLED_FONT && !n.starts_with('.'));
+    std::iter::once(TextPrefs::BUNDLED_FONT.to_string())
+        .chain(names)
+        .map(SharedString::from)
+        .collect()
+}
 
 pub enum SettingsEvent {
     /// A project setting changed; persist.
@@ -196,17 +207,9 @@ impl SettingsPanel {
         );
         subs.push(cx.observe(&sync, |_, _, cx| cx.notify()));
 
-        let fonts: Vec<SharedString> = {
-            let mut names = cx.text_system().all_font_names();
-            names.retain(|n| n != TextPrefs::BUNDLED_FONT && !n.starts_with('.'));
-            std::iter::once(TextPrefs::BUNDLED_FONT.to_string())
-                .chain(names)
-                .map(SharedString::from)
-                .collect()
-        };
         let current: SharedString = Prefs::global(cx).text.font.clone().into();
         let font_select = cx.new(|cx| {
-            let mut s = SelectState::new(fonts, None, window, cx).searchable(true);
+            let mut s = SelectState::new(font_names(cx), None, window, cx).searchable(true);
             s.set_selected_value(&current, window, cx);
             s
         });
@@ -973,6 +976,54 @@ impl SettingsPanel {
             .child(div().text_xs().text_color(muted).child(
                 "Column width is the widest the text gets; it narrows with the window. Headings scale with the size.",
             ));
+        let dir = prefs::fonts_dir();
+        let files = prefs::user_font_files().len();
+        let select = self.font_select.clone();
+        let own_box = section("Your fonts", cx)
+            .child(div().text_xs().text_color(muted).child(
+                "Drop .ttf, .otf or .ttc files in this folder and Wordy loads them at launch, no install needed. \
+                 Reload after adding some.",
+            ))
+            .child(
+                div()
+                    .text_sm()
+                    .font_family("monospace")
+                    .child(dir.display().to_string()),
+            )
+            .child(div().text_xs().text_color(muted).child(match files {
+                0 => "No font files there yet.".to_string(),
+                1 => "1 font file.".to_string(),
+                n => format!("{n} font files."),
+            }))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("fonts-open")
+                            .outline()
+                            .small()
+                            .label("Open folder")
+                            .on_click(move |_, _, cx| {
+                                if let Err(e) = std::fs::create_dir_all(&dir) {
+                                    tracing::error!("{}: {e}", dir.display());
+                                }
+                                cx.open_with_system(&dir);
+                            }),
+                    )
+                    .child(Button::new("fonts-reload").outline().small().label("Reload").on_click(
+                        move |_, window, cx| {
+                            prefs::load_user_fonts(cx);
+                            let current: SharedString = Prefs::global(cx).text.font.clone().into();
+                            let names = font_names(cx);
+                            select.update(cx, |s, cx| {
+                                s.set_items(names, window, cx);
+                                s.set_selected_value(&current, window, cx);
+                            });
+                            // The editors re-resolve the family on their next layout.
+                            Prefs::apply(Some(window), cx);
+                        },
+                    )),
+            );
         let para_box = section("Paragraphs", cx)
             .child(
                 div()
@@ -1010,6 +1061,7 @@ impl SettingsPanel {
             .w_full()
             .child(font_box)
             .child(type_box)
+            .child(own_box)
             .child(para_box)
             .child(reset)
             .into_any_element()

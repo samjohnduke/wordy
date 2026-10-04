@@ -2,6 +2,7 @@
 //! appearance, scrollbars and the editor's type. Stored beside the sync
 //! settings as `prefs.json` in `wordy_sync::config::config_dir()`.
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
@@ -211,6 +212,51 @@ impl TextPrefs {
         // Keep "1.65" from drifting to 1.6500001 in the file.
         *value = (*value * 100.).round() / 100.;
     }
+}
+
+/// Where a user drops font files Wordy should know about without installing
+/// them: `fonts/` beside `prefs.json`.
+pub fn fonts_dir() -> PathBuf {
+    wordy_sync::config::config_dir().join("fonts")
+}
+
+/// The font files in [`fonts_dir`], sorted. Empty when the folder is missing.
+pub fn user_font_files() -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(fonts_dir()) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc"))
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// Load every font file in [`fonts_dir`] into the text system. Safe to call
+/// again after the folder changes; returns how many files were read. A file
+/// that cannot be read is logged and skipped.
+pub fn load_user_fonts(cx: &App) -> usize {
+    let mut fonts: Vec<Cow<'static, [u8]>> = Vec::new();
+    for path in user_font_files() {
+        match std::fs::read(&path) {
+            Ok(bytes) => fonts.push(Cow::Owned(bytes)),
+            Err(e) => tracing::warn!("{}: {e}", path.display()),
+        }
+    }
+    let n = fonts.len();
+    if n > 0 {
+        if let Err(e) = cx.text_system().add_fonts(fonts) {
+            tracing::error!("user fonts: {e:#}");
+            return 0;
+        }
+    }
+    n
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
