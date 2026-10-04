@@ -23,7 +23,7 @@ docx/pdf/epub export, sync).
 - Mac (Apple Silicon) and Linux (Wayland, X11 fallback) builds.
 
 **Non-goals**
-- Windows, mobile, web, collaboration with other people, plugins, themes beyond light/dark,
+- Windows, mobile, web, collaboration with other people, plugins, user-written themes,
   inline images, tables, nested lists, footnotes, Scrivener import, public roadmap.
   (A public website with downloads and a changelog was added in Phase 14. Phases 15–17
   add accounts and cloud sync, so "collaboration with other people" stops being a
@@ -691,3 +691,17 @@ Appearance is new: `prefs.rs` keeps `prefs.json` beside `sync.json` with the the
 (match the system, light, dark) and scrollbar mode, applied at startup and whenever the
 window's appearance changes; the rail sun/moon button and `Ctrl-Shift-T` pin the result
 there too.
+
+### Phase 22 — Theme families (2026-10-04)
+
+Done. Settings → Appearance gained a Theme row above Light or dark: Default (the stock
+shadcn neutrals), Wordy (the website's cream page, ink and oxblood, both halves), Catppuccin
+(Latte and Mocha) and High contrast (black on white / white on black, hard borders, radius 2,
+no shadows). Each family is a gpui-component theme set in `crates/wordy-app/themes/*.json`,
+embedded with `include_str!` and put in the `ThemeRegistry` by `prefs::register_themes` right
+after `gpui_kit::init`. `Prefs.theme` holds the family; `Prefs::apply` swaps the global
+theme's `light_theme` / `dark_theme` to the family's pair (resetting radius and shadow to the
+stock values first, since a theme file only sets what it names) and then `Theme::change`
+loads whichever half Appearance asks for. The JSON files are generated from palette tables so
+all three sets name the same 105 colour keys; the Catppuccin colours are the project's own
+(MIT). Frappé and Macchiato are a palette table away if wanted.

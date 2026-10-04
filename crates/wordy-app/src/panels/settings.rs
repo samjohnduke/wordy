@@ -18,7 +18,7 @@ use wordy_export::{CompileOptions, Format};
 
 use super::{human_size, section, setting_bool, setting_str};
 use crate::app::{CloseTab, SharedProject};
-use crate::prefs::{Appearance, Prefs, Scrollbars};
+use crate::prefs::{Appearance, Prefs, Scrollbars, ThemeFamily};
 use crate::sync::{CloudStatus, CloudSyncStatus, SyncManager};
 
 /// What an Appearance choice does when picked.
@@ -756,7 +756,8 @@ impl SettingsPanel {
         card
     }
 
-    /// Theme and scrollbars, kept per user in `prefs.json`.
+    /// Theme family, light or dark, and scrollbars, kept per user in
+    /// `prefs.json`.
     fn render_appearance(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let prefs = Prefs::global(cx).clone();
@@ -768,7 +769,34 @@ impl SettingsPanel {
                 .toggled(on)
                 .on_click(move |_, window, cx| pick(window, cx))
         };
-        let theme_box = section("Theme", cx)
+        let family_box = section("Theme", cx)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("Each theme has a light half and a dark half. Light or dark, below, picks which one shows."),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .flex_wrap()
+                    .children(ThemeFamily::ALL.into_iter().map(|f| {
+                        let id: &'static str = match f {
+                            ThemeFamily::Default => "family-default",
+                            ThemeFamily::Wordy => "family-wordy",
+                            ThemeFamily::Catppuccin => "family-catppuccin",
+                            ThemeFamily::HighContrast => "family-high-contrast",
+                        };
+                        choice(
+                            id,
+                            f.label(),
+                            prefs.theme == f,
+                            Box::new(move |window, cx| Prefs::update(Some(window), cx, |p| p.theme = f)),
+                        )
+                    })),
+            )
+            .child(div().text_xs().text_color(muted).child(prefs.theme.blurb()));
+        let theme_box = section("Light or dark", cx)
             .child(div().text_xs().text_color(muted).child(
                 "Follow the system's light or dark setting, or pin one. The sun / moon button on the rail and Ctrl-Shift-T flip between light and dark, and pin the result here.",
             ))
@@ -813,6 +841,7 @@ impl SettingsPanel {
         v_flex()
             .gap_3()
             .w_full()
+            .child(family_box)
             .child(theme_box)
             .child(scroll_box)
             .into_any_element()

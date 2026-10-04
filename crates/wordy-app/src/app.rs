@@ -246,6 +246,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("f2", SidebarRename, Some(SIDEBAR_CONTEXT)),
         KeyBinding::new("delete", SidebarTrash, Some(SIDEBAR_CONTEXT)),
     ]);
+    crate::prefs::register_themes(cx);
     cx.set_global(Prefs::load());
     Prefs::apply(None, cx);
 }
