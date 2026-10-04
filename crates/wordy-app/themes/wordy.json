@@ -115,10 +115,16 @@
       },
       "highlight": {
         "editor.foreground": "#1e1d24",
+        "editor_foreground": "#1e1d24",
         "editor.background": "#f6f1e6",
+        "editor_background": "#f6f1e6",
         "editor.active_line.background": "#ebe4d4",
+        "editor_active_line": "#ebe4d4",
         "editor.line_number": "#6e685c",
-        "editor.active_line_number": "#1e1d24"
+        "editor_line_number": "#6e685c",
+        "editor.active_line_number": "#1e1d24",
+        "editor_active_line_number": "#1e1d24",
+        "syntax": {}
       }
     },
     {
@@ -233,10 +239,16 @@
       },
       "highlight": {
         "editor.foreground": "#f1ebdf",
+        "editor_foreground": "#f1ebdf",
         "editor.background": "#1e1d24",
+        "editor_background": "#1e1d24",
         "editor.active_line.background": "#28272f",
+        "editor_active_line": "#28272f",
         "editor.line_number": "#a59d8b",
-        "editor.active_line_number": "#f1ebdf"
+        "editor_line_number": "#a59d8b",
+        "editor.active_line_number": "#f1ebdf",
+        "editor_active_line_number": "#f1ebdf",
+        "syntax": {}
       }
     }
   ]

@@ -706,6 +706,13 @@ loads whichever half Appearance asks for. The JSON files are generated from pale
 all three sets name the same 105 colour keys; the Catppuccin colours are the project's own
 (MIT). Frappé and Macchiato are a palette table away if wanted.
 
+Fix (2026-10-04): the bundled theme files never registered. gpui-kit builds gpui-component
+without its `tree-sitter` feature, and in that build the `highlight` block's keys are
+snake_case (`editor_background`) with a required `syntax` object, so the dotted keys were
+ignored and the missing `syntax` failed the parse; Appearance silently fell back to the stock
+pair. The files now carry both spellings and an empty `syntax`, and `tests/themes.rs` parses
+them and checks the names and editor colours.
+
 ### Phase 23 — Text settings (2026-10-04)
 
 Done. Settings → Text sets the editor's type per machine: font (a searchable Select of the

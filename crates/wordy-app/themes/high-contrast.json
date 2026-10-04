@@ -118,10 +118,16 @@
       },
       "highlight": {
         "editor.foreground": "#000000",
+        "editor_foreground": "#000000",
         "editor.background": "#ffffff",
+        "editor_background": "#ffffff",
         "editor.active_line.background": "#ffffff",
+        "editor_active_line": "#ffffff",
         "editor.line_number": "#333333",
-        "editor.active_line_number": "#000000"
+        "editor_line_number": "#333333",
+        "editor.active_line_number": "#000000",
+        "editor_active_line_number": "#000000",
+        "syntax": {}
       }
     },
     {
@@ -239,10 +245,16 @@
       },
       "highlight": {
         "editor.foreground": "#ffffff",
+        "editor_foreground": "#ffffff",
         "editor.background": "#000000",
+        "editor_background": "#000000",
         "editor.active_line.background": "#000000",
+        "editor_active_line": "#000000",
         "editor.line_number": "#d0d0d0",
-        "editor.active_line_number": "#ffffff"
+        "editor_line_number": "#d0d0d0",
+        "editor.active_line_number": "#ffffff",
+        "editor_active_line_number": "#ffffff",
+        "syntax": {}
       }
     }
   ]
