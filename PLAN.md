@@ -783,3 +783,25 @@ Done. One project per window stays the rule; what changed is getting from one to
   to keep one outside `~/Wordy`), anything else is refused.
 - Not done, by decision: more than one manuscript inside a project (a Book node above Act with
   a shared World). The series case can be revisited; the data model was left as it is.
+
+### Phase 26 — Windows build (2026-10-05)
+
+Done, without a Windows machine to run it on. gpui's Windows backend (DirectX 11, with a
+WARP software fallback) comes with the `gpui-pre` crate the app already uses, and nothing in
+the workspace was Unix-only except the 0600 file mode in `wordy-sync`, which was already
+guarded, and the PNG clipboard hand-off, which is Linux-only and falls back to gpui's own
+clipboard elsewhere.
+
+- `ci.yml` runs the same fmt, clippy, build and test on `windows-latest`, then a launch check:
+  start the debug `wordy.exe` on a fresh folder, wait 25 s, require the process alive and
+  `project.loro` written, print its log. That is the only run the Windows build gets, so it
+  gates CI. `release.yml` adds `wordy-windows-x86_64.zip` (`Wordy.exe` plus a README with the
+  SmartScreen note) with a `.sha256` in the same format as the others.
+- `crates/wordy-app/build.rs` embeds `packaging/windows/wordy.ico` (from the macOS 1024 PNG
+  via ImageMagick) and version info with `winresource`; it warns rather than fails when
+  `rc.exe` is missing. Release builds set `windows_subsystem = "windows"` so no console
+  opens behind the window; debug builds keep it so the CI check can read stderr.
+- Site: a third card on the download page, Windows notes, and the index copy. Changelog and
+  README say plainly that the build is CI-checked only.
+- Not done: code signing (no certificate), an installer (MSI or MSIX), ARM64 Windows, and any
+  verification of the folder picker, file-manager reveal, or image clipboard on Windows.

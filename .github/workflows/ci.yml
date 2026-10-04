@@ -17,8 +17,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-latest is Apple Silicon (arm64); ubuntu-latest is x86_64.
-        os: [macos-latest, ubuntu-latest]
+        # macos-latest is Apple Silicon (arm64); ubuntu-latest and windows-latest are x86_64.
+        os: [macos-latest, ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
 
@@ -51,3 +51,28 @@ jobs:
 
       - name: Test
         run: cargo test --all-targets
+
+      # Nobody on the project has a Windows machine, so this is the only place the
+      # Windows build is ever run: start it on a fresh folder, give it a while, and
+      # expect it to be alive and to have written the project file.
+      - name: Launch check
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RUST_BACKTRACE: 1
+          RUST_LOG: wordy=debug
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'launch-check'
+          $err = Join-Path $env:RUNNER_TEMP 'wordy.err'
+          $out = Join-Path $env:RUNNER_TEMP 'wordy.out'
+          $p = Start-Process -FilePath target\debug\wordy.exe -ArgumentList "`"$dir`"" `
+            -PassThru -RedirectStandardError $err -RedirectStandardOutput $out
+          Start-Sleep -Seconds 25
+          $alive = -not $p.HasExited
+          $saved = Test-Path (Join-Path $dir 'project.loro')
+          if ($alive) { Stop-Process -Id $p.Id -Force; Wait-Process -Id $p.Id -ErrorAction SilentlyContinue }
+          Write-Host "alive after 25s: $alive; project.loro written: $saved"
+          Write-Host '--- stderr ---'; Get-Content $err -ErrorAction SilentlyContinue
+          Write-Host '--- stdout ---'; Get-Content $out -ErrorAction SilentlyContinue
+          if (-not $alive) { Write-Host "exit code $($p.ExitCode)" }
+          if (-not ($alive -and $saved)) { exit 1 }

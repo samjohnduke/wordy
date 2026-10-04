@@ -2,7 +2,7 @@
 
 A private, personal fiction-writing app: manuscript, world and notes in one
 window, rich text on a Loro CRDT document, and optional sync between your
-machines through a Wordy account. Native (Rust, gpui) on macOS and Linux.
+machines through a Wordy account. Native (Rust, gpui) on macOS, Linux and Windows.
 `PLAN.md` is the design and the build log.
 
 ## Build
@@ -15,11 +15,14 @@ cargo run -- ~/Wordy/My\ Novel   # or a specific project folder
 
 Linux needs the usual gpui development packages (Wayland, X11, fontconfig,
 freetype, ALSA, Vulkan, OpenSSL). The exact apt list is in
-`.github/workflows/ci.yml`. macOS needs only Xcode's command line tools.
+`.github/workflows/ci.yml`. macOS needs only Xcode's command line tools. Windows
+needs the Visual Studio Build Tools (C++ workload) and a Windows SDK; the icon and
+version info are embedded by `crates/wordy-app/build.rs` from
+`packaging/windows/wordy.ico`.
 
 ## Checks
 
-CI runs on `macos-latest` and `ubuntu-latest` and gates on all four:
+CI runs on `macos-latest`, `ubuntu-latest` and `windows-latest` and gates on all four:
 
 ```sh
 cargo fmt --all --check
@@ -30,7 +33,10 @@ cargo test --all-targets
 
 ## Release checklist
 
-1. CI green on both operating systems.
+1. CI green on all three operating systems. On Windows that includes the launch
+   check: nobody on the project has a Windows machine, so CI starting the debug
+   build on a fresh folder and finding it alive with `project.loro` written 25
+   seconds later is the only run the Windows build gets.
 2. **Manual: the Mac binary launches.** CI builds and tests on macOS but
    cannot open a window. On an Apple Silicon Mac, from a clean checkout:
 
@@ -46,7 +52,7 @@ cargo test --all-targets
    app instances to accounts on a local server and see an edit cross between them.
 4. Bump `version` in the root `Cargo.toml`, add `site/src/content/changelog/<version>.md`,
    then push a `v<version>` tag. `.github/workflows/release.yml` builds the Linux
-   tarball and the macOS app zip and publishes a GitHub Release with the changelog
+   tarball, the macOS app zip and the Windows zip and publishes a GitHub Release with the changelog
    entry as its notes. Redeploy the website afterwards so the download page picks
    the release up.
 
@@ -64,6 +70,9 @@ macOS: builds `target/release/Wordy.app` (unsigned) from the same sources.
 ```sh
 packaging/macos/bundle.sh
 ```
+
+Windows: `cargo build --release` is the whole story; the release zip is
+`target/release/wordy.exe` renamed to `Wordy.exe` beside `packaging/windows/README.txt`.
 
 The icon is `packaging/wordy.svg`; the PNGs next to the scripts are rendered
 from it with `rsvg-convert` and checked in so neither script needs it.

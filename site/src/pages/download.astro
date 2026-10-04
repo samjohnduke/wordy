@@ -18,7 +18,7 @@ const platforms = (Object.keys(ASSETS) as Platform[]).map((p) => ({
 
 <Base
   title="Download"
-  description="Download Wordy for macOS (Apple Silicon) or Linux (x86_64), or build it from source with Cargo."
+  description="Download Wordy for macOS (Apple Silicon), Linux (x86_64) or Windows (x86_64), or build it from source with Cargo."
 >
   <section class="section">
     <div class="wrap">
@@ -92,6 +92,17 @@ cd wordy-*-linux-x86_64
           The binary needs Wayland or X11, Vulkan, fontconfig and ALSA at
           runtime. Most desktop distributions have these already.
         </p>
+        <h3>Windows</h3>
+        <p>
+          Unzip and run <code>Wordy.exe</code> from wherever you put it; there is
+          no installer. The build is not signed, so SmartScreen will object the
+          first time: click <em>More info</em>, then <em>Run anyway</em>.
+        </p>
+        <p class="muted">
+          The Windows build is compiled and launch-checked on GitHub's Windows
+          runners but has not been used on a real Windows machine yet. If
+          something looks wrong, please <a href={`${REPO_URL}/issues`}>say so</a>.
+        </p>
 
         <h2>Build from source</h2>
         <p>
@@ -106,7 +117,8 @@ cargo build --release
           On Linux you also need the GPUI development packages (Wayland, X11,
           fontconfig, freetype, ALSA, Vulkan, OpenSSL); the exact apt list is in
           the repository's CI workflow. On macOS the Xcode command line tools
-          are enough. <code>packaging/linux/install.sh</code> and
+          are enough. On Windows you need the Visual Studio Build Tools with the
+          C++ workload and a Windows SDK. <code>packaging/linux/install.sh</code> and
           <code>packaging/macos/bundle.sh</code> turn a release build into the
           same install or app bundle as the downloads above.
         </p>

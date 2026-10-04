@@ -1,7 +1,7 @@
 name: Release
 
 # Push a tag like v0.1.0 (matching [workspace.package] version in Cargo.toml) to build
-# unsigned binaries for both platforms and publish them as a GitHub Release. The release
+# unsigned binaries for all three platforms and publish them as a GitHub Release. The release
 # body is site/src/content/changelog/<version>.md, which is also what the website shows.
 on:
   push:
@@ -80,9 +80,35 @@ jobs:
           path: Wordy-macos-arm64.zip*
           if-no-files-found: error
 
+  windows:
+    name: Windows x86_64
+    needs: check-version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - name: Package
+        shell: pwsh
+        run: |
+          $v = $env:GITHUB_REF_NAME.TrimStart('v')
+          $d = "wordy-$v-windows-x86_64"
+          New-Item -ItemType Directory $d | Out-Null
+          Copy-Item target\release\wordy.exe "$d\Wordy.exe"
+          Copy-Item packaging\windows\README.txt "$d\README.txt"
+          Compress-Archive -Path $d -DestinationPath wordy-windows-x86_64.zip
+          $h = (Get-FileHash wordy-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower()
+          [IO.File]::WriteAllText("$PWD\wordy-windows-x86_64.zip.sha256", "$h  wordy-windows-x86_64.zip`n")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: wordy-windows-x86_64.zip*
+          if-no-files-found: error
+
   release:
     name: GitHub Release
-    needs: [linux, macos]
+    needs: [linux, macos, windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

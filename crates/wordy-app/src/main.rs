@@ -1,4 +1,7 @@
 //! Wordy: a private writing desk. Entry point.
+// A release build on Windows is a GUI program: no console window behind it.
+// Debug builds keep the console so logs and the CI launch check can read them.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
 mod layout;

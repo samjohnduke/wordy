@@ -15,6 +15,11 @@ export const ASSETS = {
     label: "Linux",
     detail: "x86_64, Wayland or X11",
   },
+  windows: {
+    name: "wordy-windows-x86_64.zip",
+    label: "Windows",
+    detail: "x86_64, Windows 10 or later",
+  },
 } as const;
 
 export type Platform = keyof typeof ASSETS;
