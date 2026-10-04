@@ -1,6 +1,6 @@
 //! Settings tab: the account, export, appearance, text, the project file
-//! and the shortcut list. A column of sections on the left, the chosen page on
-//! the right, so each thing has one place.
+//! and the shortcut list. While the tab is in front the sidebar lists the
+//! sections in place of the manuscript tree, so each thing has one place.
 
 use std::path::PathBuf;
 
@@ -77,7 +77,14 @@ impl Section {
         }
     }
 
-    fn id(self) -> &'static str {
+    /// The section `delta` places away in the list, clamped at the ends.
+    pub fn step(self, delta: isize) -> Section {
+        let ix = Section::ALL.iter().position(|s| *s == self).unwrap_or(0) as isize;
+        let last = Section::ALL.len() as isize - 1;
+        Section::ALL[(ix + delta).clamp(0, last) as usize]
+    }
+
+    pub fn id(self) -> &'static str {
         match self {
             Section::Account => "settings-account",
             Section::Export => "settings-export",
@@ -1358,35 +1365,6 @@ impl Render for SettingsPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let current = self.section;
-        let nav = v_flex()
-            .w(px(190.))
-            .h_full()
-            .flex_shrink_0()
-            .gap_0p5()
-            .px_2()
-            .py_3()
-            .border_r_1()
-            .border_color(theme.border)
-            .bg(theme.sidebar)
-            .child(div().px_2().pb_2().child(super::heading("Settings", cx)))
-            .children(Section::ALL.into_iter().map(|s| {
-                let on = s == current;
-                div()
-                    .id(s.id())
-                    .w_full()
-                    .px_2()
-                    .py_1()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .text_sm()
-                    .when(on, |d| d.bg(theme.secondary).font_semibold())
-                    .when(!on, |d| {
-                        d.text_color(theme.muted_foreground)
-                            .hover(|s| s.bg(theme.secondary.opacity(0.5)))
-                    })
-                    .child(s.label())
-                    .on_click(cx.listener(move |this, _, _, cx| this.show_section(s, cx)))
-            }));
         let body = match current {
             Section::Account => self.render_account(cx).into_any_element(),
             Section::Export => self.render_export(cx),
@@ -1409,20 +1387,12 @@ impl Render for SettingsPanel {
             )
             .child(div().h(px(8.)))
             .child(body);
-        h_flex()
+        div()
+            .id("settings-scroll")
             .size_full()
-            .items_start()
             .track_focus(&self.focus)
             .bg(theme.background)
-            .child(nav)
-            .child(
-                div()
-                    .id("settings-scroll")
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .overflow_y_scroll()
-                    .child(page),
-            )
+            .overflow_y_scroll()
+            .child(page)
     }
 }

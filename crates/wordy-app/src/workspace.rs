@@ -429,9 +429,19 @@ impl Workspace {
     /// Something layout-ish changed: write `layout.json` after a short pause.
     fn layout_changed(&mut self, cx: &mut Context<Self>) {
         // Every change of the active tab lands here; the Sheet tab follows it,
-        // and the empty-centre view appears once the last tab is gone.
+        // the sidebar swaps to the Settings sections while that tab is in
+        // front, and the empty-centre view appears once the last tab is gone.
         let active = self.active;
         self.sheet.update(cx, |s, cx| s.show(active, cx));
+        let settings = (self.current_tab() == Some(Tab::Settings))
+            .then(|| self.settings.clone())
+            .flatten();
+        let was = self.sidebar.read(cx).showing_settings();
+        self.sidebar.update(cx, |s, cx| s.set_settings(settings, cx));
+        if was != self.sidebar.read(cx).showing_settings() {
+            // The tab title lives in the dock's own tab bar.
+            self.dock.update(cx, |_, cx| cx.notify());
+        }
         let none_open = self.editors.is_empty() && self.home.is_none() && self.settings.is_none();
         self.empty.update(cx, |e, cx| e.set_shown(none_open, cx));
         let sole = self.tab_items().len() == 1;

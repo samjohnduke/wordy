@@ -17,6 +17,7 @@ use crate::app::{
     SharedProject, SidebarActivate, SidebarBack, SidebarDown, SidebarLeft, SidebarRename, SidebarRight, SidebarTrash,
     SidebarUp, SIDEBAR_CONTEXT,
 };
+use crate::panels::settings::{Section, SettingsPanel};
 
 pub enum SidebarEvent {
     /// Open a node with a body in an editor tab.
@@ -84,6 +85,9 @@ pub struct SidebarPanel {
     /// Only show scenes mentioning this entity (and their chapters).
     mention_filter: Option<(TreeID, String)>,
     filter_ids: HashSet<TreeID>,
+    /// Set while the Settings tab is in front: the sidebar then lists its
+    /// sections instead of the tree, and the tab reads "Settings".
+    settings: Option<(Entity<SettingsPanel>, Subscription)>,
     weak: WeakEntity<Self>,
     pub focus: FocusHandle,
     _subs: Vec<Subscription>,
@@ -110,14 +114,73 @@ impl SidebarPanel {
             query: String::new(),
             mention_filter: None,
             filter_ids: HashSet::new(),
+            settings: None,
             weak: cx.weak_entity(),
             focus: cx.focus_handle(),
             _subs: vec![sub],
         }
     }
 
+    /// Show the Settings sections in place of the tree (`Some`), or the
+    /// tree again (`None`). The workspace calls this as the front tab changes.
+    pub fn set_settings(&mut self, settings: Option<Entity<SettingsPanel>>, cx: &mut Context<Self>) {
+        let shown = self.settings.as_ref().map(|(s, _)| s.entity_id());
+        if shown == settings.as_ref().map(|s| s.entity_id()) {
+            return;
+        }
+        self.settings = settings.map(|s| {
+            // Redraw when the page changes from inside the tab, e.g. restore.
+            let sub = cx.observe(&s, |_, _, cx| cx.notify());
+            (s, sub)
+        });
+        cx.notify();
+    }
+
+    pub fn showing_settings(&self) -> bool {
+        self.settings.is_some()
+    }
+
+    fn render_settings_nav(&self, settings: &Entity<SettingsPanel>, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let current = settings.read(cx).section_shown();
+        let settings = settings.clone();
+        v_flex()
+            .size_full()
+            .track_focus(&self.focus)
+            .key_context(SIDEBAR_CONTEXT)
+            .on_action(cx.listener(Self::on_up))
+            .on_action(cx.listener(Self::on_down))
+            .p_1()
+            .gap_0p5()
+            .child(div().px_2().py_1().child(super::heading("Settings", cx)))
+            .children(Section::ALL.into_iter().map(|s| {
+                let on = s == current;
+                let settings = settings.clone();
+                div()
+                    .id(s.id())
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .text_sm()
+                    .when(on, |d| d.bg(theme.secondary).font_semibold())
+                    .when(!on, |d| {
+                        d.text_color(theme.muted_foreground)
+                            .hover(|s| s.bg(theme.secondary.opacity(0.5)))
+                    })
+                    .child(s.label())
+                    .on_click(move |_, _, cx| settings.update(cx, |p, cx| p.show_section(s, cx)))
+            }))
+    }
+
     /// Focus the project search box.
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.is_some() {
+            // No search box while the sections are shown; take the keyboard.
+            window.focus(&self.focus, cx);
+            return;
+        }
         self.search.update(cx, |s, cx| {
             s.focus(window, cx);
             s.select_all(window, cx);
@@ -336,6 +399,11 @@ impl SidebarPanel {
     }
 
     fn step_selection(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((settings, _)) = &self.settings {
+            // Up and Down walk the Settings pages while the tab is in front.
+            settings.update(cx, |p, cx| p.show_section(p.section_shown().step(delta), cx));
+            return;
+        }
         if self.keyboard_blocked(window, cx) {
             cx.propagate();
             return;
@@ -989,6 +1057,9 @@ super::impl_panel_boilerplate!(SidebarPanel, "Sidebar", closable = false);
 
 impl Panel for SidebarPanel {
     fn tab_name(&self, _: &App) -> Option<SharedString> {
+        if self.settings.is_some() {
+            return Some("Settings".into());
+        }
         Some(self.space.label().into())
     }
 
@@ -1003,6 +1074,9 @@ impl EventEmitter<SidebarEvent> for SidebarPanel {}
 
 impl Render for SidebarPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(settings) = self.settings.as_ref().map(|(s, _)| s.clone()) {
+            return self.render_settings_nav(&settings, cx).into_any_element();
+        }
         if self.drop_hint.is_some() && !cx.has_active_drag() {
             self.drop_hint = None;
         }
@@ -1180,5 +1254,6 @@ impl Render for SidebarPanel {
                         )
                     }),
             )
+            .into_any_element()
     }
 }

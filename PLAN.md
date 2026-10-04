@@ -739,3 +739,8 @@ a new name as a starting point, and Wordy writes `theme.schema.json` (schemars f
 parse are listed with their error. `prefs.theme` gained a `user` variant holding the set name;
 a name whose file is gone falls back to the stock pair without rewriting the preference.
 Themes stay per machine, like fonts and appearance.
+
+Later the same day the tab's own column of sections moved into the sidebar: while Settings is
+the front tab the left dock lists the pages (tab titled "Settings", Up/Down walk them) in place
+of the space tree, and the tree returns when a document or Home comes to the front. The
+workspace flips the mode in `layout_changed`, which every tab change already reaches.
