@@ -54,7 +54,7 @@ more email links).
 
 ## 4. The app, pointed at localhost
 
-In Wordy, Home → Account → "Server" (shown while the machine is not linked):
+In Wordy, Settings → Account → "Server" (shown while the machine is not linked):
 enter `http://localhost:8787`, then "Link this machine". The browser opens
 `/device` with the code prefilled; approve it with the passkey. From then on
 the app keeps that server in `sync.json` until you unlink.

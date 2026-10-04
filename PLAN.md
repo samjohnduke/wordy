@@ -675,3 +675,19 @@ never draws a close button on a lone tab (gpui-base refuses to empty a group thr
 its X), so `EditorPanel` and `HomePanel` carry a `sole_tab` flag the workspace sets from
 `layout_changed`, and while it is set their `title_suffix` puts a close button at the end
 of the tab bar that dispatches `CloseTab`.
+
+### Phase 21 — Settings tab (2026-10-04)
+
+Done. Home's row of seven sub-pages is gone. `panels/settings.rs` holds `SettingsPanel`,
+a centre tab with a column of sections on the left (Account, Export, Appearance, Project,
+Shortcuts) and the page on the right; Account, Export, the "Project file" box and the
+shortcut list moved there from Home unchanged. It opens from the gear at the bottom of
+the rail, `Ctrl-,` (`ShowSettings`) or "Go → Settings" in the palette, and the layout
+file remembers whether it was open, on which section, and whether it or Home was in
+front. Home (`panels/home.rs`) is now one scrolling page: today, goals, manuscript,
+tasks, placeholders, charts, chapter goals and the last 30 sessions. The workspace's
+tab identity is a three-way `Tab` enum (Home, Settings, Node) instead of `Option<TreeID>`.
+Appearance is new: `prefs.rs` keeps `prefs.json` beside `sync.json` with the theme
+(match the system, light, dark) and scrollbar mode, applied at startup and whenever the
+window's appearance changes; the rail sun/moon button and `Ctrl-Shift-T` pin the result
+there too.

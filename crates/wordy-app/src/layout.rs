@@ -18,6 +18,11 @@ pub struct Layout {
     /// The tab that was showing: a node id, or `None` for Home / nothing.
     pub active: Option<String>,
     pub home_open: bool,
+    pub settings_open: bool,
+    /// Which Settings page was showing.
+    pub settings_section: Option<String>,
+    /// `true` when Settings, not Home, was the displayed fixed tab.
+    pub settings_front: bool,
     pub reference_open: bool,
     pub reference_pinned: Option<String>,
     pub sidebar_open: bool,

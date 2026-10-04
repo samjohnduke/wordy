@@ -21,14 +21,15 @@ use wordy_editor::SpellState;
 use crate::app::{
     self, CloseQuickOpen, CloseTab, Find, FindNext, FindPrev, FocusSidebar, NewItem, NextDocument, NextTab,
     PrevDocument, PrevTab, QuickOpen, QuickOpenDown, QuickOpenUp, Quit, Replace, Save, SearchProject, SharedProject,
-    ShowHome, SpaceManuscript, SpaceNotes, SpaceWorld, ToggleFocusMode, ToggleReference, ToggleSpellcheck, ToggleTheme,
-    ToggleTypewriter, QUICK_OPEN_CONTEXT,
+    ShowHome, ShowSettings, SpaceManuscript, SpaceNotes, SpaceWorld, ToggleFocusMode, ToggleReference,
+    ToggleSpellcheck, ToggleTheme, ToggleTypewriter, QUICK_OPEN_CONTEXT,
 };
 use crate::layout::Layout;
 use crate::panels::editor::{EditorPanel, EditorPanelEvent};
 use crate::panels::empty::{EmptyCenter, EmptyCenterEvent, WordyDockRenderer};
 use crate::panels::home::{HomeEvent, HomePanel};
 use crate::panels::reference::{ReferenceEvent, ReferencePanel};
+use crate::panels::settings::{Section, SettingsEvent, SettingsPanel};
 use crate::panels::sheet::{SheetEvent, SheetPanel};
 use crate::panels::sidebar::{SidebarEvent, SidebarPanel};
 use crate::sync::{SyncEvent, SyncManager};
@@ -99,6 +100,7 @@ pub(crate) fn match_rank(title: &str, query: &str, terms: &[&str]) -> Option<u8>
 fn palette_actions(has_editor: bool) -> Vec<(&'static str, &'static str, Box<dyn Action>)> {
     let mut v: Vec<(&'static str, &'static str, Box<dyn Action>)> = vec![
         ("Go", "Home", Box::new(ShowHome)),
+        ("Go", "Settings", Box::new(ShowSettings)),
         ("Go", "Manuscript", Box::new(SpaceManuscript)),
         ("Go", "World", Box::new(SpaceWorld)),
         ("Go", "Notes", Box::new(SpaceNotes)),
@@ -188,6 +190,22 @@ fn pretty_keystroke(k: &Keystroke) -> String {
     parts.join(if mac { "" } else { "+" })
 }
 
+/// A centre tab: one of the fixed pages, or a document.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tab {
+    Home,
+    Settings,
+    Node(TreeID),
+}
+
+/// Which fixed page was last in front; decides between Home and Settings
+/// when no document is active.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Fixed {
+    Home,
+    Settings,
+}
+
 pub struct Workspace {
     project: SharedProject,
     space: Space,
@@ -199,6 +217,8 @@ pub struct Workspace {
     /// Overlaid on the centre while no tab is open.
     empty: Entity<EmptyCenter>,
     home: Option<Entity<HomePanel>>,
+    settings: Option<Entity<SettingsPanel>>,
+    front: Fixed,
     sync: Entity<SyncManager>,
     editors: HashMap<TreeID, Entity<EditorPanel>>,
     /// Open editor tabs in opening order, for Ctrl-Tab cycling.
@@ -348,6 +368,8 @@ impl Workspace {
             sheet,
             empty,
             home: None,
+            settings: None,
+            front: Fixed::Home,
             sync,
             editors: HashMap::new(),
             tab_order: Vec::new(),
@@ -387,6 +409,12 @@ impl Workspace {
             tabs: self.tab_order.iter().map(|id| id.to_string()).collect(),
             active: self.active.map(|id| id.to_string()),
             home_open: self.home.is_some(),
+            settings_open: self.settings.is_some(),
+            settings_section: self
+                .settings
+                .as_ref()
+                .map(|s| s.read(cx).section_shown().label().to_lowercase()),
+            settings_front: self.front == Fixed::Settings,
             reference_open: dock.is_dock_open(DockPlacement::Right),
             reference_pinned: self.reference.read(cx).pinned_id().map(|id| id.to_string()),
             sidebar_open: dock.is_dock_open(DockPlacement::Left),
@@ -404,7 +432,7 @@ impl Workspace {
         // and the empty-centre view appears once the last tab is gone.
         let active = self.active;
         self.sheet.update(cx, |s, cx| s.show(active, cx));
-        let none_open = self.editors.is_empty() && self.home.is_none();
+        let none_open = self.editors.is_empty() && self.home.is_none() && self.settings.is_none();
         self.empty.update(cx, |e, cx| e.set_shown(none_open, cx));
         let sole = self.tab_items().len() == 1;
         for panel in self.editors.values() {
@@ -412,6 +440,9 @@ impl Workspace {
         }
         if let Some(home) = &self.home {
             home.update(cx, |h, cx| h.set_sole_tab(sole, cx));
+        }
+        if let Some(settings) = &self.settings {
+            settings.update(cx, |s, cx| s.set_sole_tab(sole, cx));
         }
         if self.restoring {
             return;
@@ -477,6 +508,13 @@ impl Workspace {
         if layout.home_open {
             self.show_home(window, cx);
         }
+        if layout.settings_open {
+            let section = layout
+                .settings_section
+                .as_deref()
+                .and_then(|s| Section::ALL.into_iter().find(|x| x.label().eq_ignore_ascii_case(s)));
+            self.show_settings(section, window, cx);
+        }
         let active = layout.active.as_deref().and_then(|s| TreeID::try_from(s).ok());
         for id in Layout::ids(&layout.tabs) {
             if self.project.project.is_live(id) {
@@ -485,7 +523,9 @@ impl Workspace {
         }
         match active {
             Some(id) if self.editors.contains_key(&id) => self.open_node(id, window, cx),
+            _ if layout.settings_open && layout.settings_front => self.show_settings(None, window, cx),
             _ if layout.home_open => self.show_home(window, cx),
+            _ if layout.settings_open => self.show_settings(None, window, cx),
             _ => {}
         }
         if layout.focus_mode {
@@ -638,7 +678,7 @@ impl Workspace {
             self.layout_changed(cx);
             return;
         }
-        let home = cx.new(|cx| HomePanel::new(self.project.clone(), self.sync.clone(), window, cx));
+        let home = cx.new(|cx| HomePanel::new(self.project.clone(), window, cx));
         let sub = cx.subscribe_in(&home, window, |this, _, ev: &HomeEvent, window, cx| match ev {
             HomeEvent::Open(id) => this.open_node(*id, window, cx),
             HomeEvent::Reveal { id, offset, len } => {
@@ -650,6 +690,7 @@ impl Workspace {
             HomeEvent::Changed => this.on_edited(cx),
             HomeEvent::Activated => {
                 this.active = None;
+                this.front = Fixed::Home;
                 this.layout_changed(cx);
                 cx.notify();
             }
@@ -672,6 +713,63 @@ impl Workspace {
 
     fn on_show_home(&mut self, _: &ShowHome, window: &mut Window, cx: &mut Context<Self>) {
         self.show_home(window, cx);
+    }
+
+    /// Open (or focus) the Settings tab, on `section` when given.
+    fn show_settings(&mut self, section: Option<Section>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(settings) = self.settings.clone() {
+            let pid = PanelId::from(settings.entity_id());
+            self.dock.update(cx, |dock, cx| dock.select_panel(pid, window, cx));
+            settings.update(cx, |s, cx| {
+                if let Some(section) = section {
+                    s.show_section(section, cx);
+                }
+                cx.notify();
+            });
+            self.layout_changed(cx);
+            return;
+        }
+        let settings = cx.new(|cx| SettingsPanel::new(self.project.clone(), self.sync.clone(), window, cx));
+        if let Some(section) = section {
+            settings.update(cx, |s, cx| s.show_section(section, cx));
+        }
+        let sub = cx.subscribe_in(&settings, window, |this, _, ev: &SettingsEvent, _, cx| match ev {
+            SettingsEvent::Changed => this.on_edited(cx),
+            SettingsEvent::Activated => {
+                this.active = None;
+                this.front = Fixed::Settings;
+                this.layout_changed(cx);
+                cx.notify();
+            }
+            SettingsEvent::Closed => {
+                this.settings = None;
+                this.layout_changed(cx);
+                cx.notify();
+            }
+        });
+        self._subs.push(sub);
+        let pid = PanelId::from(settings.entity_id());
+        self.dock.update(cx, |dock, cx| {
+            dock.add_panel_view(panel_handle(settings.clone()), DockPlacement::Center, None, window, cx);
+            dock.select_panel(pid, window, cx);
+        });
+        self.settings = Some(settings);
+        self.layout_changed(cx);
+        cx.notify();
+    }
+
+    fn on_show_settings(&mut self, _: &ShowSettings, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_settings(None, window, cx);
+    }
+
+    /// Home and Settings read the project on render; poke them after a change.
+    fn refresh_fixed_tabs(&self, cx: &mut Context<Self>) {
+        if let Some(home) = &self.home {
+            home.update(cx, |_, cx| cx.notify());
+        }
+        if let Some(settings) = &self.settings {
+            settings.update(cx, |_, cx| cx.notify());
+        }
     }
 
     /// A word was added to the custom dictionary: persist it and re-check
@@ -721,9 +819,7 @@ impl Workspace {
         self.dirty = false;
         self.dirty_nodes.clear();
         self.last_saved = Some(chrono_time());
-        if let Some(home) = &self.home {
-            home.update(cx, |_, cx| cx.notify());
-        }
+        self.refresh_fixed_tabs(cx);
         cx.notify();
     }
 
@@ -982,6 +1078,11 @@ impl Workspace {
     fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(panel) = self.active.and_then(|id| self.editors.get(&id)).cloned() {
             panel.update(cx, |p, cx| p.focus_editor(window, cx));
+        } else if let Some(Tab::Settings) = self.current_tab() {
+            if let Some(settings) = &self.settings {
+                let f = settings.read(cx).focus_handle(cx);
+                window.focus(&f, cx);
+            }
         } else if let Some(home) = &self.home {
             let f = home.read(cx).focus_handle(cx);
             window.focus(&f, cx);
@@ -992,27 +1093,36 @@ impl Workspace {
 
     // ----- tabs and documents ----------------------------------------------
 
-    /// Tabs in bar order: Home first when open, then editors by opening order.
-    fn tab_items(&self) -> Vec<Option<TreeID>> {
-        let mut items = Vec::with_capacity(self.tab_order.len() + 1);
+    /// Tabs in bar order: Home, then Settings, when open; then editors by
+    /// opening order.
+    fn tab_items(&self) -> Vec<Tab> {
+        let mut items = Vec::with_capacity(self.tab_order.len() + 2);
         if self.home.is_some() {
-            items.push(None);
+            items.push(Tab::Home);
         }
-        items.extend(self.tab_order.iter().copied().map(Some));
+        if self.settings.is_some() {
+            items.push(Tab::Settings);
+        }
+        items.extend(self.tab_order.iter().copied().map(Tab::Node));
         items
     }
 
-    fn current_tab(&self) -> Option<Option<TreeID>> {
-        match self.active {
-            Some(id) => Some(Some(id)),
-            None => self.home.is_some().then_some(None),
+    fn current_tab(&self) -> Option<Tab> {
+        if let Some(id) = self.active {
+            return Some(Tab::Node(id));
+        }
+        match (self.front, self.home.is_some(), self.settings.is_some()) {
+            (Fixed::Settings, _, true) | (Fixed::Home, false, true) => Some(Tab::Settings),
+            (_, true, _) => Some(Tab::Home),
+            _ => None,
         }
     }
 
-    fn show_tab(&mut self, tab: Option<TreeID>, window: &mut Window, cx: &mut Context<Self>) {
+    fn show_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         match tab {
-            None => self.show_home(window, cx),
-            Some(id) => self.open_node(id, window, cx),
+            Tab::Home => self.show_home(window, cx),
+            Tab::Settings => self.show_settings(None, window, cx),
+            Tab::Node(id) => self.open_node(id, window, cx),
         }
     }
 
@@ -1045,16 +1155,21 @@ impl Workspace {
         let items = self.tab_items();
         let ix = items.iter().position(|i| *i == cur).unwrap_or(0);
         match cur {
-            Some(id) => {
+            Tab::Node(id) => {
                 if let Some(panel) = self.editors.remove(&id) {
                     self.tab_order.retain(|t| *t != id);
                     self.dock.update(cx, |dock, cx| dock.remove_panel(panel, window, cx));
                 }
                 self.active = None;
             }
-            None => {
+            Tab::Home => {
                 if let Some(home) = self.home.take() {
                     self.dock.update(cx, |dock, cx| dock.remove_panel(home, window, cx));
+                }
+            }
+            Tab::Settings => {
+                if let Some(settings) = self.settings.take() {
+                    self.dock.update(cx, |dock, cx| dock.remove_panel(settings, window, cx));
                 }
             }
         }
@@ -1485,9 +1600,7 @@ impl Workspace {
             }
             Err(e) => tracing::error!("save failed: {e:#}"),
         }
-        if let Some(home) = &self.home {
-            home.update(cx, |_, cx| cx.notify());
-        }
+        self.refresh_fixed_tabs(cx);
         self.save_layout(cx);
         cx.notify();
     }
@@ -1568,7 +1681,9 @@ impl Workspace {
             ("rail-world", "World (Ctrl-2)", IconName::Globe, Space::World),
             ("rail-notes", "Notes (Ctrl-3)", IconName::FileText, Space::Notes),
         ];
-        let home_active = self.home.is_some() && self.active.is_none();
+        let current = self.current_tab();
+        let home_active = current == Some(Tab::Home);
+        let settings_active = current == Some(Tab::Settings);
         let dark = cx.theme().mode.is_dark();
         v_flex()
             .w(px(56.))
@@ -1585,14 +1700,14 @@ impl Workspace {
                 Button::new("rail-home")
                     .ghost()
                     .icon(IconName::LayoutDashboard)
-                    .tooltip("Home: dashboard, reports, tasks, export, sync (Ctrl-Shift-H)")
+                    .tooltip("Home: today, goals, tasks, reports (Ctrl-0)")
                     .toggled(home_active)
                     .on_click(cx.listener(|this, _, window, cx| this.show_home(window, cx))),
                 cx,
             ))
             .child(div().h(px(8.)))
             .children(spaces.into_iter().map(|(id, label, icon, space)| {
-                let active = self.space == space && !home_active;
+                let active = self.space == space && !home_active && !settings_active;
                 Self::rail_item(
                     active,
                     Button::new(id)
@@ -1605,6 +1720,16 @@ impl Workspace {
                 )
             }))
             .child(div().flex_1())
+            .child(Self::rail_item(
+                settings_active,
+                Button::new("rail-settings")
+                    .ghost()
+                    .icon(IconName::Settings)
+                    .tooltip("Settings: account, export, appearance (Ctrl-,)")
+                    .toggled(settings_active)
+                    .on_click(cx.listener(|this, _, window, cx| this.show_settings(None, window, cx))),
+                cx,
+            ))
             .child(Self::rail_item(
                 false,
                 Button::new("rail-theme")
@@ -1707,6 +1832,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_reference))
             .on_action(cx.listener(Self::search_project))
             .on_action(cx.listener(Self::on_show_home))
+            .on_action(cx.listener(Self::on_show_settings))
             .on_action(cx.listener(Self::toggle_focus_mode))
             .on_action(cx.listener(Self::toggle_typewriter))
             .on_action(cx.listener(Self::toggle_spellcheck))

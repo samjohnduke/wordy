@@ -5,12 +5,13 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use anyhow::Result;
-use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode, TitleBar};
+use gpui_kit::component::{ActiveTheme as _, TitleBar};
 use gpui_kit::*;
 use wordy_doc::{storage, Matcher, Project, TreeID};
 use wordy_editor::LinkTarget;
 use wordy_index::{Backlink, Index, SearchHit};
 
+use crate::prefs::{Appearance, Prefs};
 use crate::workspace::Workspace;
 
 gpui_kit::actions!(
@@ -28,6 +29,7 @@ gpui_kit::actions!(
         ToggleReference,
         SearchProject,
         ShowHome,
+        ShowSettings,
         ToggleFocusMode,
         ToggleTypewriter,
         ToggleSpellcheck,
@@ -217,6 +219,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-shift-r", ToggleReference, None),
         KeyBinding::new("secondary-shift-f", SearchProject, None),
         KeyBinding::new("secondary-0", ShowHome, None),
+        KeyBinding::new("secondary-,", ShowSettings, None),
         KeyBinding::new("secondary-shift-d", ToggleFocusMode, None),
         KeyBinding::new("secondary-shift-y", ToggleTypewriter, None),
         KeyBinding::new("secondary-p", QuickOpen, None),
@@ -243,7 +246,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("f2", SidebarRename, Some(SIDEBAR_CONTEXT)),
         KeyBinding::new("delete", SidebarTrash, Some(SIDEBAR_CONTEXT)),
     ]);
-    Theme::sync_system_appearance(None, cx);
+    cx.set_global(Prefs::load());
+    Prefs::apply(None, cx);
 }
 
 /// Open the project folder given on the command line (`wordy <dir>`,
@@ -318,6 +322,10 @@ pub fn open_project_window(project: Project, notice: Option<String>, cx: &mut Ap
     };
 
     if let Err(e) = gpui_kit::open_window(options, cx, move |window, cx| {
+        // Follow the system theme when that is the preference.
+        window
+            .observe_window_appearance(|window, cx| Prefs::system_changed(window, cx))
+            .detach();
         cx.new(|cx| {
             let mut ws = Workspace::new(shared, window, cx);
             ws.set_notice(notice);
@@ -340,11 +348,13 @@ fn human_size(n: u64) -> String {
     }
 }
 
+/// Flip light / dark and pin the result as the preference (so "match the
+/// system" stops following until it is chosen again in Settings).
 pub fn toggle_theme(window: &mut Window, cx: &mut App) {
     let next = if cx.theme().mode.is_dark() {
-        ThemeMode::Light
+        Appearance::Light
     } else {
-        ThemeMode::Dark
+        Appearance::Dark
     };
-    Theme::change(next, Some(window), cx);
+    Prefs::update(Some(window), cx, |p| p.appearance = next);
 }

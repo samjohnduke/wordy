@@ -102,7 +102,7 @@ on one computer: passkeys in the browser, the app pointed at `http://localhost:8
 second app instance (`WORDY_CONFIG_DIR`, `WORDY_PROJECTS_DIR`) and sharing between two
 accounts; `pnpm mail` prints the emails wrangler wrote.
 
-In the app, Home → Account → "Link this machine" opens the browser at `/device` with a
+In the app, Settings → Account → "Link this machine" opens the browser at `/device` with a
 code; approving it there with a passkey gives the app a bearer token, stored in
 `sync.json` (owner-readable only). "Sync this project" then keeps the open project in its
 room on the server: every save sends the new edits, edits from other machines land after

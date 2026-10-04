@@ -3,6 +3,7 @@
 mod app;
 mod layout;
 mod panels;
+mod prefs;
 mod sync;
 mod workspace;
 
