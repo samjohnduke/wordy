@@ -247,8 +247,13 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("delete", SidebarTrash, Some(SIDEBAR_CONTEXT)),
     ]);
     crate::prefs::register_themes(cx);
+    if let Err(e) = crate::prefs::write_theme_schema() {
+        tracing::warn!("theme schema: {e:#}");
+    }
+    crate::prefs::load_user_themes(cx);
     cx.set_global(Prefs::load());
     Prefs::apply(None, cx);
+    crate::prefs::watch_user_themes(cx);
 }
 
 /// Open the project folder given on the command line (`wordy <dir>`,

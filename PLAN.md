@@ -23,7 +23,7 @@ docx/pdf/epub export, sync).
 - Mac (Apple Silicon) and Linux (Wayland, X11 fallback) builds.
 
 **Non-goals**
-- Windows, mobile, web, collaboration with other people, plugins, user-written themes,
+- Windows, mobile, web, collaboration with other people, plugins,
   inline images, tables, nested lists, footnotes, Scrivener import, public roadmap.
   (A public website with downloads and a changelog was added in Phase 14. Phases 15–17
   add accounts and cloud sync, so "collaboration with other people" stops being a
@@ -725,3 +725,17 @@ through `observe_global` (keeping the caret in view). Headings keep scaling off 
 size; exports keep their own paragraph setting. A `fonts/` folder beside `prefs.json` holds
 the user's own `.ttf`/`.otf`/`.ttc` files: loaded at launch and on Reload, no install needed,
 and they show up in the picker like any installed family.
+
+### Phase 24 — User themes (2026-10-04)
+
+Done. A `themes/` folder beside `prefs.json` holds the user's own theme files in
+gpui-component's theme-set format. Each file lists as a family on the Appearance page, named
+by its set (or file stem), pairing its first light and first dark theme; a missing half is
+filled by the stock one. The folder is read at launch, on Reload, and watched with `notify`
+while the app runs, so a save in an editor shows at once. "Save a copy of <theme>" writes the
+current family's JSON (the bundled file, the stock pair serialised, or the user's file) under
+a new name as a starting point, and Wordy writes `theme.schema.json` (schemars from
+`ThemeSet`) into the folder so editors can validate and complete the keys. Files that fail to
+parse are listed with their error. `prefs.theme` gained a `user` variant holding the set name;
+a name whose file is gone falls back to the stock pair without rewriting the preference.
+Themes stay per machine, like fonts and appearance.

@@ -43,3 +43,26 @@ fn bundled_themes_parse_with_expected_names() {
         }
     }
 }
+
+/// A user file may carry the `$schema` pointer Wordy writes into copies and
+/// may hold one half only; both must parse.
+#[test]
+fn user_theme_files_parse_with_schema_key_and_one_half() {
+    let json = r##"{
+      "$schema": "./theme.schema.json",
+      "name": "Mine",
+      "themes": [{ "name": "Mine Dark", "mode": "dark", "colors": { "background": "#101010" } }]
+    }"##;
+    let set: ThemeSet = serde_json::from_str(json).expect("parses");
+    assert_eq!(set.name.as_ref(), "Mine");
+    assert_eq!(set.themes.len(), 1);
+    assert_eq!(set.themes[0].mode, ThemeMode::Dark);
+}
+
+/// The schema Wordy writes beside user themes must generate.
+#[test]
+fn theme_schema_generates() {
+    let schema = schemars::schema_for!(ThemeSet);
+    let text = serde_json::to_string(&schema).unwrap();
+    assert!(text.contains("\"themes\""));
+}

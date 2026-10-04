@@ -19,7 +19,7 @@ use wordy_export::{CompileOptions, Format};
 
 use super::{human_size, section, setting_bool, setting_str};
 use crate::app::{CloseTab, SharedProject};
-use crate::prefs::{self, Appearance, ParagraphStyle, Prefs, Scrollbars, TextPrefs, ThemeFamily};
+use crate::prefs::{self, Appearance, ParagraphStyle, Prefs, Scrollbars, TextPrefs, ThemeFamily, UserThemes};
 use crate::sync::{CloudStatus, CloudSyncStatus, SyncManager};
 
 /// What an Appearance choice does when picked.
@@ -130,6 +130,8 @@ pub struct SettingsPanel {
     sync_server: Entity<InputState>,
     /// The editor font: the bundled serif first, then every installed family.
     font_select: Entity<SelectState<Vec<SharedString>>>,
+    /// What the last Save a copy did, shown under the Your themes buttons.
+    theme_status: Option<String>,
     /// The only tab in the centre, so the tab bar needs its own close button.
     sole_tab: bool,
     pub focus: FocusHandle,
@@ -225,6 +227,7 @@ impl SettingsPanel {
         ));
         // Text and theme edits change the global, not this panel; redraw.
         subs.push(cx.observe_global::<Prefs>(|_, cx| cx.notify()));
+        subs.push(cx.observe_global::<UserThemes>(|_, cx| cx.notify()));
 
         Self {
             project,
@@ -239,6 +242,7 @@ impl SettingsPanel {
             sync_name,
             sync_server,
             font_select,
+            theme_status: None,
             sole_tab: false,
             focus: cx.focus_handle(),
             _subs: subs,
@@ -799,8 +803,10 @@ impl SettingsPanel {
     /// `prefs.json`.
     fn render_appearance(&self, cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
+        let danger = cx.theme().danger;
         let prefs = Prefs::global(cx).clone();
-        let choice = |id: &'static str, label: &'static str, on: bool, pick: Pick| {
+        let user_themes = UserThemes::global(cx).clone();
+        let choice = |id: &'static str, label: SharedString, on: bool, pick: Pick| {
             Button::new(id)
                 .outline()
                 .small()
@@ -819,22 +825,105 @@ impl SettingsPanel {
                 h_flex()
                     .gap_2()
                     .flex_wrap()
-                    .children(ThemeFamily::ALL.into_iter().map(|f| {
+                    .children(ThemeFamily::BUNDLED.into_iter().map(|f| {
                         let id: &'static str = match f {
                             ThemeFamily::Default => "family-default",
                             ThemeFamily::Wordy => "family-wordy",
                             ThemeFamily::Catppuccin => "family-catppuccin",
                             ThemeFamily::HighContrast => "family-high-contrast",
+                            ThemeFamily::User(_) => "family-user",
                         };
                         choice(
                             id,
-                            f.label(),
+                            f.label().into(),
                             prefs.theme == f,
-                            Box::new(move |window, cx| Prefs::update(Some(window), cx, |p| p.theme = f)),
+                            Box::new(move |window, cx| Prefs::update(Some(window), cx, |p| p.theme = f.clone())),
                         )
+                    }))
+                    .children(user_themes.sets.iter().map(|set| {
+                        let family = ThemeFamily::User(set.name.clone());
+                        let on = prefs.theme == family;
+                        Button::new(format!("family-user-{}", set.name))
+                            .outline()
+                            .small()
+                            .label(set.name.clone())
+                            .toggled(on)
+                            .on_click(move |_, window, cx| {
+                                Prefs::update(Some(window), cx, |p| p.theme = family.clone())
+                            })
                     })),
             )
-            .child(div().text_xs().text_color(muted).child(prefs.theme.blurb()));
+            .child(div().text_xs().text_color(muted).child(prefs.theme.blurb(cx)));
+        let dir = prefs::themes_dir();
+        let dir2 = dir.clone();
+        let copy_of = prefs.theme.clone();
+        let own_box = section("Your themes", cx)
+            .child(div().text_xs().text_color(muted).child(
+                "Drop a theme file in this folder and it joins the list above; edit it with Wordy open and the \
+                 change shows as you save. Save a copy of the current theme to start from, and point your editor \
+                 at theme.schema.json in the folder for the keys.",
+            ))
+            .child(
+                div()
+                    .text_sm()
+                    .font_family("monospace")
+                    .child(dir.display().to_string()),
+            )
+            .child(div().text_xs().text_color(muted).child(match user_themes.sets.len() {
+                0 => "No theme files there yet.".to_string(),
+                1 => "1 theme file.".to_string(),
+                n => format!("{n} theme files."),
+            }))
+            .children(
+                user_themes
+                    .errors
+                    .iter()
+                    .map(|(file, err)| div().text_xs().text_color(danger).child(format!("{file}: {err}"))),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .flex_wrap()
+                    .child(
+                        Button::new("themes-open")
+                            .outline()
+                            .small()
+                            .label("Open folder")
+                            .on_click(move |_, _, cx| {
+                                if let Err(e) = std::fs::create_dir_all(&dir) {
+                                    tracing::error!("{}: {e}", dir.display());
+                                }
+                                cx.open_with_system(&dir);
+                            }),
+                    )
+                    .child(
+                        Button::new("themes-reload")
+                            .outline()
+                            .small()
+                            .label("Reload")
+                            .on_click(|_, _, cx| prefs::load_user_themes(cx)),
+                    )
+                    .child(
+                        Button::new("themes-copy")
+                            .outline()
+                            .small()
+                            .label(format!("Save a copy of {}", prefs.theme.label()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.theme_status = Some(match prefs::save_theme_copy(&copy_of, cx) {
+                                    Ok(path) => {
+                                        let name = path.strip_prefix(&dir2).unwrap_or(&path).display().to_string();
+                                        prefs::load_user_themes(cx);
+                                        format!("Saved {name}. Edit it there; it is in the list above.")
+                                    }
+                                    Err(e) => format!("Could not save a copy: {e:#}"),
+                                });
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .when_some(self.theme_status.clone(), |this, status| {
+                this.child(div().text_xs().text_color(muted).child(status))
+            });
         let theme_box = section("Light or dark", cx)
             .child(div().text_xs().text_color(muted).child(
                 "Follow the system's light or dark setting, or pin one. The sun / moon button on the rail and Ctrl-Shift-T flip between light and dark, and pin the result here.",
@@ -847,7 +936,7 @@ impl SettingsPanel {
                 };
                 choice(
                     id,
-                    a.label(),
+                    a.label().into(),
                     prefs.appearance == a,
                     Box::new(move |window, cx| Prefs::update(Some(window), cx, |p| p.appearance = a)),
                 )
@@ -871,7 +960,7 @@ impl SettingsPanel {
                         };
                         choice(
                             id,
-                            s.label(),
+                            s.label().into(),
                             prefs.scrollbars == s,
                             Box::new(move |window, cx| Prefs::update(Some(window), cx, |p| p.scrollbars = s)),
                         )
@@ -883,6 +972,7 @@ impl SettingsPanel {
             .child(family_box)
             .child(theme_box)
             .child(scroll_box)
+            .child(own_box)
             .into_any_element()
     }
 

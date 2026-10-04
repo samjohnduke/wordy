@@ -1,13 +1,17 @@
 //! Per-user preferences that are not about any one project: theme,
 //! appearance, scrollbars and the editor's type. Stored beside the sync
-//! settings as `prefs.json` in `wordy_sync::config::config_dir()`.
+//! settings as `prefs.json` in `wordy_sync::config::config_dir()`, next to
+//! the `fonts/` and `themes/` folders a user can drop files into.
 
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
+use futures::StreamExt as _;
 use gpui_kit::component::scroll::ScrollbarMode;
-use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};
+use gpui_kit::component::{Theme, ThemeConfig, ThemeMode, ThemeRegistry, ThemeSet};
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 use wordy_editor::EditorStyle;
@@ -35,9 +39,11 @@ impl Appearance {
 }
 
 /// A palette with a light half and a dark half; [`Appearance`] picks which
-/// half shows. The families other than the stock one come from the JSON
-/// files under `themes/`, registered by [`register_themes`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// half shows. The bundled families other than the stock one come from the
+/// JSON files under `themes/`, registered by [`register_themes`]; `User`
+/// names a set the user dropped in their own themes folder, see
+/// [`UserThemes`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeFamily {
     #[default]
@@ -45,41 +51,93 @@ pub enum ThemeFamily {
     Wordy,
     Catppuccin,
     HighContrast,
+    User(String),
 }
 
 impl ThemeFamily {
-    pub const ALL: [ThemeFamily; 4] = [
+    /// The families that ship with Wordy.
+    pub const BUNDLED: [ThemeFamily; 4] = [
         ThemeFamily::Default,
         ThemeFamily::Wordy,
         ThemeFamily::Catppuccin,
         ThemeFamily::HighContrast,
     ];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(&self) -> String {
         match self {
-            ThemeFamily::Default => "Default",
-            ThemeFamily::Wordy => "Wordy",
-            ThemeFamily::Catppuccin => "Catppuccin",
-            ThemeFamily::HighContrast => "High contrast",
+            ThemeFamily::Default => "Default".into(),
+            ThemeFamily::Wordy => "Wordy".into(),
+            ThemeFamily::Catppuccin => "Catppuccin".into(),
+            ThemeFamily::HighContrast => "High contrast".into(),
+            ThemeFamily::User(name) => name.clone(),
         }
     }
 
-    pub fn blurb(self) -> &'static str {
+    pub fn blurb(&self, cx: &App) -> String {
         match self {
-            ThemeFamily::Default => "Neutral greys: the stock look.",
-            ThemeFamily::Wordy => "Cream page, ink and oxblood, like the website and the icon.",
-            ThemeFamily::Catppuccin => "Catppuccin Latte by day and Mocha by night.",
-            ThemeFamily::HighContrast => "Black on white or white on black, hard borders, no shadows.",
+            ThemeFamily::Default => "Neutral greys: the stock look.".into(),
+            ThemeFamily::Wordy => "Cream page, ink and oxblood, like the website and the icon.".into(),
+            ThemeFamily::Catppuccin => "Catppuccin Latte by day and Mocha by night.".into(),
+            ThemeFamily::HighContrast => "Black on white or white on black, hard borders, no shadows.".into(),
+            ThemeFamily::User(name) => match UserThemes::global(cx).get(name) {
+                Some(set) => {
+                    let halves = match (&set.light, &set.dark) {
+                        (Some(_), Some(_)) => "Light and dark halves",
+                        (Some(_), None) => "Light half only; the stock dark fills in",
+                        (None, Some(_)) => "Dark half only; the stock light fills in",
+                        (None, None) => "No themes in the file",
+                    };
+                    format!("{halves}, from {} in your themes folder.", set.file_name())
+                }
+                None => "This theme's file is gone from your themes folder; the stock look shows instead.".into(),
+            },
         }
     }
 
-    /// The registered light and dark theme names; none for the stock pair.
-    fn names(self) -> Option<(&'static str, &'static str)> {
+    /// The registered light and dark theme names of a bundled family; none
+    /// for the stock pair or a user theme.
+    fn names(&self) -> Option<(&'static str, &'static str)> {
         match self {
-            ThemeFamily::Default => None,
+            ThemeFamily::Default | ThemeFamily::User(_) => None,
             ThemeFamily::Wordy => Some(("Wordy Light", "Wordy Dark")),
             ThemeFamily::Catppuccin => Some(("Catppuccin Latte", "Catppuccin Mocha")),
             ThemeFamily::HighContrast => Some(("High Contrast Light", "High Contrast Dark")),
+        }
+    }
+
+    /// The bundled JSON this family was loaded from; none for the stock
+    /// pair or a user theme.
+    fn bundled_file(&self) -> Option<&'static str> {
+        match self {
+            ThemeFamily::Wordy => Some(THEME_FILES[0]),
+            ThemeFamily::Catppuccin => Some(THEME_FILES[1]),
+            ThemeFamily::HighContrast => Some(THEME_FILES[2]),
+            ThemeFamily::Default | ThemeFamily::User(_) => None,
+        }
+    }
+
+    /// The light and dark configs to install for this family. A user set
+    /// missing a half, or missing altogether, gets the stock half.
+    fn configs(&self, cx: &App) -> (Rc<ThemeConfig>, Rc<ThemeConfig>) {
+        let registry = ThemeRegistry::global(cx);
+        let stock = || {
+            (
+                registry.default_light_theme().clone(),
+                registry.default_dark_theme().clone(),
+            )
+        };
+        match self {
+            ThemeFamily::User(name) => match UserThemes::global(cx).get(name) {
+                Some(set) => {
+                    let (l, d) = stock();
+                    (set.light.clone().unwrap_or(l), set.dark.clone().unwrap_or(d))
+                }
+                None => stock(),
+            },
+            _ => self
+                .names()
+                .and_then(|(l, d)| Some((registry.themes().get(l)?.clone(), registry.themes().get(d)?.clone())))
+                .unwrap_or_else(stock),
         }
     }
 }
@@ -99,6 +157,280 @@ pub fn register_themes(cx: &mut App) {
         if let Err(e) = registry.load_themes_from_str(file) {
             tracing::error!("bundled theme: {e:#}");
         }
+    }
+}
+
+/// One file from the user's themes folder: a gpui-component theme set, of
+/// which Wordy keeps the first light and the first dark theme.
+#[derive(Clone, Debug)]
+pub struct UserThemeSet {
+    /// The set's name, or the file stem when the file names none. Unique
+    /// across the folder; a clash gets the stem appended.
+    pub name: String,
+    pub file: PathBuf,
+    pub light: Option<Rc<ThemeConfig>>,
+    pub dark: Option<Rc<ThemeConfig>>,
+}
+
+impl UserThemeSet {
+    pub fn file_name(&self) -> String {
+        self.file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+}
+
+/// Every theme file in the user's themes folder, parsed, plus the files
+/// that would not parse and why. Rebuilt by [`load_user_themes`]: at launch,
+/// on Reload, and whenever the folder changes while the app runs.
+#[derive(Clone, Debug, Default)]
+pub struct UserThemes {
+    pub sets: Vec<UserThemeSet>,
+    /// `(file name, error)` for each file that failed.
+    pub errors: Vec<(String, String)>,
+}
+
+impl Global for UserThemes {}
+
+impl UserThemes {
+    pub fn global(cx: &App) -> &UserThemes {
+        cx.global::<UserThemes>()
+    }
+
+    pub fn get(&self, name: &str) -> Option<&UserThemeSet> {
+        self.sets.iter().find(|s| s.name == name)
+    }
+}
+
+/// The name of the JSON Schema Wordy writes into the themes folder, so an
+/// editor can validate and complete a theme file.
+pub const THEME_SCHEMA_FILE: &str = "theme.schema.json";
+
+/// Where a user drops theme files: `themes/` beside `prefs.json`.
+pub fn themes_dir() -> PathBuf {
+    wordy_sync::config::config_dir().join("themes")
+}
+
+/// The theme files in [`themes_dir`], sorted; the schema file is not one.
+pub fn user_theme_files() -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(themes_dir()) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+                && p.file_name().and_then(|n| n.to_str()) != Some(THEME_SCHEMA_FILE)
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+fn parse_user_theme(path: &Path) -> Result<UserThemeSet> {
+    let text = std::fs::read_to_string(path)?;
+    let set: ThemeSet = serde_json::from_str(&text)?;
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let name = if set.name.trim().is_empty() {
+        stem
+    } else {
+        set.name.to_string()
+    };
+    let mut light = None;
+    let mut dark = None;
+    for theme in set.themes {
+        let slot = if theme.mode.is_dark() { &mut dark } else { &mut light };
+        if slot.is_none() {
+            *slot = Some(Rc::new(theme));
+        }
+    }
+    Ok(UserThemeSet {
+        name,
+        file: path.to_path_buf(),
+        light,
+        dark,
+    })
+}
+
+/// Read the themes folder into the [`UserThemes`] global and, when the
+/// preferences are loaded, reapply them so a change to the chosen theme
+/// shows at once.
+pub fn load_user_themes(cx: &mut App) {
+    let mut themes = UserThemes::default();
+    for path in user_theme_files() {
+        let file = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match parse_user_theme(&path) {
+            Ok(mut set) => {
+                if themes.get(&set.name).is_some() {
+                    let stem = path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    set.name = format!("{} ({stem})", set.name);
+                }
+                themes.sets.push(set);
+            }
+            Err(e) => {
+                tracing::warn!("theme {file}: {e:#}");
+                themes.errors.push((file, format!("{e:#}")));
+            }
+        }
+    }
+    cx.set_global(themes);
+    if cx.has_global::<Prefs>() {
+        Prefs::apply(None, cx);
+    }
+}
+
+/// Write the theme file schema into the themes folder, creating the folder,
+/// so an editor can check a theme as it is written. Skipped when the file
+/// already says the same.
+pub fn write_theme_schema() -> Result<()> {
+    let dir = themes_dir();
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let schema = schemars::schema_for!(ThemeSet);
+    let json = serde_json::to_vec_pretty(&schema)?;
+    let path = dir.join(THEME_SCHEMA_FILE);
+    if std::fs::read(&path).is_ok_and(|old| old == json) {
+        return Ok(());
+    }
+    wordy_doc::storage::write_atomic(&path, &json)
+}
+
+/// Watch the themes folder and reload it when a file is added, changed or
+/// removed, so a theme can be edited with the app open. Events are
+/// coalesced for a moment so one save does not reload the folder twice.
+pub fn watch_user_themes(cx: &mut App) {
+    use notify::Watcher as _;
+
+    let dir = themes_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!("{}: {e}", dir.display());
+        return;
+    }
+    let (tx, mut rx) = futures::channel::mpsc::unbounded::<()>();
+    let mut watcher = match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if let Ok(event) = res {
+            if matches!(
+                event.kind,
+                notify::EventKind::Create(_) | notify::EventKind::Modify(_) | notify::EventKind::Remove(_)
+            ) {
+                _ = tx.unbounded_send(());
+            }
+        }
+    }) {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!("cannot watch {}: {e}", dir.display());
+            return;
+        }
+    };
+    if let Err(e) = watcher.watch(&dir, notify::RecursiveMode::NonRecursive) {
+        tracing::warn!("cannot watch {}: {e}", dir.display());
+        return;
+    }
+    cx.spawn(async move |cx| {
+        // The watcher stops when dropped, so it lives as long as this task.
+        let _watcher = watcher;
+        while rx.next().await.is_some() {
+            cx.background_executor().timer(Duration::from_millis(200)).await;
+            while rx.try_recv().is_ok() {}
+            cx.update(load_user_themes);
+        }
+    })
+    .detach();
+}
+
+/// Write a copy of a family's theme file into the themes folder as a
+/// starting point for the user's own, and return its path. The copy gets
+/// its own set and theme names so it lists apart from the original.
+pub fn save_theme_copy(family: &ThemeFamily, cx: &App) -> Result<PathBuf> {
+    let mut value: serde_json::Value = match family {
+        ThemeFamily::User(name) => {
+            let set = UserThemes::global(cx).get(name).context("theme file is gone")?;
+            serde_json::from_str(&std::fs::read_to_string(&set.file)?)?
+        }
+        _ => match family.bundled_file() {
+            Some(json) => serde_json::from_str(json)?,
+            None => {
+                let registry = ThemeRegistry::global(cx);
+                let set = ThemeSet {
+                    name: "Default".into(),
+                    author: None,
+                    url: None,
+                    themes: vec![
+                        registry.default_light_theme().as_ref().clone(),
+                        registry.default_dark_theme().as_ref().clone(),
+                    ],
+                };
+                let mut v = serde_json::to_value(&set)?;
+                strip_nulls(&mut v);
+                v
+            }
+        },
+    };
+    let base = format!("{} copy", family.label());
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("$schema".into(), format!("./{THEME_SCHEMA_FILE}").into());
+        obj.insert("name".into(), base.clone().into());
+        obj.remove("author");
+        obj.remove("url");
+        if let Some(themes) = obj.get_mut("themes").and_then(|t| t.as_array_mut()) {
+            for theme in themes {
+                if let Some(t) = theme.as_object_mut() {
+                    let old = t.get("name").and_then(|n| n.as_str()).unwrap_or("Theme");
+                    t.insert("name".into(), format!("{old} copy").into());
+                    t.insert("is_default".into(), false.into());
+                }
+            }
+        }
+    }
+    let dir = themes_dir();
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let slug: String = base
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let mut path = dir.join(format!("{slug}.json"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{slug}-{n}.json"));
+        n += 1;
+    }
+    let json = serde_json::to_vec_pretty(&value)?;
+    wordy_doc::storage::write_atomic(&path, &json)?;
+    Ok(path)
+}
+
+/// Drop every `null` so a serialised config reads like a hand-written file.
+fn strip_nulls(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(map) => {
+            map.retain(|_, v| !v.is_null());
+            map.values_mut().for_each(strip_nulls);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(strip_nulls),
+        _ => {}
     }
 }
 
@@ -317,17 +649,7 @@ impl Prefs {
         let prefs = Prefs::global(cx).clone();
         cx.set_global(prefs.text.style());
         let mode = prefs.theme_mode(window, cx);
-        let registry = ThemeRegistry::global(cx);
-        let (light, dark) = prefs
-            .theme
-            .names()
-            .and_then(|(l, d)| Some((registry.themes().get(l)?.clone(), registry.themes().get(d)?.clone())))
-            .unwrap_or_else(|| {
-                (
-                    registry.default_light_theme().clone(),
-                    registry.default_dark_theme().clone(),
-                )
-            });
+        let (light, dark) = prefs.theme.configs(cx);
         {
             // A theme file only sets the radius and shadow it names, so put
             // the stock values back before the chosen file is applied over

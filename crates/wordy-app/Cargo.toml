@@ -22,4 +22,6 @@ wordy-export = { path = "../wordy-export" }
 futures = "0.3.34"
 serde.workspace = true
 serde_json.workspace = true
+notify = "7"
+schemars = "1"
 wordy-sync = { version = "0.1.0", path = "../wordy-sync" }
