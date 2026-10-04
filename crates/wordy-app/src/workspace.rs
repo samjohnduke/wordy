@@ -229,6 +229,10 @@ pub struct Workspace {
     focus_mode: bool,
     /// Which docks were open when focus mode started, to restore on exit.
     docks_before_focus: (bool, bool),
+    /// The right dock was open when Settings came to the front; it hides
+    /// while the tab is in front and comes back when another tab is.
+    right_parked: bool,
+    window_handle: AnyWindowHandle,
     typewriter: bool,
     quick_open: Option<QuickOpenState>,
     last_backup: Option<Instant>,
@@ -376,6 +380,8 @@ impl Workspace {
             active: None,
             focus_mode: false,
             docks_before_focus: (true, false),
+            right_parked: false,
+            window_handle: window.window_handle(),
             typewriter: false,
             quick_open: None,
             last_backup: None,
@@ -415,7 +421,7 @@ impl Workspace {
                 .as_ref()
                 .map(|s| s.read(cx).section_shown().label().to_lowercase()),
             settings_front: self.front == Fixed::Settings,
-            reference_open: dock.is_dock_open(DockPlacement::Right),
+            reference_open: dock.is_dock_open(DockPlacement::Right) || self.right_parked,
             reference_pinned: self.reference.read(cx).pinned_id().map(|id| id.to_string()),
             sidebar_open: dock.is_dock_open(DockPlacement::Left),
             sidebar_width: dock.dock_size(DockPlacement::Left).map(f32::from),
@@ -438,9 +444,34 @@ impl Workspace {
             .flatten();
         let was = self.sidebar.read(cx).showing_settings();
         self.sidebar.update(cx, |s, cx| s.set_settings(settings, cx));
-        if was != self.sidebar.read(cx).showing_settings() {
+        let now = self.sidebar.read(cx).showing_settings();
+        if was != now {
             // The tab title lives in the dock's own tab bar.
             self.dock.update(cx, |_, cx| cx.notify());
+            // The right dock is about the document: park it while Settings is
+            // in front and bring it back after. Toggling needs the window,
+            // which not every caller has, so it runs deferred.
+            let want_open = if now {
+                self.right_parked = self.dock.read(cx).is_dock_open(DockPlacement::Right);
+                Some(false)
+            } else {
+                std::mem::take(&mut self.right_parked).then_some(true)
+            };
+            if let Some(want) = want_open {
+                let dock = self.dock.clone();
+                let handle = self.window_handle;
+                cx.defer(move |cx| {
+                    handle
+                        .update(cx, |_, window, cx| {
+                            dock.update(cx, |dock, cx| {
+                                if dock.is_dock_open(DockPlacement::Right) != want {
+                                    dock.toggle_dock(DockPlacement::Right, window, cx);
+                                }
+                            })
+                        })
+                        .ok();
+                });
+            }
         }
         let none_open = self.editors.is_empty() && self.home.is_none() && self.settings.is_none();
         self.empty.update(cx, |e, cx| e.set_shown(none_open, cx));

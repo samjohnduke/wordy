@@ -743,4 +743,7 @@ Themes stay per machine, like fonts and appearance.
 Later the same day the tab's own column of sections moved into the sidebar: while Settings is
 the front tab the left dock lists the pages (tab titled "Settings", Up/Down walk them) in place
 of the space tree, and the tree returns when a document or Home comes to the front. The
-workspace flips the mode in `layout_changed`, which every tab change already reaches.
+workspace flips the mode in `layout_changed`, which every tab change already reaches. The
+right dock (reference and sheet) parks at the same moment if it was open and comes back when
+another tab is in front; the saved layout remembers it as open meanwhile. The toggle needs
+the window, which not every caller has, so it runs deferred through the stored window handle.
